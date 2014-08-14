@@ -1152,7 +1152,7 @@ int tcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
 	int nlen;
 	u8 flags;
 
-	if (WARN_ON(len > skb->len))
+	if (len > skb->len)
 		return -EINVAL;
 
 	nsize = skb_headlen(skb) - len;
