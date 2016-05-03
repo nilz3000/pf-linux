@@ -45,6 +45,10 @@ enum {
 	RWB_MIN_WRITE_SAMPLES	= 3,
 	RWB_MIN_READ_SAMPLES	= 1,
 
+	/*
+	 * If we have this number of consecutive windows with not enough
+	 * information to scale up or down, scale up.
+	 */
 	RWB_UNKNOWN_BUMP	= 5,
 };
 
@@ -87,7 +91,18 @@ static void wb_timestamp(struct rq_wb *rwb, unsigned long *var)
 
 void __wbt_done(struct rq_wb *rwb)
 {
-	int inflight, limit = rwb->wb_normal;
+	int inflight, limit;
+
+	inflight = atomic_dec_return(&rwb->inflight);
+
+	/*
+	 * wbt got disabled with IO in flight. Wake up any potential
+	 * waiters, we don't have to do more than that.
+	 */
+	if (unlikely(!rwb_enabled(rwb))) {
+		wake_up_all(&rwb->wait);
+		return;
+	}
 
 	/*
 	 * If the device does write back caching, drop further down
@@ -99,16 +114,10 @@ void __wbt_done(struct rq_wb *rwb)
 		limit = rwb->wb_normal;
 
 	/*
-	 * Don't wake anyone up if we are above the normal limit. If
-	 * throttling got disabled (limit == 0) with waiters, ensure
-	 * that we wake them up.
+	 * Don't wake anyone up if we are above the normal limit.
 	 */
-	inflight = atomic_dec_return(&rwb->inflight);
-	if (limit && inflight >= limit) {
-		if (!rwb->wb_max)
-			wake_up_all(&rwb->wait);
+	if (inflight && inflight >= limit)
 		return;
-	}
 
 	if (waitqueue_active(&rwb->wait)) {
 		int diff = limit - inflight;
@@ -150,14 +159,30 @@ static void calc_wb_limits(struct rq_wb *rwb)
 		return;
 	}
 
-	depth = min_t(unsigned int, RWB_MAX_DEPTH, rwb->queue_depth);
-
 	/*
-	 * Reduce max depth by 50%, and re-calculate normal/bg based on that
+	 * For QD=1 devices, this is a special case. It's important for those
+	 * to have one request ready when one completes, so force a depth of
+	 * 2 for those devices. On the backend, it'll be a depth of 1 anyway,
+	 * since the device can't have more than that in flight. If we're
+	 * scaling down, then keep a setting of 1/1/1.
 	 */
-	rwb->wb_max = 1 + ((depth - 1) >> min(31U, rwb->scale_step));
-	rwb->wb_normal = (rwb->wb_max + 1) / 2;
-	rwb->wb_background = (rwb->wb_max + 3) / 4;
+	if (rwb->queue_depth == 1) {
+		if (rwb->scale_step)
+			rwb->wb_max = rwb->wb_normal = 1;
+		else
+			rwb->wb_max = rwb->wb_normal = 2;
+		rwb->wb_background = 1;
+	} else {
+		depth = min_t(unsigned int, RWB_MAX_DEPTH, rwb->queue_depth);
+
+		/*
+		 * Set our max/normal/bg queue depths based on how far
+		 * we have scaled down (->scale_step).
+		 */
+		rwb->wb_max = 1 + ((depth - 1) >> min(31U, rwb->scale_step));
+		rwb->wb_normal = (rwb->wb_max + 1) / 2;
+		rwb->wb_background = (rwb->wb_max + 3) / 4;
+	}
 }
 
 static bool inline stat_sample_valid(struct blk_rq_stat *stat)
@@ -196,7 +221,11 @@ static int __latency_exceeded(struct rq_wb *rwb, struct blk_rq_stat *stat)
 	/*
 	 * If our stored sync issue exceeds the window size, or it
 	 * exceeds our min target AND we haven't logged any entries,
-	 * flag the latency as exceeded.
+	 * flag the latency as exceeded. wbt works off completion latencies,
+	 * but for a flooded device, a single sync IO can take a long time
+	 * to complete after being issued. If this time exceeds our
+	 * monitoring window AND we didn't see any other completions in that
+	 * window, then count that sync IO as a violation of the latency.
 	 */
 	thislat = rwb_sync_issue_lat(rwb);
 	if (thislat > rwb->cur_win_nsec ||
@@ -462,6 +491,14 @@ void wbt_issue(struct rq_wb *rwb, struct wb_issue_stat *stat)
 
 	wbt_issue_stat_set_time(stat);
 
+	/*
+	 * Track sync issue, in case it takes a long time to complete. Allows
+	 * us to react quicker, if a sync IO takes a long time to complete.
+	 * Note that this is just a hint. 'stat' can go away when the
+	 * request completes, so it's important we never dereference it. We
+	 * only use the address to compare with, which is why we store the
+	 * sync_issue time locally.
+	 */
 	if (!wbt_tracked(stat) && !rwb->sync_issue) {
 		rwb->sync_cookie = stat;
 		rwb->sync_issue = wbt_issue_stat_get_time(stat);
@@ -491,6 +528,13 @@ void wbt_set_write_cache(struct rq_wb *rwb, bool write_cache_on)
 	if (rwb)
 		rwb->wc = write_cache_on;
 }
+
+void wbt_disable(struct rq_wb *rwb)
+{
+	rwb->win_nsec = rwb->min_lat_nsec = 0;
+	wbt_update_limits(rwb);
+}
+EXPORT_SYMBOL_GPL(wbt_disable);
 
 struct rq_wb *wbt_init(struct backing_dev_info *bdi, struct wb_stat_ops *ops,
 		       void *ops_data)
