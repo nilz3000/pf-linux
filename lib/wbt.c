@@ -531,6 +531,7 @@ void wbt_set_write_cache(struct rq_wb *rwb, bool write_cache_on)
 
 void wbt_disable(struct rq_wb *rwb)
 {
+	del_timer_sync(&rwb->window_timer);
 	rwb->win_nsec = rwb->min_lat_nsec = 0;
 	wbt_update_limits(rwb);
 }
