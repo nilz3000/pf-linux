@@ -303,7 +303,13 @@ static int multiq_graft(struct Qdisc *sch, unsigned long arg, struct Qdisc *new,
 	if (new == NULL)
 		new = &noop_qdisc;
 
-	*old = qdisc_replace(sch, new, &q->queues[band]);
+	sch_tree_lock(sch);
+	*old = q->queues[band];
+	q->queues[band] = new;
+	qdisc_tree_decrease_qlen(*old, (*old)->q.qlen);
+	qdisc_reset(*old);
+	sch_tree_unlock(sch);
+
 	return 0;
 }
 

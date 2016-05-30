@@ -1163,7 +1163,14 @@ static int htb_graft(struct Qdisc *sch, unsigned long arg, struct Qdisc *new,
 				     cl->common.classid)) == NULL)
 		return -ENOBUFS;
 
-	*old = qdisc_replace(sch, new, &cl->un.leaf.q);
+	sch_tree_lock(sch);
+	*old = cl->un.leaf.q;
+	cl->un.leaf.q = new;
+	if (*old != NULL) {
+		qdisc_tree_decrease_qlen(*old, (*old)->q.qlen);
+		qdisc_reset(*old);
+	}
+	sch_tree_unlock(sch);
 	return 0;
 }
 

@@ -617,7 +617,11 @@ static int qfq_graft_class(struct Qdisc *sch, unsigned long arg,
 			new = &noop_qdisc;
 	}
 
-	*old = qdisc_replace(sch, new, &cl->qdisc);
+	sch_tree_lock(sch);
+	qfq_purge_queue(cl);
+	*old = cl->qdisc;
+	cl->qdisc = new;
+	sch_tree_unlock(sch);
 	return 0;
 }
 
