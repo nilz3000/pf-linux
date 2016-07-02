@@ -427,7 +427,7 @@ static void bfq_active_insert(struct bfq_service_tree *st,
 static unsigned short bfq_ioprio_to_weight(int ioprio)
 {
 	BUG_ON(ioprio < 0 || ioprio >= IOPRIO_BE_NR);
-	return IOPRIO_BE_NR * BFQ_WEIGHT_CONVERSION_COEFF - ioprio;
+	return (IOPRIO_BE_NR - ioprio) * BFQ_WEIGHT_CONVERSION_COEFF ;
 }
 
 /**
@@ -1057,7 +1057,7 @@ static void bfq_deactivate_entity(struct bfq_entity *entity, int requeue)
 
 		/*
 		 * If we get here, then the parent is no more backlogged and
-		 * we want to propagate the dequeue upwards.
+		 * we want to propagate the deactivation upwards.
 		 */
 		requeue = 1;
 	}
