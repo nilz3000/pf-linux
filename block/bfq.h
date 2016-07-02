@@ -1,5 +1,5 @@
 /*
- * BFQ-v7r11 for 4.5.0: data structures and common functions prototypes.
+ * BFQ-v7 for 4.7.0: data structures and common functions prototypes.
  *
  * Based on ideas and code from CFQ:
  * Copyright (C) 2003 Jens Axboe <axboe@kernel.dk>
@@ -28,7 +28,7 @@
 
 #define BFQ_DEFAULT_QUEUE_IOPRIO	4
 
-#define BFQ_DEFAULT_GRP_WEIGHT	100
+#define BFQ_WEIGHT_LEGACY_DFL	100
 #define BFQ_DEFAULT_GRP_IOPRIO	0
 #define BFQ_DEFAULT_GRP_CLASS	IOPRIO_CLASS_BE
 
@@ -443,6 +443,10 @@ enum bfq_device_speed {
  * @large_burst: true if a large queue-activation burst is in progress.
  * @burst_list: head of the burst list (as for the above fields, more details
  * 		in the comments to the function bfq_handle_burst).
+ * @strict_guarantees: force device idling whenever needed to provide
+ *		       accurate service guarantees. CAVEAT: this may
+ *		       even increase latencies, in case of useless
+ *		       idling for processes that did stop doing I/O.
  * @low_latency: if set to true, low-latency heuristics are enabled.
  * @bfq_wr_coeff: maximum factor by which the weight of a weight-raised
  *                queue is multiplied.
@@ -520,7 +524,7 @@ struct bfq_data {
 	bool large_burst;
 	struct hlist_head burst_list;
 
-	bool low_latency;
+	bool strict_guarantees, low_latency;
 
 	/* parameters of the low_latency heuristics */
 	unsigned int bfq_wr_coeff;
