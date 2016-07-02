@@ -644,7 +644,7 @@ static void bfq_bic_update_cgroup(struct bfq_io_cq *bic, struct bio *bio)
 	 * do proper throttling of writes. Turn off wbt for that
 	 * case.
 	*/
-	if (blkcg != &blkcg_root) {
+	if (bio_blkcg(bio) != &blkcg_root) {
 		struct request_queue *q = bfqd->queue;
 
 		if (q->rq_wb)
