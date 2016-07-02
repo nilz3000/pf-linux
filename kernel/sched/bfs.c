@@ -3824,6 +3824,9 @@ pick_other_cpu_stick_task(int cpu, struct rq *rq)
 	int tcpu;
 	struct cpumask other_preemptable_mask;
 
+	if (!cpumask_test_cpu(cpu, &grq.non_scaled_cpumask))
+		return rq->idle;
+
 	cpumask_copy(&other_preemptable_mask, &grq.cpu_preemptable_mask);
 	cpumask_clear_cpu(cpu, &other_preemptable_mask);
 
