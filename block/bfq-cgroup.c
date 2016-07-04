@@ -608,7 +608,7 @@ static struct bfq_group *__bfq_bic_change_cgroup(struct bfq_data *bfqd,
 			bfq_log_bfqq(bfqd, async_bfqq,
 				     "bic_change_group: %p %d",
 				     async_bfqq,
-				     atomic_read(&async_bfqq->ref));
+				     async_bfqq->ref);
 			bfq_put_queue(async_bfqq);
 		}
 	}
@@ -630,17 +630,18 @@ static void bfq_bic_update_cgroup(struct bfq_io_cq *bic, struct bio *bio)
 
 	rcu_read_lock();
 	serial_nr = bio_blkcg(bio)->css.serial_nr;
-	rcu_read_unlock();
 
 	/*
 	 * Check whether blkcg has changed.  The condition may trigger
 	 * spuriously on a newly created cic but there's no harm.
 	 */
 	if (unlikely(!bfqd) || likely(bic->blkcg_serial_nr == serial_nr))
-		return;
+		goto out;
 
 	bfqg = __bfq_bic_change_cgroup(bfqd, bic, bio_blkcg(bio));
 	bic->blkcg_serial_nr = serial_nr;
+out:
+	rcu_read_unlock();
 }
 
 /**
