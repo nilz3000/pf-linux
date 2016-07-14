@@ -139,7 +139,7 @@
 void print_scheduler_version(void)
 {
 	printk(KERN_INFO "BFS CPU scheduler v0.470 by Con Kolivas.\n");
-	printk(KERN_INFO "BFS enhancement patchset v4.6_0470_test3 by Alfred Chen.\n");
+	printk(KERN_INFO "BFS enhancement patchset v4.6_0470_test5 by Alfred Chen.\n");
 }
 
 /* BFS default rr interval in ms */
@@ -1236,8 +1236,10 @@ static inline void cache_task(struct task_struct *p, struct rq *rq)
 static inline bool
 check_task_cached_timeout(struct task_struct *p, struct rq *rq)
 {
-	if (unlikely((0ULL != p->policy_cached_timeout) &&
-		     rq->clock_task > p->policy_cached_timeout)) {
+	if (0ULL == p->policy_cached_timeout)
+		return false;
+
+	if (unlikely(rq->clock_task > p->policy_cached_timeout)) {
 		p->policy_cached_timeout = 0ULL;
 		return false;
 	}
