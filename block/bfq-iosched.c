@@ -4816,6 +4816,7 @@ static struct blkcg_policy blkcg_policy_bfq = {
 static int __init bfq_init(void)
 {
 	int ret;
+	char msg[50] = "BFQ I/O-scheduler: v8-rc4";
 
 	/*
 	 * Can be 0 on HZ < 1000 setups.
@@ -4841,7 +4842,7 @@ static int __init bfq_init(void)
 	T_slow[0] = msecs_to_jiffies(3500);
 	T_slow[1] = msecs_to_jiffies(1500);
 	T_fast[0] = msecs_to_jiffies(8000);
-	T_fast[1] = msecs_to_jiffies(300);
+	T_fast[1] = msecs_to_jiffies(3000);
 
 	/*
 	 * Thresholds that determine the switch between speed classes
@@ -4862,7 +4863,10 @@ static int __init bfq_init(void)
 	if (ret)
 		goto err_pol_unreg;
 
-	pr_info("BFQ I/O-scheduler: v8-rc3");
+#ifdef CONFIG_BFQ_GROUP_IOSCHED
+	strcat(msg, " (with cgroups support)");
+#endif
+	pr_info("%s", msg);
 
 	return 0;
 
