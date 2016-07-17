@@ -1059,11 +1059,11 @@ static bool bfq_bfqq_update_budg_for_activation(struct bfq_data *bfqd,
 
 		BUG_ON(entity->budget < 0);
 		return true;
-	} else {
-		entity->budget = max_t(unsigned long, bfqq->max_budget,
-				       bfq_serv_to_charge(bfqq->next_rq,bfqq));
-		BUG_ON(entity->budget < 0);
 	}
+
+	entity->budget = max_t(unsigned long, bfqq->max_budget,
+			       bfq_serv_to_charge(bfqq->next_rq,bfqq));
+	BUG_ON(entity->budget < 0);
 
 	bfq_clear_bfqq_non_blocking_wait_rq(bfqq);
 	return wr_or_deserves_wr;
@@ -2443,14 +2443,13 @@ static void __bfq_bfqq_recalc_budget(struct bfq_data *bfqd,
 		BUG_ON(reason == BFQ_BFQQ_TOO_IDLE ||
 		       reason == BFQ_BFQQ_NO_MORE_REQUESTS);
 		bfqq->entity.budget = max_t(unsigned long, bfqq->max_budget,
-					    bfq_serv_to_charge(bfqq->next_rq,
-							       bfqq));
+					    bfq_serv_to_charge(next_rq, bfqq));
 		BUG_ON(!bfq_bfqq_busy(bfqq));
 		BUG_ON(RB_EMPTY_ROOT(&bfqq->sort_list));
 	}
 
 	bfq_log_bfqq(bfqd, bfqq, "head sect: %u, new budget %d",
-			bfqq->next_rq ? blk_rq_sectors(bfqq->next_rq) : 0,
+			next_rq ? blk_rq_sectors(next_rq) : 0,
 			bfqq->entity.budget);
 }
 
@@ -3603,7 +3602,7 @@ static void bfq_set_next_ioprio_data(struct bfq_queue *bfqq,
 		break;
 	}
 
-	if (bfqq->new_ioprio < 0 || bfqq->new_ioprio >= IOPRIO_BE_NR) {
+	if (bfqq->new_ioprio >= IOPRIO_BE_NR) {
 		printk(KERN_CRIT "bfq_set_next_ioprio_data: new_ioprio %d\n",
 				 bfqq->new_ioprio);
 		BUG();
@@ -4816,7 +4815,7 @@ static struct blkcg_policy blkcg_policy_bfq = {
 static int __init bfq_init(void)
 {
 	int ret;
-	char msg[50] = "BFQ I/O-scheduler: v8-rc4";
+	char msg[50] = "BFQ I/O-scheduler: v8-rc5";
 
 	/*
 	 * Can be 0 on HZ < 1000 setups.
