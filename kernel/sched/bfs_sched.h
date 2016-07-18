@@ -5,16 +5,36 @@
 #ifndef BFS_SCHED_H
 #define BFS_SCHED_H
 
+struct rq;
+/*
+ * choose task function type definination
+ */
+typedef
+struct task_struct *
+(*SCHED_CHOOSE_TASK_FUNC)(struct rq *rq, struct task_struct *prev,
+			  bool preempt, unsigned long **pswitch_count);
+
 /*
  * This is the main, per-CPU runqueue data structure.
  * This data should only be modified by the local cpu.
  */
 struct rq {
+	/* runqueue lock: */
+	raw_spinlock_t lock;
+
 	struct task_struct *curr, *idle, *stop;
+	struct task_struct *try_preempt_tsk;
+	struct task_struct *preempt_task;
 	struct mm_struct *prev_mm;
 
-	/* Pointer to grq spinlock */
-	raw_spinlock_t *grq_lock;
+	/* choose task func */
+	SCHED_CHOOSE_TASK_FUNC choose_task_func;
+
+	/* whether hold grq.lock in schedule() */
+	bool grq_locked;
+
+	/* switch count */
+	u64 nr_switches;
 
 	/* Stored data about rq->curr to work outside grq lock */
 	u64 rq_deadline;
@@ -23,7 +43,6 @@ struct rq {
 	u64 rq_last_ran;
 	int rq_prio;
 	bool rq_running; /* There is a task running */
-	int soft_affined; /* Running or queued tasks with this set as their rq */
 #ifdef CONFIG_SMT_NICE
 	struct mm_struct *rq_mm;
 	int rq_smt_bias; /* Policy/nice level bias across smt siblings */
@@ -34,24 +53,20 @@ struct rq {
 		iowait_pc, idle_pc;
 	atomic_t nr_iowait;
 
+	/* rq cached counters */
+	unsigned long nr_running;
+	long nr_uninterruptible;
+
 #ifdef CONFIG_SMP
 	int cpu;		/* cpu of this runqueue */
 	bool online;
 	bool scaling; /* This CPU is managed by a scaling CPU freq governor */
+	int schedulable;
 	struct task_struct *sticky_task;
 
 	struct root_domain *rd;
 	struct sched_domain *sd;
 	int *cpu_locality; /* CPU relative cache distance */
-#ifdef CONFIG_SCHED_SMT
-	bool (*siblings_idle)(int cpu);
-	/* See if all smt siblings are idle */
-#endif /* CONFIG_SCHED_SMT */
-#ifdef CONFIG_SCHED_MC
-	bool (*cache_idle)(int cpu);
-	/* See if all cache siblings are idle */
-#endif /* CONFIG_SCHED_MC */
-	u64 last_niffy; /* Last time this RQ updated grq.niffies */
 #endif /* CONFIG_SMP */
 #ifdef CONFIG_IRQ_TIME_ACCOUNTING
 	u64 prev_irq_time;
@@ -63,7 +78,7 @@ struct rq {
 	u64 prev_steal_time_rq;
 #endif /* CONFIG_PARAVIRT_TIME_ACCOUNTING */
 
-	u64 clock, old_clock, last_tick;
+	u64 clock, last_tick;
 	u64 clock_task;
 	bool dither;
 
@@ -105,8 +120,11 @@ extern struct rq *uprq;
 #define cpu_curr(cpu)	((uprq)->curr)
 #else /* CONFIG_SMP */
 DECLARE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
+#define cpu_rq(cpu)		(&per_cpu(runqueues, (cpu)))
 #define this_rq()		this_cpu_ptr(&runqueues)
 #define raw_rq()		raw_cpu_ptr(&runqueues)
+#define task_rq(p)		cpu_rq(task_cpu(p))
+#define cpu_curr(cpu)		(cpu_rq(cpu)->curr)
 #endif /* CONFIG_SMP */
 
 static inline u64 __rq_clock_broken(struct rq *rq)
@@ -116,13 +134,13 @@ static inline u64 __rq_clock_broken(struct rq *rq)
 
 static inline u64 rq_clock(struct rq *rq)
 {
-	lockdep_assert_held(rq->grq_lock);
+	lockdep_assert_held(&rq->lock);
 	return rq->clock;
 }
 
 static inline u64 rq_clock_task(struct rq *rq)
 {
-	lockdep_assert_held(rq->grq_lock);
+	lockdep_assert_held(&rq->lock);
 	return rq->clock_task;
 }
 
@@ -148,12 +166,6 @@ static inline int task_on_rq_queued(struct task_struct *p)
 {
 	return p->on_rq;
 }
-
-#ifdef CONFIG_SMP
-
-extern void set_cpus_allowed_common(struct task_struct *p, const struct cpumask *new_mask);
-
-#endif
 
 #ifdef CONFIG_CPU_IDLE
 static inline void idle_set_state(struct rq *rq,
