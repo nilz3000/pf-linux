@@ -956,6 +956,7 @@ static void __bfq_activate_entity(struct bfq_entity *entity,
 /**
  * bfq_activate_entity - activate an entity and its ancestors if necessary.
  * @entity: the entity to activate.
+ * @non_blocking_wait_rq: true if this entity was waiting for a request
  *
  * Activate @entity and all the entities on the path from it to the root.
  */
@@ -1439,13 +1440,11 @@ static void bfq_add_bfqq_busy(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	bfq_mark_bfqq_busy(bfqq);
 	bfqd->busy_queues++;
 
-	if (!bfqq->dispatched) {
+	if (!bfqq->dispatched)
 		if (bfqq->wr_coeff == 1)
 			bfq_weights_tree_add(bfqd, &bfqq->entity,
 					     &bfqd->queue_weights_tree);
-		if (!blk_queue_nonrot(bfqd->queue))
-			bfqd->busy_in_flight_queues++;
-	}
+
 	if (bfqq->wr_coeff > 1)
 		bfqd->wr_busy_queues++;
 }
