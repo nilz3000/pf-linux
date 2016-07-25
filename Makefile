@@ -1,8 +1,8 @@
 VERSION = 4
 PATCHLEVEL = 7
 SUBLEVEL = 0
-EXTRAVERSION =
-NAME = Psychotic Stoned Sheep
+EXTRAVERSION = -pf1
+NAME = Flood
 
 # *DOCUMENTATION*
 # To see a list of typical targets execute "make help"
