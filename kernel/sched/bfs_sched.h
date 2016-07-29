@@ -195,17 +195,26 @@ static inline struct cpuidle_state *idle_get_state(struct rq *rq)
 #ifdef CONFIG_CPU_FREQ
 DECLARE_PER_CPU(struct update_util_data *, cpufreq_update_util_data);
 
-static inline void cpufreq_trigger(u64 time)
+static inline void cpufreq_trigger(u64 time, unsigned long util)
 {
        struct update_util_data *data;
 
        data = rcu_dereference_sched(*this_cpu_ptr(&cpufreq_update_util_data));
        if (data)
-               data->func(data, time, ULONG_MAX, 0);
+               data->func(data, time, util, 0);
 }
 #else
-static inline void cpufreq_trigger(u64 __maybe_unused time)
+static inline void cpufreq_trigger(u64 time, unsigned long util)
 {
 }
 #endif /* CONFIG_CPU_FREQ */
+
+#ifdef arch_scale_freq_capacity
+#ifndef arch_scale_freq_invariant
+#define arch_scale_freq_invariant()	(true)
+#endif
+#else /* arch_scale_freq_capacity */
+#define arch_scale_freq_invariant()	(false)
+#endif
+
 #endif /* BFS_SCHED_H */
