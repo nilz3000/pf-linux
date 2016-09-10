@@ -1,5 +1,5 @@
 /*
- * buffered writeback throttling. losely based on CoDel. We can't drop
+ * buffered writeback throttling. loosely based on CoDel. We can't drop
  * packets for IO scheduling, so the logic is something like this:
  *
  * - Monitor latencies in a defined window of time.
