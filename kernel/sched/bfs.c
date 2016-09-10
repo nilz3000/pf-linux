@@ -7810,7 +7810,8 @@ unsigned long default_scale_smt_power(struct sched_domain *sd, int cpu)
 #ifdef CONFIG_CGROUP_SCHED
 static void sched_free_group(struct task_group *tg)
 {
-	kmem_cache_free(task_group_cache, tg);
+	if (tg)
+		kmem_cache_free(task_group_cache, tg);
 }
 
 /* allocate runqueue etc for a new task group */
@@ -7829,6 +7830,9 @@ void sched_online_group(struct task_group *tg, struct task_group *parent)
 {
 	unsigned long flags;
 
+	if (!tg)
+		return;
+
 	spin_lock_irqsave(&task_group_lock, flags);
 	list_add_rcu(&tg->list, &task_groups);
 
@@ -7843,12 +7847,18 @@ void sched_online_group(struct task_group *tg, struct task_group *parent)
 /* rcu callback to free various structures associated with a task group */
 static void sched_free_group_rcu(struct rcu_head *rhp)
 {
+	if (!rhp)
+		return;
+
 	/* now it should be safe to free those cfs_rqs */
 	sched_free_group(container_of(rhp, struct task_group, rcu));
 }
 
 void sched_destroy_group(struct task_group *tg)
 {
+	if (!tg)
+		return;
+
 	/* wait for possible concurrent references to cfs_rqs complete */
 	call_rcu(&tg->rcu, sched_free_group_rcu);
 }
@@ -7856,6 +7866,9 @@ void sched_destroy_group(struct task_group *tg)
 void sched_offline_group(struct task_group *tg)
 {
 	unsigned long flags;
+
+	if (!tg)
+		return;
 
 	spin_lock_irqsave(&task_group_lock, flags);
 	list_del_rcu(&tg->list);
