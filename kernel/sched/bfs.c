@@ -7339,8 +7339,6 @@ LIST_HEAD(task_groups);
 
 /* Cacheline aligned slab cache for task_group */
 static struct kmem_cache *task_group_cache __read_mostly;
-/* task_group_lock serializes the addition/removal of task groups */
-static DEFINE_SPINLOCK(task_group_lock);
 #endif /* CONFIG_CGROUP_SCHED */
 
 void __init sched_init(void)
@@ -7810,8 +7808,7 @@ unsigned long default_scale_smt_power(struct sched_domain *sd, int cpu)
 #ifdef CONFIG_CGROUP_SCHED
 static void sched_free_group(struct task_group *tg)
 {
-	if (tg)
-		kmem_cache_free(task_group_cache, tg);
+	kmem_cache_free(task_group_cache, tg);
 }
 
 /* allocate runqueue etc for a new task group */
@@ -7828,52 +7825,23 @@ struct task_group *sched_create_group(struct task_group *parent)
 
 void sched_online_group(struct task_group *tg, struct task_group *parent)
 {
-	unsigned long flags;
-
-	if (!tg)
-		return;
-
-	spin_lock_irqsave(&task_group_lock, flags);
-	list_add_rcu(&tg->list, &task_groups);
-
-	WARN_ON(!parent); /* root should already exist */
-
-	tg->parent = parent;
-	INIT_LIST_HEAD(&tg->children);
-	list_add_rcu(&tg->siblings, &parent->children);
-	spin_unlock_irqrestore(&task_group_lock, flags);
 }
 
 /* rcu callback to free various structures associated with a task group */
 static void sched_free_group_rcu(struct rcu_head *rhp)
 {
-	if (!rhp)
-		return;
-
 	/* now it should be safe to free those cfs_rqs */
 	sched_free_group(container_of(rhp, struct task_group, rcu));
 }
 
 void sched_destroy_group(struct task_group *tg)
 {
-	if (!tg)
-		return;
-
 	/* wait for possible concurrent references to cfs_rqs complete */
 	call_rcu(&tg->rcu, sched_free_group_rcu);
 }
 
 void sched_offline_group(struct task_group *tg)
 {
-	unsigned long flags;
-
-	if (!tg)
-		return;
-
-	spin_lock_irqsave(&task_group_lock, flags);
-	list_del_rcu(&tg->list);
-	list_del_rcu(&tg->siblings);
-	spin_unlock_irqrestore(&task_group_lock, flags);
 }
 
 static inline struct task_group *css_tg(struct cgroup_subsys_state *css)
@@ -7921,7 +7889,7 @@ static void cpu_cgroup_fork(struct task_struct *task)
 
 static int cpu_cgroup_can_attach(struct cgroup_taskset *tset)
 {
-		return 0;
+	return 0;
 }
 
 static void cpu_cgroup_attach(struct cgroup_taskset *tset)
