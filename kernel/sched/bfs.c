@@ -532,6 +532,40 @@ static inline bool deadline_after(u64 deadline, u64 time)
 }
 
 /*
+ * Deadline is "now" in niffies + (offset by priority). Setting the deadline
+ * is the key to everything. It distributes cpu fairly amongst tasks of the
+ * same nice value, it proportions cpu according to nice level, it means the
+ * task that last woke up the longest ago has the earliest deadline, thus
+ * ensuring that interactive tasks get low latency on wake up. The CPU
+ * proportion works out to the square of the virtual deadline difference, so
+ * this equation will give nice 19 3% CPU compared to nice 0.
+ */
+static inline u64 prio_deadline_diff(int user_prio)
+{
+	return (prio_ratios[user_prio] * rr_interval * (MS_TO_NS(1) / 128));
+}
+
+static inline u64 task_deadline_diff(struct task_struct *p)
+{
+	return prio_deadline_diff(TASK_USER_PRIO(p));
+}
+
+static inline u64 static_deadline_diff(int static_prio)
+{
+	return prio_deadline_diff(USER_PRIO(static_prio));
+}
+
+static inline int longest_deadline_diff(void)
+{
+	return prio_deadline_diff(39);
+}
+
+static inline int ms_longest_deadline_diff(void)
+{
+	return NS_TO_MS(longest_deadline_diff());
+}
+
+/*
  * A task that is not running or queued will not have a node set.
  * A task that is queued but not running will have a node set.
  * A task that is currently running will have ->on_cpu set but no node set.
@@ -553,14 +587,23 @@ static void dequeue_task(struct task_struct *p)
 	sched_info_dequeued(task_rq(p), p);
 }
 
+#ifdef CONFIG_PREEMPT_RCU
+static bool rcu_read_critical(struct task_struct *p)
+{
+	return p->rcu_read_unlock_special.b.blocked;
+}
+#else /* CONFIG_PREEMPT_RCU */
+#define rcu_read_critical(p) (false)
+#endif /* CONFIG_PREEMPT_RCU */
+
 /*
  * To determine if it's safe for a task of SCHED_IDLEPRIO to actually run as
  * an idle task, we ensure none of the following conditions are met.
  */
 static bool idleprio_suitable(struct task_struct *p)
 {
-	return (!freezing(p) && !signal_pending(p) &&
-		!(task_contributes_to_load(p)) && !(p->flags & (PF_EXITING)));
+	return (!(task_contributes_to_load(p)) && !(p->flags & (PF_EXITING)) &&
+		!signal_pending(p) && !rcu_read_critical(p) && !freezing(p));
 }
 
 /*
@@ -604,9 +647,13 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 		sl_id = p->prio;
 	else {
 		sl_id = p->deadline;
-		/* Set it to cope with 4 left shifts with locality_diff */
-		if (p->prio == IDLE_PRIO)
-			sl_id |= 0x0F00000000000000;
+		if (idleprio_task(p)) {
+			/* Set it to cope with 4 left shifts with locality_diff */
+			if (p->prio == IDLE_PRIO)
+				sl_id |= 0x00FF000000000000;
+			else
+				sl_id += longest_deadline_diff();
+		}
 	}
 	/*
 	 * Some architectures don't have better than microsecond resolution
@@ -1324,7 +1371,7 @@ static void try_preempt(struct task_struct *p, struct rq *this_rq)
 
 		dl = rq->rq_deadline;
 		if (!sched_interactive && pcpu != cpu)
-			dl <<= locality_diff(pcpu, rq);
+			dl >>= locality_diff(pcpu, rq);
 		if (rq_prio > highest_prio ||
 		    deadline_after(dl, latest_deadline)) {
 			latest_deadline = dl;
@@ -1736,12 +1783,14 @@ static inline void init_schedstats(void) {}
  */
 void wake_up_new_task(struct task_struct *p)
 {
-	struct task_struct *parent;
+	struct task_struct *parent, *rq_curr;
+	struct rq *rq, *new_rq;
 	unsigned long flags;
-	struct rq *rq;
+	int cpu;
 
 	parent = p->parent;
 	rq = task_grq_lock(p, &flags);
+	rq_curr = rq->curr;
 
 	/*
 	 * Reinit new task deadline as its creator deadline could have changed
@@ -1749,22 +1798,28 @@ void wake_up_new_task(struct task_struct *p)
 	 */
 	p->deadline = rq->rq_deadline;
 
+	cpu = rq->cpu;
+	/* The new task might not be able to run on the same CPU as rq->curr */
+	if (unlikely(!cpumask_test_cpu(cpu, tsk_cpus_allowed(p)))) {
+		cpu = cpumask_any(tsk_cpus_allowed(p));
+		new_rq = cpu_rq(cpu);
+	} else
+		new_rq = rq;
+
 	/*
 	 * If the task is a new process, current and parent are the same. If
 	 * the task is a new thread in the thread group, it will have much more
 	 * in common with current than with the parent.
 	 */
-	set_task_cpu(p, task_cpu(rq->curr));
+	set_task_cpu(p, cpu);
 
 	/*
 	 * Make sure we do not leak PI boosting priority to the child.
 	 */
-	p->prio = rq->curr->normal_prio;
+	p->prio = rq_curr->normal_prio;
 
 	activate_task(p, rq);
 	trace_sched_wakeup_new(p);
-	if (unlikely(p->policy == SCHED_FIFO))
-		goto after_ts_init;
 
 	/*
 	 * Share the timeslice between parent and child, thus the
@@ -1776,31 +1831,37 @@ void wake_up_new_task(struct task_struct *p)
 	 * is always equal to current->deadline.
 	 */
 	p->last_ran = rq->rq_last_ran;
-	if (likely(rq->rq_time_slice >= RESCHED_US * 2)) {
+	if (likely(rq_curr->policy != SCHED_FIFO)) {
 		rq->rq_time_slice /= 2;
-		p->time_slice = rq->rq_time_slice;
-after_ts_init:
-		if (rq->curr == parent && !suitable_idle_cpus(p)) {
+		if (unlikely(rq->rq_time_slice < RESCHED_US)) {
 			/*
-			 * The VM isn't cloned, so we're in a good position to
-			 * do child-runs-first in anticipation of an exec. This
-			 * usually avoids a lot of COW overhead.
+			 * Forking task has run out of timeslice. Reschedule it and
+			 * start its child with a new time slice and deadline. The
+			 * child will end up running first because its deadline will
+			 * be slightly earlier.
 			 */
-			__set_tsk_resched(parent);
-		} else
-			try_preempt(p, rq);
-	} else {
-		if (rq->curr == parent) {
-			/*
-		 	* Forking task has run out of timeslice. Reschedule it and
-		 	* start its child with a new time slice and deadline. The
-		 	* child will end up running first because its deadline will
-		 	* be slightly earlier.
-		 	*/
 			rq->rq_time_slice = 0;
-			__set_tsk_resched(parent);
+			__set_tsk_resched(rq_curr);
+			time_slice_expired(p);
+			if (suitable_idle_cpus(p))
+				resched_best_idle(p);
+			else if (unlikely(rq != new_rq))
+				try_preempt(p, new_rq);
+		} else {
+			p->time_slice = rq->rq_time_slice;
+			if (rq_curr == parent && rq == new_rq && !suitable_idle_cpus(p)) {
+				/*
+				 * The VM isn't cloned, so we're in a good position to
+				 * do child-runs-first in anticipation of an exec. This
+				 * usually avoids a lot of COW overhead.
+				 */
+				__set_tsk_resched(rq_curr);
+			} else
+				try_preempt(p, new_rq);
 		}
+	} else {
 		time_slice_expired(p);
+		try_preempt(p, new_rq);
 	}
 	task_grq_unlock(&flags);
 }
@@ -3075,40 +3136,6 @@ static inline void preempt_latency_stop(int val) { }
 #endif
 
 /*
- * Deadline is "now" in niffies + (offset by priority). Setting the deadline
- * is the key to everything. It distributes cpu fairly amongst tasks of the
- * same nice value, it proportions cpu according to nice level, it means the
- * task that last woke up the longest ago has the earliest deadline, thus
- * ensuring that interactive tasks get low latency on wake up. The CPU
- * proportion works out to the square of the virtual deadline difference, so
- * this equation will give nice 19 3% CPU compared to nice 0.
- */
-static inline u64 prio_deadline_diff(int user_prio)
-{
-	return (prio_ratios[user_prio] * rr_interval * (MS_TO_NS(1) / 128));
-}
-
-static inline u64 task_deadline_diff(struct task_struct *p)
-{
-	return prio_deadline_diff(TASK_USER_PRIO(p));
-}
-
-static inline u64 static_deadline_diff(int static_prio)
-{
-	return prio_deadline_diff(USER_PRIO(static_prio));
-}
-
-static inline int longest_deadline_diff(void)
-{
-	return prio_deadline_diff(39);
-}
-
-static inline int ms_longest_deadline_diff(void)
-{
-	return NS_TO_MS(longest_deadline_diff());
-}
-
-/*
  * The time_slice is only refilled when it is empty and that is when we set a
  * new deadline.
  */
@@ -3758,8 +3785,8 @@ EXPORT_SYMBOL(default_wake_function);
 void rt_mutex_setprio(struct task_struct *p, int prio)
 {
 	unsigned long flags;
-	int queued, oldprio;
 	struct rq *rq;
+	int oldprio;
 
 	BUG_ON(prio < 0 || prio > MAX_PRIO);
 
@@ -3785,17 +3812,16 @@ void rt_mutex_setprio(struct task_struct *p, int prio)
 
 	trace_sched_pi_setprio(p, prio);
 	oldprio = p->prio;
-	queued = task_queued(p);
-	if (queued)
-		dequeue_task(p);
 	p->prio = prio;
-	if (task_running(p) && prio > oldprio)
-		resched_task(p);
-	if (queued) {
+	if (task_running(p)){
+		if (prio > oldprio)
+			resched_task(p);
+	} else if (task_queued(p)) {
+		dequeue_task(p);
 		enqueue_task(p, rq);
-		try_preempt(p, rq);
+		if (prio < oldprio)
+			try_preempt(p, rq);
 	}
-
 out_unlock:
 	task_grq_unlock(&flags);
 }
@@ -3813,7 +3839,7 @@ static inline void adjust_deadline(struct task_struct *p, int new_prio)
 
 void set_user_nice(struct task_struct *p, long nice)
 {
-	int queued, new_static, old_static;
+	int new_static, old_static;
 	unsigned long flags;
 	struct rq *rq;
 
@@ -3835,16 +3861,14 @@ void set_user_nice(struct task_struct *p, long nice)
 		p->static_prio = new_static;
 		goto out_unlock;
 	}
-	queued = task_queued(p);
-	if (queued)
-		dequeue_task(p);
 
 	adjust_deadline(p, new_static);
 	old_static = p->static_prio;
 	p->static_prio = new_static;
 	p->prio = effective_prio(p);
 
-	if (queued) {
+	if (task_queued(p)) {
+		dequeue_task(p);
 		enqueue_task(p, rq);
 		if (new_static < old_static)
 			try_preempt(p, rq);
@@ -3994,11 +4018,17 @@ static void __setscheduler(struct task_struct *p, struct rq *rq, int policy,
 		p->prio = rt_mutex_get_effective_prio(p, p->normal_prio);
 	} else
 		p->prio = p->normal_prio;
+
 	if (task_running(p)) {
 		reset_rq_task(rq, p);
 		/* Resched only if we might now be preempted */
-		if (p->prio > oldprio || p->rt_priority > oldrtprio)
+		if (p->prio > oldprio || p->rt_priority < oldrtprio)
 			resched_task(p);
+	} else if (task_queued(p)) {
+		dequeue_task(p);
+		enqueue_task(p, rq);
+		if (p->prio < oldprio || p->rt_priority > oldrtprio)
+			try_preempt(p, rq);
 	}
 }
 
@@ -4023,8 +4053,8 @@ __sched_setscheduler(struct task_struct *p, int policy,
 		     const struct sched_param *param, bool user, bool pi)
 {
 	struct sched_param zero_param = { .sched_priority = 0 };
-	int queued, retval, oldpolicy = -1;
 	unsigned long flags, rlim_rtprio = 0;
+	int retval, oldpolicy = -1;
 	int reset_on_fork;
 	struct rq *rq;
 
@@ -4172,14 +4202,7 @@ recheck:
 	update_clocks(rq);
 	p->sched_reset_on_fork = reset_on_fork;
 
-	queued = task_queued(p);
-	if (queued)
-		dequeue_task(p);
 	__setscheduler(p, rq, policy, param->sched_priority, pi);
-	if (queued) {
-		enqueue_task(p, rq);
-		try_preempt(p, rq);
-	}
 	__task_grq_unlock();
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 
@@ -5368,6 +5391,7 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 {
 	const struct cpumask *cpu_valid_mask = cpu_active_mask;
 	bool running_wrong = false;
+	struct cpumask old_mask;
 	bool queued = false;
 	unsigned long flags;
 	struct rq *rq;
@@ -5391,7 +5415,8 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 		goto out;
 	}
 
-	if (cpumask_equal(tsk_cpus_allowed(p), new_mask))
+	cpumask_copy(&old_mask, tsk_cpus_allowed(p));
+	if (cpumask_equal(&old_mask, new_mask))
 		goto out;
 
 	if (!cpumask_intersects(new_mask, cpu_valid_mask)) {
@@ -5428,7 +5453,7 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 		set_task_cpu(p, cpumask_any_and(cpu_valid_mask, new_mask));
 
 out:
-	if (queued)
+	if (queued && !cpumask_subset(new_mask, &old_mask))
 		try_preempt(p, rq);
 	task_grq_unlock(&flags);
 
@@ -7315,7 +7340,6 @@ static inline void normalise_rt_tasks(void)
 	struct task_struct *g, *p;
 	unsigned long flags;
 	struct rq *rq;
-	int queued;
 
 	read_lock(&tasklist_lock);
 	for_each_process_thread(g, p) {
@@ -7329,15 +7353,7 @@ static inline void normalise_rt_tasks(void)
 			continue;
 
 		rq = task_grq_lock(p, &flags);
-		queued = task_queued(p);
-		if (queued)
-			dequeue_task(p);
 		__setscheduler(p, rq, SCHED_NORMAL, 0, false);
-		if (queued) {
-			enqueue_task(p, rq);
-			try_preempt(p, rq);
-		}
-
 		task_grq_unlock(&flags);
 	}
 	read_unlock(&tasklist_lock);
