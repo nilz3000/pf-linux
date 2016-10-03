@@ -1,8 +1,8 @@
 VERSION = 4
 PATCHLEVEL = 8
 SUBLEVEL = 0
-EXTRAVERSION =
-NAME = Psychotic Stoned Sheep
+EXTRAVERSION = -pf1
+NAME = Wrong Language
 
 # *DOCUMENTATION*
 # To see a list of typical targets execute "make help"
