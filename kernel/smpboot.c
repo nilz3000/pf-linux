@@ -124,10 +124,11 @@ static int smpboot_thread_fn(void *data)
 			__set_current_state(TASK_RUNNING);
 			if (ht->park && td->status == HP_THREAD_ACTIVE) {
 				BUG_ON(td->cpu != smp_processor_id());
+				preempt_enable();
 				ht->park(td->cpu);
 				td->status = HP_THREAD_PARKED;
-			}
-			preempt_enable();
+			} else
+				preempt_enable();
 			kthread_parkme();
 			/* We might have been woken for stop */
 			continue;
