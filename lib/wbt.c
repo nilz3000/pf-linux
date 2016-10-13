@@ -23,6 +23,7 @@
 #include <linux/slab.h>
 #include <linux/backing-dev.h>
 #include <linux/wbt.h>
+#include <linux/swap.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/wbt.h>
@@ -99,18 +100,40 @@ static bool wb_recent_wait(struct rq_wb *rwb)
 	return time_before(jiffies, wb->dirty_sleep + HZ);
 }
 
-void __wbt_done(struct rq_wb *rwb)
+static inline struct rq_wait *get_rq_wait(struct rq_wb *rwb, bool is_kswapd)
 {
+	return &rwb->rq_wait[is_kswapd];
+}
+
+static void rwb_wake_all(struct rq_wb *rwb)
+{
+	int i;
+
+	for (i = 0; i < WBT_NUM_RWQ; i++) {
+		struct rq_wait *rqw = &rwb->rq_wait[i];
+
+		if (waitqueue_active(&rqw->wait))
+			wake_up_all(&rqw->wait);
+	}
+}
+
+void __wbt_done(struct rq_wb *rwb, enum wbt_flags wb_acct)
+{
+	struct rq_wait *rqw;
 	int inflight, limit;
 
-	inflight = atomic_dec_return(&rwb->inflight);
+	if (!(wb_acct & WBT_TRACKED))
+		return;
+
+	rqw = get_rq_wait(rwb, wb_acct & WBT_KSWAPD);
+	inflight = atomic_dec_return(&rqw->inflight);
 
 	/*
 	 * wbt got disabled with IO in flight. Wake up any potential
 	 * waiters, we don't have to do more than that.
 	 */
 	if (unlikely(!rwb_enabled(rwb))) {
-		wake_up_all(&rwb->wait);
+		rwb_wake_all(rwb);
 		return;
 	}
 
@@ -129,11 +152,11 @@ void __wbt_done(struct rq_wb *rwb)
 	if (inflight && inflight >= limit)
 		return;
 
-	if (waitqueue_active(&rwb->wait)) {
+	if (waitqueue_active(&rqw->wait)) {
 		int diff = limit - inflight;
 
 		if (!inflight || diff >= rwb->wb_background / 2)
-			wake_up(&rwb->wait);
+			wake_up(&rqw->wait);
 	}
 }
 
@@ -146,7 +169,7 @@ void wbt_done(struct rq_wb *rwb, struct wb_issue_stat *stat)
 	if (!rwb)
 		return;
 
-	if (!wbt_tracked(stat)) {
+	if (!wbt_is_tracked(stat)) {
 		if (rwb->sync_cookie == stat) {
 			rwb->sync_issue = 0;
 			rwb->sync_cookie = NULL;
@@ -157,7 +180,7 @@ void wbt_done(struct rq_wb *rwb, struct wb_issue_stat *stat)
 		wbt_clear_state(stat);
 	} else {
 		WARN_ON_ONCE(stat == rwb->sync_cookie);
-		__wbt_done(rwb);
+		__wbt_done(rwb, wbt_stat_to_mask(stat));
 		wbt_clear_state(stat);
 	}
 }
@@ -284,7 +307,7 @@ static int __latency_exceeded(struct rq_wb *rwb, struct blk_rq_stat *stat)
 		 * just writes as well.
 		 */
 		if ((stat[1].nr_samples && rwb->stat_ops->is_current(stat)) ||
-		    wb_recent_wait(rwb) || atomic_read(&rwb->inflight))
+		    wb_recent_wait(rwb) || wbt_inflight(rwb))
 			return LAT_UNKNOWN_WRITES;
 		return LAT_UNKNOWN;
 	}
@@ -332,8 +355,7 @@ static void scale_up(struct rq_wb *rwb)
 
 	rwb->scaled_max = calc_wb_limits(rwb);
 
-	if (waitqueue_active(&rwb->wait))
-		wake_up_all(&rwb->wait);
+	rwb_wake_all(rwb);
 
 	rwb_trace_step(rwb, "step up");
 }
@@ -392,9 +414,8 @@ static void rwb_arm_timer(struct rq_wb *rwb)
 static void wb_timer_fn(unsigned long data)
 {
 	struct rq_wb *rwb = (struct rq_wb *) data;
-	int status, inflight;
-
-	inflight = atomic_read(&rwb->inflight);
+	unsigned int inflight = wbt_inflight(rwb);
+	int status;
 
 	status = latency_exceeded(rwb);
 
@@ -450,8 +471,7 @@ void wbt_update_limits(struct rq_wb *rwb)
 	rwb->scaled_max = false;
 	calc_wb_limits(rwb);
 
-	if (waitqueue_active(&rwb->wait))
-		wake_up_all(&rwb->wait);
+	rwb_wake_all(rwb);
 }
 
 static bool close_io(struct rq_wb *rwb)
@@ -469,13 +489,14 @@ static inline unsigned int get_limit(struct rq_wb *rwb, unsigned long rw)
 	unsigned int limit;
 
 	/*
-	 * At this point we know it's a buffered write. If REQ_SYNC is
-	 * set, then it's WB_SYNC_ALL writeback, and we'll use the max
-	 * limit for that. If the write is marked as a background write,
-	 * then use the idle limit, or go to normal if we haven't had
-	 * competing IO for a bit.
+	 * At this point we know it's a buffered write. If this is
+	 * kswapd trying to free memory, or REQ_SYNC is set, set, then
+	 * it's WB_SYNC_ALL writeback, and we'll use the max limit for
+	 * that. If the write is marked as a background write, then use
+	 * the idle limit, or go to normal if we haven't had competing
+	 * IO for a bit.
 	 */
-	if ((rw & REQ_HIPRIO) || wb_recent_wait(rwb))
+	if ((rw & REQ_HIPRIO) || wb_recent_wait(rwb) || current_is_kswapd())
 		limit = rwb->wb_max;
 	else if ((rw & REQ_BG) || close_io(rwb)) {
 		/*
@@ -489,7 +510,8 @@ static inline unsigned int get_limit(struct rq_wb *rwb, unsigned long rw)
 	return limit;
 }
 
-static inline bool may_queue(struct rq_wb *rwb, unsigned long rw)
+static inline bool may_queue(struct rq_wb *rwb, struct rq_wait *rqw,
+			     unsigned long rw)
 {
 	/*
 	 * inc it here even if disabled, since we'll dec it at completion.
@@ -497,11 +519,11 @@ static inline bool may_queue(struct rq_wb *rwb, unsigned long rw)
 	 * and someone turned it off at the same time.
 	 */
 	if (!rwb_enabled(rwb)) {
-		atomic_inc(&rwb->inflight);
+		atomic_inc(&rqw->inflight);
 		return true;
 	}
 
-	return atomic_inc_below(&rwb->inflight, get_limit(rwb, rw));
+	return atomic_inc_below(&rqw->inflight, get_limit(rwb, rw));
 }
 
 /*
@@ -510,16 +532,17 @@ static inline bool may_queue(struct rq_wb *rwb, unsigned long rw)
  */
 static void __wbt_wait(struct rq_wb *rwb, unsigned long rw, spinlock_t *lock)
 {
+	struct rq_wait *rqw = get_rq_wait(rwb, current_is_kswapd());
 	DEFINE_WAIT(wait);
 
-	if (may_queue(rwb, rw))
+	if (may_queue(rwb, rqw, rw))
 		return;
 
 	do {
-		prepare_to_wait_exclusive(&rwb->wait, &wait,
+		prepare_to_wait_exclusive(&rqw->wait, &wait,
 						TASK_UNINTERRUPTIBLE);
 
-		if (may_queue(rwb, rw))
+		if (may_queue(rwb, rqw, rw))
 			break;
 
 		if (lock)
@@ -531,7 +554,7 @@ static void __wbt_wait(struct rq_wb *rwb, unsigned long rw, spinlock_t *lock)
 			spin_lock_irq(lock);
 	} while (1);
 
-	finish_wait(&rwb->wait, &wait);
+	finish_wait(&rqw->wait, &wait);
 }
 
 static inline bool wbt_should_throttle(struct rq_wb *rwb, unsigned int rw)
@@ -561,7 +584,7 @@ static inline bool wbt_should_throttle(struct rq_wb *rwb, unsigned int rw)
  */
 unsigned int wbt_wait(struct rq_wb *rwb, unsigned int rw, spinlock_t *lock)
 {
-	unsigned int ret;
+	unsigned int ret = 0;
 
 	if (!rwb_enabled(rwb))
 		return 0;
@@ -579,6 +602,9 @@ unsigned int wbt_wait(struct rq_wb *rwb, unsigned int rw, spinlock_t *lock)
 
 	if (!timer_pending(&rwb->window_timer))
 		rwb_arm_timer(rwb);
+
+	if (current_is_kswapd())
+		ret |= WBT_KSWAPD;
 
 	return ret | WBT_TRACKED;
 }
@@ -602,14 +628,6 @@ void wbt_issue(struct rq_wb *rwb, struct wb_issue_stat *stat)
 		rwb->sync_cookie = stat;
 		rwb->sync_issue = wbt_issue_stat_get_time(stat);
 	}
-}
-
-void wbt_track(struct wb_issue_stat *stat, unsigned int wb_acct)
-{
-	if (wb_acct & WBT_TRACKED)
-		wbt_mark_tracked(stat);
-	else if (wb_acct & WBT_READ)
-		wbt_mark_read(stat);
 }
 
 void wbt_requeue(struct rq_wb *rwb, struct wb_issue_stat *stat)
@@ -650,6 +668,7 @@ struct rq_wb *wbt_init(struct backing_dev_info *bdi, struct wb_stat_ops *ops,
 		       void *ops_data)
 {
 	struct rq_wb *rwb;
+	int i;
 
 	if (!ops->get || !ops->is_current || !ops->clear)
 		return ERR_PTR(-EINVAL);
@@ -658,15 +677,18 @@ struct rq_wb *wbt_init(struct backing_dev_info *bdi, struct wb_stat_ops *ops,
 	if (!rwb)
 		return ERR_PTR(-ENOMEM);
 
-	atomic_set(&rwb->inflight, 0);
-	init_waitqueue_head(&rwb->wait);
+	for (i = 0; i < WBT_NUM_RWQ; i++) {
+		atomic_set(&rwb->rq_wait[i].inflight, 0);
+		init_waitqueue_head(&rwb->rq_wait[i].wait);
+	}
+
 	setup_timer(&rwb->window_timer, wb_timer_fn, (unsigned long) rwb);
 	rwb->wc = 1;
 	rwb->queue_depth = RWB_DEF_DEPTH;
 	rwb->last_comp = rwb->last_issue = jiffies;
 	rwb->bdi = bdi;
 	rwb->win_nsec = RWB_WINDOW_NSEC;
-	rwb->stat_ops = ops,
+	rwb->stat_ops = ops;
 	rwb->ops_data = ops_data;
 	wbt_update_limits(rwb);
 	return rwb;
