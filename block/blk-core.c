@@ -1747,8 +1747,7 @@ get_rq:
 	 */
 	req = get_request(q, bio_data_dir(bio), rw_flags, bio, GFP_NOIO);
 	if (IS_ERR(req)) {
-		if (wb_acct & WBT_TRACKED)
-			__wbt_done(q->rq_wb);
+		__wbt_done(q->rq_wb, wb_acct);
 		bio->bi_error = PTR_ERR(req);
 		bio_endio(bio);
 		goto out_unlock;
