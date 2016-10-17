@@ -1,9 +1,14 @@
 #include <linux/sched.h>
 #include <linux/cpuidle.h>
+#include <linux/skip_list.h>
 #include <linux/stop_machine.h>
 
-#ifndef BFS_SCHED_H
-#define BFS_SCHED_H
+#ifndef MUQSS_SCHED_H
+#define MUQSS_SCHED_H
+
+/* task_struct::on_rq states: */
+#define TASK_ON_RQ_QUEUED	1
+#define TASK_ON_RQ_MIGRATING	2
 
 /*
  * This is the main, per-CPU runqueue data structure.
@@ -13,16 +18,20 @@ struct rq {
 	struct task_struct *curr, *idle, *stop;
 	struct mm_struct *prev_mm;
 
-	/* Pointer to grq spinlock */
-	raw_spinlock_t *grq_lock;
+	raw_spinlock_t lock;
 
-	/* Stored data about rq->curr to work outside grq lock */
+	/* Stored data about rq->curr to work outside rq lock */
 	u64 rq_deadline;
-	unsigned int rq_policy;
-	int rq_time_slice;
-	u64 rq_last_ran;
 	int rq_prio;
-	int soft_affined; /* Running or queued tasks with this set as their rq */
+
+	/* Best queued id for use outside lock */
+	u64 best_key;
+
+	unsigned long last_scheduler_tick; /* Last jiffy this RQ ticked */
+	unsigned long last_jiffy; /* Last jiffy this RQ updated rq clock */
+	u64 niffies; /* Last time this RQ updated rq clock */
+	u64 last_niffy; /* Last niffies as updated by local clock */
+
 	u64 load_update; /* When we last updated load */
 	unsigned long load_avg; /* Rolling load average */
 #ifdef CONFIG_SMT_NICE
@@ -35,7 +44,11 @@ struct rq {
 		iowait_pc, idle_pc;
 	atomic_t nr_iowait;
 
+	skiplist_node node;
+	skiplist *sl;
 #ifdef CONFIG_SMP
+	struct task_struct *preempt; /* Preempt triggered on this task */
+
 	int cpu;		/* cpu of this runqueue */
 	bool online;
 
@@ -43,6 +56,7 @@ struct rq {
 	struct sched_domain *sd;
 	int *cpu_locality; /* CPU relative cache distance */
 	struct rq **rq_order; /* RQs ordered by relative cache distance */
+
 #ifdef CONFIG_SCHED_SMT
 	cpumask_t thread_mask;
 	bool (*siblings_idle)(struct rq *rq);
@@ -53,7 +67,6 @@ struct rq {
 	bool (*cache_idle)(struct rq *rq);
 	/* See if all cache siblings are idle */
 #endif /* CONFIG_SCHED_MC */
-	u64 last_niffy; /* Last time this RQ updated grq.niffies */
 #endif /* CONFIG_SMP */
 #ifdef CONFIG_IRQ_TIME_ACCOUNTING
 	u64 prev_irq_time;
@@ -67,7 +80,10 @@ struct rq {
 
 	u64 clock, old_clock, last_tick;
 	u64 clock_task;
-	bool dither;
+	int dither;
+
+	int iso_ticks;
+	bool iso_refractory;
 
 #ifdef CONFIG_SCHEDSTATS
 
@@ -111,6 +127,41 @@ DECLARE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 #define raw_rq()		raw_cpu_ptr(&runqueues)
 #endif /* CONFIG_SMP */
 
+/*
+ * {de,en}queue flags:
+ *
+ * DEQUEUE_SLEEP  - task is no longer runnable
+ * ENQUEUE_WAKEUP - task just became runnable
+ *
+ * SAVE/RESTORE - an otherwise spurious dequeue/enqueue, done to ensure tasks
+ *                are in a known state which allows modification. Such pairs
+ *                should preserve as much state as possible.
+ *
+ * MOVE - paired with SAVE/RESTORE, explicitly does not preserve the location
+ *        in the runqueue.
+ *
+ * ENQUEUE_HEAD      - place at front of runqueue (tail if not specified)
+ * ENQUEUE_REPLENISH - CBS (replenish runtime and postpone deadline)
+ * ENQUEUE_MIGRATED  - the task was migrated during wakeup
+ *
+ */
+
+#define DEQUEUE_SLEEP		0x01
+#define DEQUEUE_SAVE		0x02 /* matches ENQUEUE_RESTORE */
+#define DEQUEUE_MOVE		0x04 /* matches ENQUEUE_MOVE */
+
+#define ENQUEUE_WAKEUP		0x01
+#define ENQUEUE_RESTORE		0x02
+#define ENQUEUE_MOVE		0x04
+
+#define ENQUEUE_HEAD		0x08
+#define ENQUEUE_REPLENISH	0x10
+#ifdef CONFIG_SMP
+#define ENQUEUE_MIGRATED	0x20
+#else
+#define ENQUEUE_MIGRATED	0x00
+#endif
+
 static inline u64 __rq_clock_broken(struct rq *rq)
 {
 	return READ_ONCE(rq->clock);
@@ -118,13 +169,13 @@ static inline u64 __rq_clock_broken(struct rq *rq)
 
 static inline u64 rq_clock(struct rq *rq)
 {
-	lockdep_assert_held(rq->grq_lock);
+	lockdep_assert_held(&rq->lock);
 	return rq->clock;
 }
 
 static inline u64 rq_clock_task(struct rq *rq)
 {
-	lockdep_assert_held(rq->grq_lock);
+	lockdep_assert_held(&rq->lock);
 	return rq->clock_task;
 }
 
@@ -158,11 +209,6 @@ static inline void unregister_sched_domain_sysctl(void)
 #endif
 
 static inline void sched_ttwu_pending(void) { }
-
-static inline int task_on_rq_queued(struct task_struct *p)
-{
-	return p->on_rq;
-}
 
 #ifdef CONFIG_SMP
 
@@ -221,4 +267,4 @@ static inline void cpufreq_trigger(u64 time, unsigned long util)
 #define arch_scale_freq_invariant()	(false)
 #endif
 
-#endif /* BFS_SCHED_H */
+#endif /* MUQSS_SCHED_H */
