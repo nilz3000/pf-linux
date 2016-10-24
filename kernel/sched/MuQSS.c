@@ -135,7 +135,7 @@
 
 void print_scheduler_version(void)
 {
-	printk(KERN_INFO "MuQSS CPU scheduler v0.115 by Con Kolivas.\n");
+	printk(KERN_INFO "MuQSS CPU scheduler v0.116 by Con Kolivas.\n");
 }
 
 /*
@@ -3529,7 +3529,7 @@ void scheduler_tick(void)
 	struct rq *rq = cpu_rq(cpu);
 
 	sched_clock_tick();
-	update_rq_clock(rq);
+	update_clocks(rq);
 	update_load_avg(rq);
 	update_cpu_clock_tick(rq, rq->curr);
 	if (!rq_idle(rq))
@@ -5241,7 +5241,6 @@ SYSCALL_DEFINE0(sched_yield)
 
 	p = current;
 	rq = this_rq_lock();
-	time_slice_expired(p, rq);
 	schedstat_inc(task_rq(p), yld_count);
 
 	/*
