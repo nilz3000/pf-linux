@@ -78,13 +78,15 @@ sequential workloads considered in our tests. With random workloads,
 and with all the workloads on flash-based devices, BFQ achieves,
 instead, about the same throughput as the other schedulers.
 
-Strong fairness/bandwidth guarantees
+Strong fairness, bandwidth and delay guarantees
 
 BFQ distributes the device throughput, and not just the device time,
-as desired among I/O-bound applications, with any workload and
-regardless of the device parameters. BFQ switches to time-based
-distribution (only) for processes that would otherwise cause a
-throughput loss.
+among I/O-bound applications in proportion their weights, with any
+workload and regardless of the device parameters. From these bandwidth
+guarantees, it is possible to compute tight per-I/O-request delay
+guarantees by a simple formula. If not configured for strict service
+guarantees, BFQ switches to time-based resource sharing (only) for
+applications that would otherwise cause a throughput loss.
 
 1-2 Server systems
 ------------------
@@ -143,11 +145,11 @@ plus a lot of code, are borrowed from CFQ.
       details).
 
       - With respect to idling for service guarantees, if several
-        processes are competing for the device at the same time, but
-        all processes (and groups, after the following commit) have
-        the same weight, then BFQ guarantees the expected throughput
-        distribution without ever idling the device. Throughput is
-        thus as high as possible in this common scenario.
+	processes are competing for the device at the same time, but
+	all processes (and groups, after the following commit) have
+	the same weight, then BFQ guarantees the expected throughput
+	distribution without ever idling the device. Throughput is
+	thus as high as possible in this common scenario.
 
   - If low-latency mode is enabled (default configuration), BFQ
     executes some special heuristics to detect interactive and soft
@@ -177,7 +179,7 @@ plus a lot of code, are borrowed from CFQ.
     mechanism, preemption, to get a high throughput. As such EQM is a
     unified mechanism to achieve a high throughput with interleaved
     I/O.
-  
+
   - Queues are scheduled according to a variant of WF2Q+, named
     B-WF2Q+, and implemented using an augmented rb-tree to preserve an
     O(log N) overall complexity.  See [2] for more details. B-WF2Q+ is
@@ -215,15 +217,15 @@ plus a lot of code, are borrowed from CFQ.
       budget of the queue so as to:
 
       - Let large budgets be eventually assigned to the queues
-        associated with I/O-bound applications performing sequential
-        I/O: in fact, the longer these applications are served once
-        got access to the device, the higher the throughput is.
+	associated with I/O-bound applications performing sequential
+	I/O: in fact, the longer these applications are served once
+	got access to the device, the higher the throughput is.
 
       - Let small budgets be eventually assigned to the queues
-        associated with time-sensitive applications (which typically
-        perform sporadic and short I/O), because, the smaller the
-        budget assigned to a queue waiting for service is, the sooner
-        B-WF2Q+ will serve that queue (Subsec 3.3 in [2]).
+	associated with time-sensitive applications (which typically
+	perform sporadic and short I/O), because, the smaller the
+	budget assigned to a queue waiting for service is, the sooner
+	B-WF2Q+ will serve that queue (Subsec 3.3 in [2]).
 
 - ioprio classes are served in strict priority order, i.e.,
   lower-priority queues are not served as long as there are
@@ -247,7 +249,7 @@ per-process ioprio and weight
 Unless the cgroups interface is used, weights can be assigned to
 processes only indirectly, through I/O priorities, and according to
 the relation: weight = (IOPRIO_BE_NR - ioprio) * 10.
-  
+
 slice_idle
 ----------
 
@@ -419,12 +421,12 @@ wr_max_softrt_rate
 Maximum service rate below which a queue is deemed to be associated
 with a soft real-time application, and is then weight-raised
 accordingly (sectors/sec).
- 
+
 wr_min_idle_time
 
 Minimum idle period after which interactive weight-raising may be
 reactivated for a queue (in ms).
-	 
+
 wr_rt_max_time
 
 Maximum weight-raising duration for soft real-time queues (in ms). The
