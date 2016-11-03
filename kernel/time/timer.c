@@ -1454,7 +1454,7 @@ static unsigned long __next_timer_interrupt(struct timer_base *base)
  * Check, if the next hrtimer event is before the next timer wheel
  * event:
  */
-static u64 cmp_next_hrtimer_event(u64 basem, u64 expires)
+static u64 cmp_next_hrtimer_event(struct timer_base *base, u64 basem, u64 expires)
 {
 	u64 nextevt = hrtimer_get_next_event();
 
@@ -1471,6 +1471,9 @@ static u64 cmp_next_hrtimer_event(u64 basem, u64 expires)
 	 */
 	if (nextevt <= basem)
 		return basem;
+
+	if (nextevt < expires && nextevt - basem <= TICK_NSEC)
+		base->is_idle = false;
 
 	/*
 	 * Round up to the next jiffie. High resolution timers are
@@ -1531,7 +1534,7 @@ u64 get_next_timer_interrupt(unsigned long basej, u64 basem)
 	}
 	spin_unlock(&base->lock);
 
-	return cmp_next_hrtimer_event(basem, expires);
+	return cmp_next_hrtimer_event(base, basem, expires);
 }
 
 /**
@@ -1742,6 +1745,35 @@ signed long __sched schedule_timeout(signed long timeout)
 
 	expire = timeout + jiffies;
 
+#if defined(CONFIG_SCHED_MUQSS)
+	/*
+	 * Use high resolution timers in place of regular ones whenever possible
+	 * on muqss since they are mandatory and low Hz is recommended.
+	 */
+	if (likely(hrtimer_resolution < NSEC_PER_SEC / HZ)) {
+		int delta, secs;
+		ktime_t expires;
+
+		if (!timeout) {
+			current->state = TASK_RUNNING;
+			goto out;
+		}
+		secs = timeout / HZ;
+		delta = timeout % HZ;
+		delta *= NSEC_PER_SEC / HZ;
+		/*
+		 * Round down half a tick to match what it would have been on
+		 * average with regular tick based timers.
+		 */
+		delta -= NSEC_PER_SEC / HZ / 2;
+		expires = ktime_set(secs, delta);
+		if (schedule_hrtimeout(&expires, HRTIMER_MODE_REL_PINNED) == -EINTR)
+			goto out_timeout;
+		timeout = 0;
+		goto out;
+	}
+#endif
+
 	setup_timer_on_stack(&timer, process_timeout, (unsigned long)current);
 	__mod_timer(&timer, expire, false);
 	schedule();
@@ -1749,10 +1781,10 @@ signed long __sched schedule_timeout(signed long timeout)
 
 	/* Remove the timer from the object tracker */
 	destroy_timer_on_stack(&timer);
-
+out_timeout:
 	timeout = expire - jiffies;
 
- out:
+out:
 	return timeout < 0 ? 0 : timeout;
 }
 EXPORT_SYMBOL(schedule_timeout);
