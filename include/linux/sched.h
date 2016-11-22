@@ -437,6 +437,34 @@ extern signed long schedule_timeout_interruptible(signed long timeout);
 extern signed long schedule_timeout_killable(signed long timeout);
 extern signed long schedule_timeout_uninterruptible(signed long timeout);
 extern signed long schedule_timeout_idle(signed long timeout);
+
+#ifdef CONFIG_HIGH_RES_TIMERS
+extern signed long schedule_msec_hrtimeout(signed long timeout);
+extern signed long schedule_min_hrtimeout(void);
+extern signed long schedule_msec_hrtimeout_interruptible(signed long timeout);
+extern signed long schedule_msec_hrtimeout_uninterruptible(signed long timeout);
+#else
+static inline signed long schedule_msec_hrtimeout(signed long timeout)
+{
+	return schedule_timeout(msecs_to_jiffies(timeout));
+}
+
+static inline signed long schedule_min_hrtimeout(void)
+{
+	return schedule_timeout(1);
+}
+
+static inline signed long schedule_msec_hrtimeout_interruptible(signed long timeout)
+{
+	return schedule_timeout_interruptible(msecs_to_jiffies(timeout));
+}
+
+static inline signed long schedule_msec_hrtimeout_uninterruptible(signed long timeout)
+{
+	return schedule_timeout_uninterruptible(msecs_to_jiffies(timeout));
+}
+#endif
+
 asmlinkage void schedule(void);
 extern void schedule_preempt_disabled(void);
 
@@ -3434,7 +3462,7 @@ static inline unsigned int task_cpu(const struct task_struct *p)
 	return 0;
 }
 
-static inline void set_task_cpu(struct task_struct *p, unsigned int cpu)
+static inline void set_task_cpu(struct task_struct *p, int cpu)
 {
 }
 
