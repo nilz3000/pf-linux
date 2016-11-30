@@ -1672,6 +1672,7 @@ static void disable_dmar_iommu(struct intel_iommu *iommu)
 	if (!iommu->domains || !iommu->domain_ids)
 		return;
 
+again:
 	spin_lock_irqsave(&device_domain_lock, flags);
 	list_for_each_entry_safe(info, tmp, &device_domain_list, global) {
 		struct dmar_domain *domain;
@@ -1684,10 +1685,19 @@ static void disable_dmar_iommu(struct intel_iommu *iommu)
 
 		domain = info->domain;
 
-		dmar_remove_one_dev_info(domain, info->dev);
+		__dmar_remove_one_dev_info(info);
 
-		if (!domain_type_is_vm_or_si(domain))
+		if (!domain_type_is_vm_or_si(domain)) {
+			/*
+			 * The domain_exit() function  can't be called under
+			 * device_domain_lock, as it takes this lock itself.
+			 * So release the lock here and re-run the loop
+			 * afterwards.
+			 */
+			spin_unlock_irqrestore(&device_domain_lock, flags);
 			domain_exit(domain);
+			goto again;
+		}
 	}
 	spin_unlock_irqrestore(&device_domain_lock, flags);
 
@@ -2032,7 +2042,7 @@ out_unlock:
 	spin_unlock(&iommu->lock);
 	spin_unlock_irqrestore(&device_domain_lock, flags);
 
-	return 0;
+	return ret;
 }
 
 struct domain_context_mapping_data {
@@ -3169,17 +3179,24 @@ static int __init init_dmars(void)
 			}
 		}
 
-		iommu_flush_write_buffer(iommu);
-		iommu_set_root_entry(iommu);
-		iommu->flush.flush_context(iommu, 0, 0, 0, DMA_CCMD_GLOBAL_INVL);
-		iommu->flush.flush_iotlb(iommu, 0, 0, 0, DMA_TLB_GLOBAL_FLUSH);
-
 		if (!ecap_pass_through(iommu->ecap))
 			hw_pass_through = 0;
 #ifdef CONFIG_INTEL_IOMMU_SVM
 		if (pasid_enabled(iommu))
 			intel_svm_alloc_pasid_tables(iommu);
 #endif
+	}
+
+	/*
+	 * Now that qi is enabled on all iommus, set the root entry and flush
+	 * caches. This is required on some Intel X58 chipsets, otherwise the
+	 * flush_context function will loop forever and the boot hangs.
+	 */
+	for_each_active_iommu(iommu, drhd) {
+		iommu_flush_write_buffer(iommu);
+		iommu_set_root_entry(iommu);
+		iommu->flush.flush_context(iommu, 0, 0, 0, DMA_CCMD_GLOBAL_INVL);
+		iommu->flush.flush_iotlb(iommu, 0, 0, 0, DMA_TLB_GLOBAL_FLUSH);
 	}
 
 	if (iommu_pass_through)
@@ -4175,10 +4192,11 @@ int dmar_check_one_atsr(struct acpi_dmar_header *hdr, void *arg)
 	if (!atsru)
 		return 0;
 
-	if (!atsru->include_all && atsru->devices && atsru->devices_cnt)
+	if (!atsru->include_all && atsru->devices && atsru->devices_cnt) {
 		for_each_active_dev_scope(atsru->devices, atsru->devices_cnt,
 					  i, dev)
 			return -EBUSY;
+	}
 
 	return 0;
 }
