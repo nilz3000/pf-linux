@@ -3366,6 +3366,7 @@ out2:
 	put_page(rmap_item->page);
 out1:
 	slot->pages_scanned++;
+	slot->this_sampled++;
 	if (slot->fully_scanned_round != fully_scanned_round)
 		scanned_virtual_pages++;
 
@@ -3588,6 +3589,11 @@ static inline int vma_rung_down(struct vma_slot *slot)
 static unsigned long cal_dedup_ratio(struct vma_slot *slot)
 {
 	unsigned long ret;
+	unsigned long pages;
+
+	pages = slot->this_sampled;
+	if (!pages)
+		return 0;
 
 	BUG_ON(slot->pages_scanned == slot->last_scanned);
 
@@ -3603,7 +3609,7 @@ static unsigned long cal_dedup_ratio(struct vma_slot *slot)
 		}
 	}
 
-	return ret;
+	return ret * 100 / pages;
 }
 
 /**
@@ -3612,17 +3618,13 @@ static unsigned long cal_dedup_ratio(struct vma_slot *slot)
 static unsigned long cal_dedup_ratio_old(struct vma_slot *slot)
 {
 	unsigned long ret;
-	unsigned long pages_scanned;
+	unsigned long pages;
 
-	pages_scanned = slot->pages_scanned;
-	if (!pages_scanned) {
-		if (uksm_thrash_threshold)
-			return 0;
-		else
-			pages_scanned = slot->pages_scanned;
-	}
+	pages = slot->pages;
+	if (!pages)
+		return 0;
 
-	ret = slot->pages_bemerged * 100 / pages_scanned;
+	ret = slot->pages_bemerged;
 
 	/* Thrashing area filtering */
 	if (ret && uksm_thrash_threshold) {
@@ -3634,7 +3636,7 @@ static unsigned long cal_dedup_ratio_old(struct vma_slot *slot)
 		}
 	}
 
-	return ret;
+	return ret * 100 / pages;
 }
 
 /**
@@ -4384,9 +4386,11 @@ static inline void judge_slot(struct vma_slot *slot)
 
 	slot->pages_merged = 0;
 	slot->pages_cowed = 0;
+	slot->this_sampled = 0;
 
-	if (vma_fully_scanned(slot))
+	if (vma_fully_scanned(slot)) {
 		slot->pages_scanned = 0;
+	}
 
 	slot->last_scanned = slot->pages_scanned;
 
@@ -4672,9 +4676,11 @@ again:
 			struct anon_vma_chain *vmac;
 			struct vm_area_struct *vma;
 
+			cond_resched();
 			anon_vma_lock_read(anon_vma);
 			anon_vma_interval_tree_foreach(vmac, &anon_vma->rb_root,
 						       0, ULONG_MAX) {
+				cond_resched();
 				vma = vmac->vma;
 				address = get_rmap_addr(rmap_item);
 
@@ -5090,8 +5096,9 @@ static ssize_t eval_intervals_store(struct kobject *kobj,
 	unsigned long values[SCAN_LADDER_SIZE];
 	struct scan_rung *rung;
 	char *p, *end = NULL;
+	ssize_t ret = count;
 
-	p = kzalloc(count, GFP_KERNEL);
+	p = kzalloc(count + 2, GFP_KERNEL);
 	if (!p)
 		return -ENOMEM;
 
@@ -5100,15 +5107,19 @@ static ssize_t eval_intervals_store(struct kobject *kobj,
 	for (i = 0; i < SCAN_LADDER_SIZE; i++) {
 		if (i != SCAN_LADDER_SIZE -1) {
 			end = strchr(p, ' ');
-			if (!end)
-				return -EINVAL;
+			if (!end) {
+				ret = -EINVAL;
+				goto out;
+			}
 
 			*end = '\0';
 		}
 
 		err = kstrtoul(p, 10, &values[i]);
-		if (err)
-			return -EINVAL;
+		if (err) {
+			ret = -EINVAL;
+			goto out;
+		}
 
 		p = end + 1;
 	}
@@ -5119,7 +5130,9 @@ static ssize_t eval_intervals_store(struct kobject *kobj,
 		rung->cover_msecs = values[i];
 	}
 
-	return count;
+out:
+	kfree(p);
+	return ret;
 }
 UKSM_ATTR(eval_intervals);
 
