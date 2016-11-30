@@ -67,6 +67,6 @@ extern atomic_t toi_io_workers;
 extern wait_queue_head_t toi_io_queue_flusher;
 extern int toi_bio_queue_flusher_should_finish;
 
-int fs_info_space_needed(void);
+int fs_info_space_needed(int reset);
 
 extern int toi_max_workers;

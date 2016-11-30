@@ -1326,8 +1326,8 @@ int freeze_super(struct super_block *sb)
 		}
 	}
 	/*
-	 * This is just for debugging purposes so that fs can warn if it
-	 * sees write activity when frozen is set to SB_FREEZE_COMPLETE.
+	 * For debugging purposes so that fs can warn if it sees write activity
+	 * when frozen is set to SB_FREEZE_COMPLETE, and for thaw_super().
 	 */
 	sb->s_writers.frozen = SB_FREEZE_COMPLETE;
 	up_write(&sb->s_umount);
@@ -1346,7 +1346,7 @@ int thaw_super(struct super_block *sb)
 	int error;
 
 	down_write(&sb->s_umount);
-	if (sb->s_writers.frozen == SB_UNFROZEN) {
+	if (sb->s_writers.frozen != SB_FREEZE_COMPLETE) {
 		up_write(&sb->s_umount);
 		return -EINVAL;
 	}
@@ -1374,3 +1374,50 @@ out:
 	return 0;
 }
 EXPORT_SYMBOL(thaw_super);
+
+/**
+ * lock_supers -- Stop other processes from modifying the list of super blocks.
+ */
+void take_super_lock() {
+    spin_lock(&sb_lock);
+}
+
+/**
+ * unlock_supers -- Allow other processes to again modify the list of super blocks.
+ */
+void release_super_lock() {
+    spin_unlock(&sb_lock);
+}
+
+/**
+ *	iterate_supers_no_sb_lock - call function for all active superblocks without using sb_lock
+ *
+ *	Note that the callback must work with sb_lock taken and not unlock it.
+ *
+ *	@f: function to call
+ *	@arg: argument to pass to it
+ *
+ *	Scans the superblock list and calls given function, passing it
+ *	locked superblock and given argument.
+ */
+void iterate_supers_no_sb_lock(void (*f)(struct super_block *, void *), void *arg)
+{
+	struct super_block *sb, *p = NULL;
+
+	list_for_each_entry(sb, &super_blocks, s_list) {
+		if (hlist_unhashed(&sb->s_instances))
+			continue;
+		sb->s_count++;
+
+		down_read(&sb->s_umount);
+		if (sb->s_root && (sb->s_flags & MS_BORN))
+			f(sb, arg);
+		up_read(&sb->s_umount);
+
+		if (p)
+			__put_super(p);
+		p = sb;
+	}
+	if (p)
+		__put_super(p);
+}

@@ -1232,24 +1232,28 @@ static inline int save_fs_info(struct fs_info *fs, struct block_device *bdev)
         return (!fs || IS_ERR(fs) || !fs->last_mount_size) ? 0 : 1;
 }
 
-int fs_info_space_needed(void)
+int fs_info_space_needed(int reset)
 {
-        const struct super_block *sb;
-        int result = sizeof(int);
+    static int last_result = 0;
+    const struct super_block *sb;
+    int result = sizeof(int);
 
+    if (!last_result || reset) {
         list_for_each_entry(sb, &super_blocks, s_list) {
-                struct fs_info *fs;
+            struct fs_info *fs;
 
-                if (!sb->s_bdev)
-                        continue;
+            if (!sb->s_bdev)
+                continue;
 
-                fs = fs_info_from_block_dev(sb->s_bdev);
-                if (save_fs_info(fs, sb->s_bdev))
-                        result += 16 + sizeof(dev_t) + sizeof(int) +
-                                fs->last_mount_size;
-                free_fs_info(fs);
+            fs = fs_info_from_block_dev(sb->s_bdev);
+            if (save_fs_info(fs, sb->s_bdev))
+                result += 16 + sizeof(dev_t) + sizeof(int) +
+                    fs->last_mount_size;
+            free_fs_info(fs);
         }
-        return result;
+        last_result = result;
+    }
+    return result;
 }
 
 static int fs_info_num_to_save(void)

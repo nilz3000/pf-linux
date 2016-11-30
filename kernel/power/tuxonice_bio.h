@@ -76,3 +76,5 @@ struct toi_bio_allocator_ops {
         void (*free_storage) (struct toi_bdev_info *);
         unsigned long (*free_unused_storage) (struct toi_bdev_info *, unsigned long used);
 };
+
+extern int toi_bio_register_storage(void);

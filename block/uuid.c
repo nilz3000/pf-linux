@@ -155,7 +155,7 @@ static void uuid_end_bio(struct bio *bio)
 
 
 /**
- * submit - submit BIO request
+ * read_bdev_page - Read a page from a device.
  * @dev: The block device we're using.
  * @page_num: The page we're reading.
  *

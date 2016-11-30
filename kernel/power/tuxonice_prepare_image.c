@@ -428,13 +428,18 @@ static unsigned long main_storage_needed(int use_ecr,
 
 /*
  * Storage needed for the image header, in bytes until the return.
+ *
+ * fs_info_space_needed is saved in a static variable unless we
+ * explicitly want to reset the value (done at the start of a cycle)
+ * as it requires memory allocation that may result in a hang if we're
+ * also trying to free memory.
  */
-unsigned long get_header_storage_needed(void)
+unsigned long get_header_storage_needed(int reset)
 {
         unsigned long bytes = sizeof(struct toi_header) +
                         toi_header_storage_for_modules() +
                         toi_pageflags_space_needed() +
-                        fs_info_space_needed();
+                        fs_info_space_needed(0);
 
         return DIV_ROUND_UP(bytes, PAGE_SIZE);
 }
@@ -858,7 +863,7 @@ static void update_image(int ps2_recalc)
                         toiActiveAllocator->storage_allocated();
 
                 /* Need more header because more storage allocated? */
-                header_storage_needed = get_header_storage_needed();
+                header_storage_needed = get_header_storage_needed(0);
 
         } while (header_storage_needed > old_header_req);
 
@@ -1007,6 +1012,10 @@ int toi_prepare_image(void)
         int result = 1, tries = 1;
 
         main_storage_allocated = 0;
+
+        // Force recalculation of the amount of header storage needed for fs info.
+        fs_info_space_needed(1);
+
         no_ps2_needed = 0;
 
         if (attempt_to_freeze())

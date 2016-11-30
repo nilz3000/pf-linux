@@ -33,6 +33,6 @@ extern void free_attention_list(void);
 #define ZONE_HIGHMEM (MAX_NR_ZONES + 1)
 #endif
 
-unsigned long get_header_storage_needed(void);
+unsigned long get_header_storage_needed(int reset);
 unsigned long any_to_free(int use_image_size_limit);
 int try_allocate_extra_memory(void);

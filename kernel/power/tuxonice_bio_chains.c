@@ -924,10 +924,13 @@ static int apply_header_reservation(void)
         return 0;
 }
 
-static int toi_bio_register_storage(void)
+int toi_bio_register_storage(void)
 {
         int result = 0;
         struct toi_module_ops *this_module;
+
+        toi_message(TOI_BIO, TOI_VERBOSE, 0, "toi_bio_allocate_storage: "
+                "Registering storage.");
 
         list_for_each_entry(this_module, &toi_modules, module_list) {
                 if (!this_module->enabled ||
@@ -962,16 +965,8 @@ int toi_bio_allocate_storage(unsigned long request)
         int no_free = 0;
 
         if (!chain) {
-                int result = toi_bio_register_storage();
-                toi_message(TOI_BIO, TOI_VERBOSE, 0, "toi_bio_allocate_storage: "
-                        "Registering storage.");
-                if (result)
-                        return 0;
-                chain = prio_chain_head;
-                if (!chain) {
-                        printk("TuxOnIce: No storage was registered.\n");
-                        return 0;
-                }
+            printk("TuxOnIce: No storage was registered.\n");
+            return 0;
         }
 
         toi_message(TOI_BIO, TOI_VERBOSE, 0, "toi_bio_allocate_storage: "

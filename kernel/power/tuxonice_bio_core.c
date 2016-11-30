@@ -565,7 +565,7 @@ void debug_broken_header(void)
         printk(KERN_DEBUG "Total used : %d (%ld pages).\n", total_header_bytes,
                         DIV_ROUND_UP(total_header_bytes, PAGE_SIZE));
         printk(KERN_DEBUG "Space needed now : %ld.\n",
-                        get_header_storage_needed());
+                        get_header_storage_needed(0));
         dump_block_chains();
         abort_hibernate(TOI_HEADER_TOO_BIG, "Header reservation too small.");
 }
@@ -1389,6 +1389,11 @@ static int toi_bio_initialise(int starting_cycle)
         if (result)
                 return result;
 
+        result = toi_bio_register_storage();
+
+        if (result)
+            return result;
+
         return get_signature_page();
 }
 
@@ -1875,47 +1880,47 @@ static struct toi_sysfs_data sysfs_params[] = {
 };
 
 struct toi_module_ops toi_blockwriter_ops = {
-        .type                                = WRITER_MODULE,
-        .name                                = "block i/o",
-        .directory                        = "block_io",
-        .module                                = THIS_MODULE,
-        .memory_needed                        = toi_bio_memory_needed,
-        .print_debug_info                = toi_bio_print_debug_stats,
-        .storage_needed                        = toi_bio_storage_needed,
-        .save_config_info                = toi_bio_save_config_info,
-        .load_config_info                = toi_bio_load_config_info,
-        .initialise                        = toi_bio_initialise,
+        .type                           = WRITER_MODULE,
+        .name                           = "block i/o",
+        .directory                      = "block_io",
+        .module                         = THIS_MODULE,
+        .memory_needed                  = toi_bio_memory_needed,
+        .print_debug_info               = toi_bio_print_debug_stats,
+        .storage_needed                 = toi_bio_storage_needed,
+        .save_config_info               = toi_bio_save_config_info,
+        .load_config_info               = toi_bio_load_config_info,
+        .initialise                     = toi_bio_initialise,
         .cleanup                        = toi_bio_cleanup,
-        .post_atomic_restore                = toi_bio_chains_post_atomic,
+        .post_atomic_restore            = toi_bio_chains_post_atomic,
 
         .rw_init                        = toi_rw_init,
-        .rw_cleanup                        = toi_rw_cleanup,
-        .read_page                        = toi_bio_read_page,
-        .write_page                        = toi_bio_write_page,
+        .rw_cleanup                     = toi_rw_cleanup,
+        .read_page                      = toi_bio_read_page,
+        .write_page                     = toi_bio_write_page,
         .rw_header_chunk                = toi_rw_header_chunk,
-        .rw_header_chunk_noreadahead        = toi_rw_header_chunk_noreadahead,
-        .io_flusher                        = bio_io_flusher,
-        .update_throughput_throttle        = update_throughput_throttle,
-        .finish_all_io                        = toi_finish_all_io,
+        .rw_header_chunk_noreadahead    = toi_rw_header_chunk_noreadahead,
+        .io_flusher                     = bio_io_flusher,
+        .update_throughput_throttle     = update_throughput_throttle,
+        .finish_all_io                  = toi_finish_all_io,
 
-        .noresume_reset                        = toi_bio_noresume_reset,
-        .storage_available                 = toi_bio_storage_available,
-        .storage_allocated                = toi_bio_storage_allocated,
-        .reserve_header_space                = toi_bio_reserve_header_space,
-        .allocate_storage                = toi_bio_allocate_storage,
+        .noresume_reset                 = toi_bio_noresume_reset,
+        .storage_available              = toi_bio_storage_available,
+        .storage_allocated              = toi_bio_storage_allocated,
+        .reserve_header_space           = toi_bio_reserve_header_space,
+        .allocate_storage               = toi_bio_allocate_storage,
         .free_unused_storage            = toi_bio_free_unused_storage,
-        .image_exists                        = toi_bio_image_exists,
-        .mark_resume_attempted                = toi_bio_mark_resume_attempted,
-        .write_header_init                = toi_bio_write_header_init,
-        .write_header_cleanup                = toi_bio_write_header_cleanup,
-        .read_header_init                = toi_bio_read_header_init,
-        .read_header_cleanup                = toi_bio_read_header_cleanup,
-        .get_header_version                = toi_bio_get_header_version,
-        .remove_image                        = toi_bio_remove_image,
-        .parse_sig_location                = toi_bio_parse_sig_location,
+        .image_exists                   = toi_bio_image_exists,
+        .mark_resume_attempted          = toi_bio_mark_resume_attempted,
+        .write_header_init              = toi_bio_write_header_init,
+        .write_header_cleanup           = toi_bio_write_header_cleanup,
+        .read_header_init               = toi_bio_read_header_init,
+        .read_header_cleanup            = toi_bio_read_header_cleanup,
+        .get_header_version             = toi_bio_get_header_version,
+        .remove_image                   = toi_bio_remove_image,
+        .parse_sig_location             = toi_bio_parse_sig_location,
 
-        .sysfs_data                        = sysfs_params,
-        .num_sysfs_entries                = sizeof(sysfs_params) /
+        .sysfs_data                     = sysfs_params,
+        .num_sysfs_entries              = sizeof(sysfs_params) /
                 sizeof(struct toi_sysfs_data),
 };
 
