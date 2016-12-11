@@ -80,6 +80,7 @@
 #include <linux/rbtree.h>
 #include <linux/ioprio.h>
 #include "blk.h"
+#include "blk-wbt.h"
 #include <linux/blktrace_api.h>
 #include <linux/hrtimer.h>
 #include <linux/ioprio.h>
