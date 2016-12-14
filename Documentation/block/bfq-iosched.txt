@@ -227,6 +227,12 @@ plus a lot of code, are borrowed from CFQ.
 	budget assigned to a queue waiting for service is, the sooner
 	B-WF2Q+ will serve that queue (Subsec 3.3 in [2]).
 
+- If several processes are competing for the device at the same time,
+  but all processes and groups have the same weight, then BFQ
+  guarantees the expected throughput distribution without ever idling
+  the device. It uses preemption instead. Throughput is then much
+  higher in this common scenario.
+
 - ioprio classes are served in strict priority order, i.e.,
   lower-priority queues are not served as long as there are
   higher-priority queues.  Among queues in the same class, the
@@ -246,9 +252,14 @@ of slice_idle are copied from CFQ too.
 per-process ioprio and weight
 -----------------------------
 
-Unless the cgroups interface is used, weights can be assigned to
-processes only indirectly, through I/O priorities, and according to
-the relation: weight = (IOPRIO_BE_NR - ioprio) * 10.
+Unless the cgroups interface is used (see "4. BFQ group scheduling"),
+weights can be assigned to processes only indirectly, through I/O
+priorities, and according to the relation:
+weight = (IOPRIO_BE_NR - ioprio) * 10.
+
+Beware that, if low-latency is set, then BFQ automatically raises the
+weight of the queues associated with interactive and soft real-time
+applications. Unset this tunable if you need/want to control weights.
 
 slice_idle
 ----------
@@ -363,6 +374,11 @@ default, low latency mode is enabled. If enabled, interactive and soft
 real-time applications are privileged and experience a lower latency,
 as explained in more detail in the description of how BFQ works.
 
+DO NOT enable this mode if you need full control on bandwidth
+distribution. In fact, if it is enabled, then BFQ automatically
+increases the bandwidth share of privileged applications, as the main
+means to guarantee a lower latency to them.
+
 timeout_sync
 ------------
 
@@ -379,7 +395,7 @@ max_budget
 Maximum amount of service, measured in sectors, that can be provided
 to a BFQ queue once it is set in service (of course within the limits
 of the above timeout). According to what said in the description of
-the algoritm, larger values increase the throughput in proportion to
+the algorithm, larger values increase the throughput in proportion to
 the percentage of sequential I/O requests issued. The price of larger
 values is that they coarsen the granularity of short-term bandwidth
 and latency guarantees.
@@ -443,9 +459,9 @@ may be reactivated for an already busy async queue (in ms).
 4. Group scheduling with BFQ
 ============================
 
-BFQ supports both cgroup-v1 and cgroup-v2 io controllers, namely blkio
-and io. In particular, BFQ supports weight-based proportional
-share.
+BFQ supports both cgroups-v1 and cgroups-v2 io controllers, namely
+blkio and io. In particular, BFQ supports weight-based proportional
+share. To activate cgroups support, set BFQ_GROUP_IOSCHED.
 
 4-1 Service guarantees provided
 -------------------------------
@@ -494,6 +510,10 @@ group inside its parent. Available values: 1..10000 (default 100). The
 linear mapping between ioprio and weights, described at the beginning
 of the tunable section, is still valid, but all weights higher than
 IOPRIO_BE_NR*10 are mapped to ioprio 0.
+
+Recall that, if low-latency is set, then BFQ automatically raises the
+weight of the queues associated with interactive and soft real-time
+applications. Unset this tunable if you need/want to control weights.
 
 
 [1] P. Valente, A. Avanzini, "Evolution of the BFQ Storage I/O
