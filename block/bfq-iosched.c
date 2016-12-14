@@ -80,7 +80,6 @@
 #include <linux/rbtree.h>
 #include <linux/ioprio.h>
 #include "blk.h"
-#include "blk-wbt.h"
 #include <linux/blktrace_api.h>
 #include <linux/hrtimer.h>
 #include <linux/ioprio.h>
@@ -2889,18 +2888,6 @@ static void bfq_bic_update_cgroup(struct bfq_io_cq *bic, struct bio *bio)
 	 */
 	if (unlikely(!bfqd) || likely(bic->blkcg_serial_nr == serial_nr))
 		goto out;
-
-	/*
-	* If we have a non-root cgroup, we can depend on that to
-	* do proper throttling of writes. Turn off wbt for that
-	* case.
-	*/
-	if (bio_blkcg(bio) != &blkcg_root) {
-		struct request_queue *q = bfqd->queue;
-
-		if (q->rq_wb)
-			wbt_disable(q->rq_wb);
-	}
 
 	bfqg = __bfq_bic_change_cgroup(bfqd, bic, bio_blkcg(bio));
 	bic->blkcg_serial_nr = serial_nr;
