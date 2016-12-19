@@ -37,11 +37,16 @@ static int bfq_gt(u64 a, u64 b)
 
 static struct bfq_entity *bfq_lookup_next_entity(struct bfq_sched_data *sd);
 
-static void bfq_update_budget(struct bfq_entity *next_in_service)
+/*
+ * Returns true if this budget changes may let next_in_service->parent
+ * become the next_in_service entity for its parent entity.
+ */
+static bool bfq_update_parent_budget(struct bfq_entity *next_in_service)
 {
 	struct bfq_entity *bfqg_entity;
 	struct bfq_group *bfqg;
 	struct bfq_sched_data *group_sd;
+	bool ret = false;
 
 	BUG_ON(!next_in_service);
 
@@ -54,8 +59,13 @@ static void bfq_update_budget(struct bfq_entity *next_in_service)
 	 * as it must never become an in-service entity.
 	 */
 	bfqg_entity = bfqg->my_entity;
-	if (bfqg_entity)
+	if (bfqg_entity) {
+		if (bfqg_entity->budget > next_in_service->budget)
+			ret = true;
 		bfqg_entity->budget = next_in_service->budget;
+	}
+
+	return ret;
 }
 
 static struct bfq_entity *bfq_root_active_entity(struct rb_root *tree)
@@ -68,8 +78,9 @@ static struct bfq_entity *bfq_root_active_entity(struct rb_root *tree)
 /**
  * bfq_update_next_in_service - update sd->next_in_service
  * @sd: sched_data for which to perform the update.
- * @new_entity: if not NULL, pointer to the entity whose activation
- *		triggered the invocation of this function.
+ * @new_entity: if not NULL, pointer to the entity whose activation,
+ *		requeueing or repositionig triggered the invocation of
+ *		this function.
  *
  * This function is called to update sd->next_in_service, which, in
  * its turn, may change as a consequence of the insertion or
@@ -83,29 +94,30 @@ static struct bfq_entity *bfq_root_active_entity(struct rb_root *tree)
  * both the last two activation sub-cases, new_entity points to the
  * just activated or requeued entity.
  *
- * This is a still incomplete version of this function, which always
- * returns true. It will return also false in its complete version, in
- * case either next_in_service has not changed, or next_in_service has
- * changed but in a way that will not influence upper levels.
+ * Returns true if sd->next_in_service changes in such a way that
+ * entity->parent may become the next_in_service for its parent
+ * entity.
  */
 static bool bfq_update_next_in_service(struct bfq_sched_data *sd,
 				       struct bfq_entity *new_entity)
 {
 	struct bfq_entity *next_in_service = sd->next_in_service;
 	struct bfq_queue *bfqq;
+	bool parent_sched_may_change = false;
 
 	/*
-	 * If this update is triggered by the activation of a new
-	 * entity, then a full lookup in the active tree can be
-	 * avoided. In fact, it is enough to check whether the
-	 * just-activated entity has a higher priority of
+	 * If this update is triggered by the activation, requeueing
+	 * or repositiong of an entity that does not coincide with
+	 * sd->next_in_service, then a full lookup in the active tree
+	 * can be avoided. In fact, it is enough to check whether the
+	 * just-modified entity has a higher priority than
 	 * sd->next_in_service, or, even if it has the same priority
 	 * as sd->next_in_service, is eligible and has a lower virtual
 	 * finish time than sd->next_in_service. If this compound
 	 * condition holds, then the new entity becomes the new
 	 * next_in_service. Otherwise no change is needed.
 	 */
-	if (new_entity) {
+	if (new_entity && new_entity != sd->next_in_service) {
 		/*
 		 * Flag used to decide whether to replace
 		 * sd->next_in_service with new_entity. Tentatively
@@ -113,9 +125,6 @@ static bool bfq_update_next_in_service(struct bfq_sched_data *sd,
 		 * sd->next_in_service is NULL.
 		 */
 		bool replace_next = true;
-
-		if (new_entity == sd->next_in_service)
-			return false;
 
 		/*
 		 * If there is already a next_in_service candidate
@@ -151,12 +160,15 @@ static bool bfq_update_next_in_service(struct bfq_sched_data *sd,
 	} else /* invoked because of a deactivation: lookup needed */
 		next_in_service = bfq_lookup_next_entity(sd);
 
+	if (next_in_service) {
+		parent_sched_may_change = !sd->next_in_service ||
+			bfq_update_parent_budget(next_in_service);
+	}
+
 	sd->next_in_service = next_in_service;
 
-	if (next_in_service)
-		bfq_update_budget(next_in_service);
-	else
-		goto exit;
+	if (!next_in_service)
+		return parent_sched_may_change;
 
 	bfqq = bfq_entity_to_bfqq(next_in_service);
 	if (bfqq)
@@ -172,8 +184,7 @@ static bool bfq_update_next_in_service(struct bfq_sched_data *sd,
 			     "update_next_in_service: chosen this entity");
 	}
 #endif
-exit:
-	return true;
+	return parent_sched_may_change;
 }
 
 #else
@@ -188,7 +199,7 @@ static int bfq_update_next_in_service(struct bfq_sched_data *sd)
 	return 0;
 }
 
-static void bfq_update_budget(struct bfq_entity *next_in_service)
+static void bfq_update_parent_budget(struct bfq_entity *next_in_service)
 {
 }
 #endif
@@ -1829,12 +1840,74 @@ static void __bfq_bfqd_reset_in_service(struct bfq_data *bfqd)
 		entity->sched_data->in_service_entity = NULL;
 }
 
+static void set_next_in_service_bfqq(struct bfq_data *bfqd)
+{
+	struct bfq_entity *entity = NULL;
+	struct bfq_queue *bfqq;
+	struct bfq_sched_data *sd = &bfqd->root_group->sched_data;
+
+	BUG_ON(!sd);
+	if (!sd->next_in_service) {
+		bfqd->next_in_service_queue = NULL;
+		return;
+	}
+
+	/* Traverse the path from the root to the in-service leaf entity */
+	for (; sd ; sd = entity->my_sched_data) {
+#ifdef CONFIG_BFQ_GROUP_IOSCHED
+		if (entity) {
+			struct bfq_group *bfqg =
+				container_of(entity, struct bfq_group, entity);
+
+			bfq_log_bfqg(bfqd, bfqg,
+			"set_next_in_service_bfqq: lookup in this group");
+
+			if (!sd->next_in_service)
+				pr_crit(
+			"set_next_in_service_bfqq: lookup in this group");
+		} else {
+			bfq_log_bfqg(bfqd, bfqd->root_group,
+			"set_next_in_service_bfqq: lookup in root group");
+			if (!sd->next_in_service)
+				pr_crit(
+			"set_next_in_service_bfqq: lookup in root group");
+		}
+#endif
+
+		BUG_ON(!sd->next_in_service);
+
+		entity = sd->next_in_service;
+
+		/* Log some information */
+		bfqq = bfq_entity_to_bfqq(entity);
+		if (bfqq)
+			bfq_log_bfqq(bfqd, bfqq,
+			"set_next_in_service_bfqq: this queue, finish %llu",
+				(((entity->finish>>10)*1000)>>10)>>2);
+#ifdef CONFIG_BFQ_GROUP_IOSCHED
+		else {
+			struct bfq_group *bfqg =
+				container_of(entity, struct bfq_group, entity);
+
+			bfq_log_bfqg(bfqd, bfqg,
+			"set_next_in_service_bfqq: this entity, finish %llu",
+				(((entity->finish>>10)*1000)>>10)>>2);
+		}
+#endif
+
+	}
+	BUG_ON(!bfq_entity_to_bfqq(entity));
+
+	bfqd->next_in_service_queue = bfq_entity_to_bfqq(entity);
+}
+
 static void bfq_deactivate_bfqq(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 				bool ins_into_idle_tree, bool expiration)
 {
 	struct bfq_entity *entity = &bfqq->entity;
 
 	bfq_deactivate_entity(entity, ins_into_idle_tree, expiration);
+	set_next_in_service_bfqq(bfqd);
 }
 
 static void bfq_activate_bfqq(struct bfq_data *bfqd, struct bfq_queue *bfqq)
@@ -1849,6 +1922,7 @@ static void bfq_activate_bfqq(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	bfq_activate_requeue_entity(entity, bfq_bfqq_non_blocking_wait_rq(bfqq),
 				    false);
 	bfq_clear_bfqq_non_blocking_wait_rq(bfqq);
+	set_next_in_service_bfqq(bfqd);
 }
 
 static void bfq_requeue_bfqq(struct bfq_data *bfqd, struct bfq_queue *bfqq)
@@ -1857,6 +1931,7 @@ static void bfq_requeue_bfqq(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 
 	bfq_activate_requeue_entity(entity, false,
 				    bfqq == bfqd->in_service_queue);
+	set_next_in_service_bfqq(bfqd);
 }
 
 static void bfqg_stats_update_dequeue(struct bfq_group *bfqg);
