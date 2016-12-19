@@ -658,7 +658,7 @@ static void bfq_forget_entity(struct bfq_service_tree *st,
 
 	BUG_ON(!entity->on_st);
 
-	entity->on_st = 0;
+	entity->on_st = false;
 	st->wsum -= entity->weight;
 	if (bfqq) {
 		sd = entity->sched_data;
@@ -1050,7 +1050,7 @@ static void __bfq_activate_entity(struct bfq_entity *entity,
 		}
 #endif
 		BUG_ON(entity->on_st && !bfqq);
-		entity->on_st = 1;
+		entity->on_st = true;
 	}
 
 	bfq_update_fin_time_enqueue(entity, st, backshifted);
@@ -1205,17 +1205,22 @@ static void bfq_activate_requeue_entity(struct bfq_entity *entity,
  * @ins_into_idle_tree: if false, the entity will not be put into the
  *			idle tree.
  *
- * Deactivate an entity, independently from its previous state.  If the
- * entity was not on a service tree just return, otherwise if it is on
- * any scheduler tree, extract it from that tree, and if necessary
- * and if the caller did not specify @requeue, put it on the idle tree.
+ * Deactivates an entity, independently from its previous state.  Must
+ * be invoked only if entity is on a service tree. Extracts the entity
+ * from that tree, and if necessary and allowed, puts it on the idle
+ * tree.
  */
-static void __bfq_deactivate_entity(struct bfq_entity *entity,
+static bool __bfq_deactivate_entity(struct bfq_entity *entity,
 				    bool ins_into_idle_tree)
 {
 	struct bfq_sched_data *sd = entity->sched_data;
 	struct bfq_service_tree *st = bfq_entity_service_tree(entity);
 	bool was_in_service = entity == sd->in_service_entity;
+
+	if (!entity->on_st) { /* entity never activated, or already inactive */
+		BUG_ON(entity == entity->sched_data->in_service_entity);
+		return false;
+	}
 
 	BUG_ON(was_in_service && entity->tree && entity->tree != &st->active);
 
@@ -1233,6 +1238,8 @@ static void __bfq_deactivate_entity(struct bfq_entity *entity,
 		bfq_forget_entity(st, entity);
 	else
 		bfq_idle_insert(st, entity);
+
+	return true;
 }
 
 /**
@@ -1247,20 +1254,35 @@ static void bfq_deactivate_entity(struct bfq_entity *entity,
 	struct bfq_sched_data *sd;
 	struct bfq_entity *parent;
 
-	if (!entity->on_st) { /* queue never activated, or already inactive */
-		BUG_ON(entity == entity->sched_data->in_service_entity);
-		return;
-	}
-
 	for_each_entity_safe(entity, parent) {
 		sd = entity->sched_data;
 
-		BUG_ON(sd == NULL); /* It would mean that this
-				     * is the root group */
+		BUG_ON(sd == NULL); /*
+				     * It would mean that this is the
+				     * root group.
+				     */
 
-		BUG_ON(entity != sd->in_service_entity && !sd->next_in_service);
+		BUG_ON(expiration && entity != sd->in_service_entity);
 
-		__bfq_deactivate_entity(entity, ins_into_idle_tree);
+		BUG_ON(entity != sd->in_service_entity &&
+		       entity->tree ==
+		       &bfq_entity_service_tree(entity)->active &&
+		       !sd->next_in_service);
+
+		if (!__bfq_deactivate_entity(entity, ins_into_idle_tree)) {
+			/*
+			 * Entity is not any tree any more, so, this
+			 * deactivation is a no-op, and there is
+			 * nothing to change for upper-level entities
+			 * (in case of expiration, this can never
+			 * happen).
+			 */
+			BUG_ON(expiration); /*
+					     * entity cannot be already out of
+					     * any tree
+					     */
+			return;
+		}
 
 		if (sd->next_in_service == entity)
 			/*
@@ -1269,8 +1291,6 @@ static void bfq_deactivate_entity(struct bfq_entity *entity,
 			 * deactivated, a new one must be found.
 			 */
 			bfq_update_next_in_service(sd, NULL);
-		else
-			BUG_ON(!sd->next_in_service && !expiration);
 
 		if (sd->next_in_service) {
 			/*
