@@ -188,44 +188,58 @@ config MK10
 config MBARCELONA
 	bool "AMD Barcelona"
 	---help---
-	  Select this for AMD Barcelona and newer processors.
+	  Select this for AMD Family 10h Barcelona processors.
 
 	  Enables -march=barcelona
 
 config MBOBCAT
 	bool "AMD Bobcat"
 	---help---
-	  Select this for AMD Bobcat processors.
+	  Select this for AMD Family 14h Bobcat processors.
 
 	  Enables -march=btver1
+
+config MJAGUAR
+	bool "AMD Jaguar"
+	---help---
+	  Select this for AMD Family 16h Jaguar processors.
+
+	  Enables -march=btver2
 
 config MBULLDOZER
 	bool "AMD Bulldozer"
 	---help---
-	  Select this for AMD Bulldozer processors.
+	  Select this for AMD Family 15h Bulldozer processors.
 
 	  Enables -march=bdver1
 
 config MPILEDRIVER
 	bool "AMD Piledriver"
 	---help---
-	  Select this for AMD Piledriver processors.
+	  Select this for AMD Family 15h Piledriver processors.
 
 	  Enables -march=bdver2
 
 config MSTEAMROLLER
 	bool "AMD Steamroller"
 	---help---
-	  Select this for AMD Steamroller processors.
+	  Select this for AMD Family 15h Steamroller processors.
 
 	  Enables -march=bdver3
 
-config MJAGUAR
-	bool "AMD Jaguar"
+config MEXCAVATOR
+	bool "AMD Excavator"
 	---help---
-	  Select this for AMD Jaguar processors.
+	  Select this for AMD Family 15h Excavator processors.
 
-	  Enables -march=btver2
+	  Enables -march=bdver4
+
+config MZEN
+	bool "AMD Zen"
+	---help---
+	  Select this for AMD Family 17h Zen processors.
+
+	  Enables -march=znver1
 
 config MCRUSOE
 	bool "Crusoe"
@@ -456,7 +470,7 @@ config X86_INTERNODE_CACHE_SHIFT
 config X86_L1_CACHE_SHIFT
 	int
 	default "7" if MPENTIUM4 || MPSC
-	default "6" if MK7 || MK8 || MK8SSE3 || MK10 || MBARCELONA || MBOBCAT || MBULLDOZER || MPILEDRIVER || MSTEAMROLLER || MJAGUAR || MPENTIUMM || MCORE2 || MNEHALEM || MWESTMERE || MSILVERMONT || MSANDYBRIDGE || MIVYBRIDGE || MHASWELL || MBROADWELL || MSKYLAKE || MNATIVE || MATOM || MVIAC7 || X86_GENERIC || GENERIC_CPU
+	default "6" if MK7 || MK8 || MK8SSE3 || MK10 || MBARCELONA || MBOBCAT || MBULLDOZER || MPILEDRIVER || MSTEAMROLLER || MEXCAVATOR || MZEN || MJAGUAR || MPENTIUMM || MCORE2 || MNEHALEM || MWESTMERE || MSILVERMONT || MSANDYBRIDGE || MIVYBRIDGE || MHASWELL || MBROADWELL || MSKYLAKE || MNATIVE || MATOM || MVIAC7 || X86_GENERIC || GENERIC_CPU
 	default "4" if MELAN || M486 || MGEODEGX1
 	default "5" if MWINCHIP3D || MWINCHIPC6 || MCRUSOE || MEFFICEON || MCYRIXIII || MK6 || MPENTIUMIII || MPENTIUMII || M686 || M586MMX || M586TSC || M586 || MVIAC3_2 || MGEODE_LX
 
@@ -527,7 +541,7 @@ config X86_CMPXCHG64
 # generates cmov.
 config X86_CMOV
 	def_bool y
-	depends on (MK8 || MK8SSE3 || MK10 || MBARCELONA || MBOBCAT || MBULLDOZER || MPILEDRIVER || MSTEAMROLLER || MJAGUAR || MK7 || MCORE2 || MNEHALEM || MWESTMERE || MSILVERMONT || MSANDYBRIDGE || MIVYBRIDGE || MHASWELL || MBROADWELL || MSKYLAKE || MPENTIUM4 || MPENTIUMM || MPENTIUMIII || MPENTIUMII || M686 || MVIAC3_2 || MVIAC7 || MCRUSOE || MEFFICEON || X86_64 || MNATIVE || MATOM || MGEODE_LX)
+	depends on (MK8 || MK8SSE3 || MK10 || MBARCELONA || MBOBCAT || MBULLDOZER || MPILEDRIVER || MSTEAMROLLER || MEXCAVATOR || MZEN || MJAGUAR || MK7 || MCORE2 || MNEHALEM || MWESTMERE || MSILVERMONT || MSANDYBRIDGE || MIVYBRIDGE || MHASWELL || MBROADWELL || MSKYLAKE || MPENTIUM4 || MPENTIUMM || MPENTIUMIII || MPENTIUMII || M686 || MVIAC3_2 || MVIAC7 || MCRUSOE || MEFFICEON || X86_64 || MNATIVE || MATOM || MGEODE_LX)
 
 config X86_MINIMUM_CPU_FAMILY
 	int
