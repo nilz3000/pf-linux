@@ -514,7 +514,6 @@ config X86_USE_3DNOW
 config X86_P6_NOP
 	default n
 	bool "Support for P6_NOPs on Intel chips"
-	depends on X86_64
 	depends on (MCORE2 || MPENTIUM4 || MPSC || MATOM || MNEHALEM || MWESTMERE || MSILVERMONT  || MSANDYBRIDGE || MIVYBRIDGE || MHASWELL || MBROADWELL || MSKYLAKE || MNATIVE)
 	---help---
 	P6_NOPs are a relatively minor optimization that require a family >=
