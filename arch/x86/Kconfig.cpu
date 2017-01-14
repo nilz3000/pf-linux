@@ -115,6 +115,7 @@ config MPENTIUMM
 config MPENTIUM4
 	bool "Pentium-4/Celeron(P4-based)/Pentium-4 M/older Xeon"
 	depends on X86_32
+	select X86_P6_NOP
 	---help---
 	  Select this for Intel Pentium 4 chips.  This includes the
 	  Pentium 4, Pentium D, P4-based Celeron and Xeon, and
