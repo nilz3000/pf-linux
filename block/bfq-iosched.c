@@ -108,7 +108,7 @@ static const int bfq_async_charge_factor = 10;
 /* Default timeout values, in jiffies, approximating CFQ defaults. */
 static const int bfq_timeout = (HZ / 8);
 
-struct kmem_cache *bfq_pool;
+static struct kmem_cache *bfq_pool;
 
 /* Below this threshold (in ns), we consider thinktime immediate. */
 #define BFQ_MIN_TT		(2 * NSEC_PER_MSEC)
@@ -1869,7 +1869,7 @@ static bool bfq_may_be_close_cooperator(struct bfq_queue *bfqq,
  * positives. In case bfqq is weight-raised, such false positives
  * would evidently degrade latency guarantees for bfqq.
  */
-bool wr_from_too_long(struct bfq_queue *bfqq)
+static bool wr_from_too_long(struct bfq_queue *bfqq)
 {
 	return bfqq->wr_coeff > 1 &&
 		time_is_before_jiffies(bfqq->last_wr_start_finish +
@@ -2299,7 +2299,7 @@ static unsigned long bfq_calc_max_budget(struct bfq_data *bfqd)
  * function of the estimated peak rate. See comments on
  * bfq_calc_max_budget(), and on T_slow and T_fast arrays.
  */
-void update_thr_responsiveness_params(struct bfq_data *bfqd)
+static void update_thr_responsiveness_params(struct bfq_data *bfqd)
 {
 	int dev_type = blk_queue_nonrot(bfqd->queue);
 
@@ -2334,7 +2334,7 @@ void update_thr_responsiveness_params(struct bfq_data *bfqd)
 		BFQ_RATE_SHIFT);
 }
 
-void bfq_reset_rate_computation(struct bfq_data *bfqd, struct request *rq)
+static void bfq_reset_rate_computation(struct bfq_data *bfqd, struct request *rq)
 {
 	if (rq != NULL) { /* new rq dispatch now, reset accordingly */
 		bfqd->last_dispatch = bfqd->first_dispatch = ktime_get_ns() ;
@@ -2351,7 +2351,7 @@ void bfq_reset_rate_computation(struct bfq_data *bfqd, struct request *rq)
 		bfqd->tot_sectors_dispatched);
 }
 
-void bfq_update_rate_reset(struct bfq_data *bfqd, struct request *rq)
+static void bfq_update_rate_reset(struct bfq_data *bfqd, struct request *rq)
 {
 	u32 rate, weight, divisor;
 
@@ -2401,7 +2401,7 @@ void bfq_update_rate_reset(struct bfq_data *bfqd, struct request *rq)
 	 *   total, and rate is below the current estimated peak rate
 	 * - rate is unreasonably high (> 20M sectors/sec)
 	 */
-	if ((bfqd->peak_rate_samples > (3 * bfqd->sequential_samples)>>2 &&
+	if ((bfqd->sequential_samples < (3 * bfqd->peak_rate_samples)>>2 &&
 	     rate <= bfqd->peak_rate) ||
 		rate > 20<<BFQ_RATE_SHIFT) {
 		bfq_log(bfqd,
@@ -2516,7 +2516,7 @@ reset_computation:
  * of the observed dispatch rate. The function assumes to be invoked
  * on every request dispatch.
  */
-void bfq_update_peak_rate(struct bfq_data *bfqd, struct request *rq)
+static void bfq_update_peak_rate(struct bfq_data *bfqd, struct request *rq)
 {
 	u64 now_ns = ktime_get_ns();
 
@@ -4094,7 +4094,13 @@ static struct bfq_queue *bfq_get_queue(struct bfq_data *bfqd,
 	 * prune it.
 	 */
 	if (async_bfqq) {
-		bfqq->ref++;
+		bfqq->ref++; /*
+			      * Extra group reference, w.r.t. sync
+			      * queue. This extra reference is removed
+			      * only if bfqq->bfqg disappears, to
+			      * guarantee that this queue is not freed
+			      * until its group goes away.
+			      */
 		bfq_log_bfqq(bfqd, bfqq, "get_queue, bfqq not in async: %p, %d",
 			     bfqq, bfqq->ref);
 		*async_bfqq = bfqq;
@@ -4698,7 +4704,6 @@ static void bfq_shutdown_timer_wq(struct bfq_data *bfqd)
 	cancel_work_sync(&bfqd->unplug_work);
 }
 
-#ifdef CONFIG_BFQ_GROUP_IOSCHED
 static void __bfq_put_async_bfqq(struct bfq_data *bfqd,
 					struct bfq_queue **bfqq_ptr)
 {
@@ -4731,7 +4736,6 @@ static void bfq_put_async_queues(struct bfq_data *bfqd, struct bfq_group *bfqg)
 
 	__bfq_put_async_bfqq(bfqd, &bfqg->async_idle_bfqq);
 }
-#endif
 
 static void bfq_exit_queue(struct elevator_queue *e)
 {
@@ -4756,6 +4760,7 @@ static void bfq_exit_queue(struct elevator_queue *e)
 #ifdef CONFIG_BFQ_GROUP_IOSCHED
 	blkcg_deactivate_policy(q, &blkcg_policy_bfq);
 #else
+	bfq_put_async_queues(bfqd, bfqd->root_group);
 	kfree(bfqd->root_group);
 #endif
 
@@ -5230,7 +5235,7 @@ static struct blkcg_policy blkcg_policy_bfq = {
 static int __init bfq_init(void)
 {
 	int ret;
-	char msg[60] = "BFQ I/O-scheduler: v8r7";
+	char msg[60] = "BFQ I/O-scheduler: v8r8-rc1";
 
 #ifdef CONFIG_BFQ_GROUP_IOSCHED
 	ret = blkcg_policy_register(&blkcg_policy_bfq);
@@ -5256,7 +5261,7 @@ static int __init bfq_init(void)
 	 * be run for a long time.
 	 */
 	T_slow[0] = msecs_to_jiffies(3500); /* actually 4 sec */
-	T_slow[1] = msecs_to_jiffies(1000); /* actually 1.5 sec */
+	T_slow[1] = msecs_to_jiffies(6000); /* actually 6.5 sec */
 	T_fast[0] = msecs_to_jiffies(7000); /* actually 8 sec */
 	T_fast[1] = msecs_to_jiffies(2500); /* actually 3 sec */
 
