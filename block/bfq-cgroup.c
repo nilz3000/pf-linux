@@ -649,6 +649,7 @@ static void bfq_bic_update_cgroup(struct bfq_io_cq *bic, struct bio *bio)
 	if (unlikely(!bfqd) || likely(bic->blkcg_serial_nr == serial_nr))
 		goto out;
 
+#ifdef CONFIG_BLK_WBT_SQ
 	/*
 	* If we have a non-root cgroup, we can depend on that to
 	* do proper throttling of writes. Turn off wbt for that
@@ -660,6 +661,7 @@ static void bfq_bic_update_cgroup(struct bfq_io_cq *bic, struct bio *bio)
 		if (q->rq_wb)
 			wbt_disable(q->rq_wb);
 	}
+#endif /* CONFIG_BLK_WBT_SQ */
 
 	bfqg = __bfq_bic_change_cgroup(bfqd, bic, bio_blkcg(bio));
 	bic->blkcg_serial_nr = serial_nr;
@@ -1151,6 +1153,9 @@ static inline void bfqg_stats_set_start_empty_time(struct bfq_group *bfqg) { }
 static inline void bfqg_stats_update_idle_time(struct bfq_group *bfqg) { }
 static inline void bfqg_stats_set_start_idle_time(struct bfq_group *bfqg) { }
 static inline void bfqg_stats_update_avg_queue_size(struct bfq_group *bfqg) { }
+
+static void bfq_bfqq_move(struct bfq_data *bfqd, struct bfq_queue *bfqq,
+			  struct bfq_group *bfqg) {}
 
 static void bfq_init_entity(struct bfq_entity *entity,
 			    struct bfq_group *bfqg)
