@@ -4533,7 +4533,7 @@ static int bfq_set_request(struct request_queue *q, struct request *rq,
 	if (!bic)
 		goto queue_fail;
 
-	bfq_bic_update_cgroup(bic, bio, &disable_wbt);
+	disable_wbt = bfq_bic_update_cgroup(bic, bio);
 
 new_queue:
 	bfqq = bic_to_bfqq(bic, is_sync);

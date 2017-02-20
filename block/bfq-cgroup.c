@@ -631,15 +631,16 @@ static struct bfq_group *__bfq_bic_change_cgroup(struct bfq_data *bfqd,
 	return bfqg;
 }
 
-static void bfq_bic_update_cgroup(struct bfq_io_cq *bic, struct bio *bio, bool *disable_wbt)
+static bool bfq_bic_update_cgroup(struct bfq_io_cq *bic, struct bio *bio)
 {
 	struct bfq_data *bfqd = bic_to_bfqd(bic);
 	struct bfq_group *bfqg = NULL;
 	uint64_t serial_nr;
+	bool nonroot_cg;
 
 	rcu_read_lock();
 	serial_nr = bio_blkcg(bio)->css.serial_nr;
-	*disable_wbt = bio_blkcg(bio) != &blkcg_root;
+	nonroot_cg = bio_blkcg(bio) != &blkcg_root;
 
 	/*
 	 * Check whether blkcg has changed.  The condition may trigger
@@ -652,6 +653,8 @@ static void bfq_bic_update_cgroup(struct bfq_io_cq *bic, struct bio *bio, bool *
 	bic->blkcg_serial_nr = serial_nr;
 out:
 	rcu_read_unlock();
+
+	return nonroot_cg;
 }
 
 /**
@@ -1156,14 +1159,9 @@ static void bfq_init_entity(struct bfq_entity *entity,
 	entity->sched_data = &bfqg->sched_data;
 }
 
-static struct bfq_group *
-bfq_bic_update_cgroup(struct bfq_io_cq *bic, struct bio *bio, bool *disable_wbt)
+static bool bfq_bic_update_cgroup(struct bfq_io_cq *bic, struct bio *bio)
 {
-	struct bfq_data *bfqd = bic_to_bfqd(bic);
-
-	*disable_wbt = false;
-
-	return bfqd->root_group;
+	return false;
 }
 
 static void bfq_end_wr_async(struct bfq_data *bfqd)
