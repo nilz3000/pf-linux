@@ -1,5 +1,5 @@
 /*
- * BFQ v8r8-rc2 for 4.9.0: data structures and common functions prototypes.
+ * BFQ v8r9 for 4.10.0: data structures and common functions prototypes.
  *
  * Based on ideas and code from CFQ:
  * Copyright (C) 2003 Jens Axboe <axboe@kernel.dk>
@@ -17,8 +17,6 @@
 
 #include <linux/blktrace_api.h>
 #include <linux/hrtimer.h>
-#include <linux/ioprio.h>
-#include <linux/rbtree.h>
 #include <linux/blk-cgroup.h>
 
 #define BFQ_IOPRIO_CLASSES	3
