@@ -1775,7 +1775,7 @@ EXPORT_SYMBOL_GPL(schedule_hrtimeout);
  * As per schedule_hrtimeout but taskes a millisecond value and returns how
  * many milliseconds are left.
  */
-signed long __sched schedule_msec_hrtimeout(signed long timeout)
+long __sched schedule_msec_hrtimeout(long timeout)
 {
 	struct hrtimer_sleeper t;
 	int delta, jiffs;
@@ -1823,7 +1823,7 @@ EXPORT_SYMBOL(schedule_msec_hrtimeout);
 #define USECS_PER_SEC 1000000
 extern int hrtimer_granularity_us;
 
-static inline signed long schedule_usec_hrtimeout(signed long timeout)
+static inline long schedule_usec_hrtimeout(long timeout)
 {
 	struct hrtimer_sleeper t;
 	ktime_t expires;
@@ -1864,21 +1864,21 @@ static inline signed long schedule_usec_hrtimeout(signed long timeout)
 
 int __read_mostly hrtimeout_min_us = 1000;
 
-signed long __sched schedule_min_hrtimeout(void)
+long __sched schedule_min_hrtimeout(void)
 {
 	return usecs_to_jiffies(schedule_usec_hrtimeout(hrtimeout_min_us));
 }
 
 EXPORT_SYMBOL(schedule_min_hrtimeout);
 
-signed long __sched schedule_msec_hrtimeout_interruptible(signed long timeout)
+long __sched schedule_msec_hrtimeout_interruptible(long timeout)
 {
 	__set_current_state(TASK_INTERRUPTIBLE);
 	return schedule_msec_hrtimeout(timeout);
 }
 EXPORT_SYMBOL(schedule_msec_hrtimeout_interruptible);
 
-signed long __sched schedule_msec_hrtimeout_uninterruptible(signed long timeout)
+long __sched schedule_msec_hrtimeout_uninterruptible(long timeout)
 {
 	__set_current_state(TASK_UNINTERRUPTIBLE);
 	return schedule_msec_hrtimeout(timeout);

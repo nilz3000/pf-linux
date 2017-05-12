@@ -181,27 +181,27 @@ extern long schedule_timeout_uninterruptible(long timeout);
 extern long schedule_timeout_idle(long timeout);
 
 #ifdef CONFIG_HIGH_RES_TIMERS
-extern signed long schedule_msec_hrtimeout(signed long timeout);
-extern signed long schedule_min_hrtimeout(void);
-extern signed long schedule_msec_hrtimeout_interruptible(signed long timeout);
-extern signed long schedule_msec_hrtimeout_uninterruptible(signed long timeout);
+extern long schedule_msec_hrtimeout(long timeout);
+extern long schedule_min_hrtimeout(void);
+extern long schedule_msec_hrtimeout_interruptible(long timeout);
+extern long schedule_msec_hrtimeout_uninterruptible(long timeout);
 #else
-static inline signed long schedule_msec_hrtimeout(signed long timeout)
+static inline long schedule_msec_hrtimeout(long timeout)
 {
 	return schedule_timeout(msecs_to_jiffies(timeout));
 }
 
-static inline signed long schedule_min_hrtimeout(void)
+static inline long schedule_min_hrtimeout(void)
 {
 	return schedule_timeout(1);
 }
 
-static inline signed long schedule_msec_hrtimeout_interruptible(signed long timeout)
+static inline long schedule_msec_hrtimeout_interruptible(long timeout)
 {
 	return schedule_timeout_interruptible(msecs_to_jiffies(timeout));
 }
 
-static inline signed long schedule_msec_hrtimeout_uninterruptible(signed long timeout)
+static inline long schedule_msec_hrtimeout_uninterruptible(long timeout)
 {
 	return schedule_timeout_uninterruptible(msecs_to_jiffies(timeout));
 }
