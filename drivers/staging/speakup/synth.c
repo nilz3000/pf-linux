@@ -92,7 +92,7 @@ void spk_do_catch_up(struct spk_synth *synth)
 		if (ch == '\n')
 			ch = synth->procspeech;
 		if (!synth->io_ops->synth_out(synth, ch)) {
-			schedule_timeout(msecs_to_jiffies(full_time_val));
+			schedule_msec_hrtimeout(full_time_val);
 			continue;
 		}
 		if (time_after_eq(jiffies, jiff_max) && (ch == SPACE)) {
