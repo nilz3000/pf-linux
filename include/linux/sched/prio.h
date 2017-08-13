@@ -20,7 +20,7 @@
 
 #define MAX_USER_RT_PRIO	100
 
-#ifdef CONFIG_SCHED_MUQSS
+#ifdef CONFIG_SCHED_BFS
 /* Note different MAX_RT_PRIO */
 #define MAX_RT_PRIO		(MAX_USER_RT_PRIO + 1)
 
@@ -28,10 +28,10 @@
 #define NORMAL_PRIO		(MAX_RT_PRIO + 1)
 #define IDLE_PRIO		(MAX_RT_PRIO + 2)
 #define PRIO_LIMIT		((IDLE_PRIO) + 1)
-#else /* CONFIG_SCHED_MUQSS */
+#else /* CONFIG_SCHED_BFS */
 #define MAX_RT_PRIO		MAX_USER_RT_PRIO
 
-#endif /* CONFIG_SCHED_MUQSS */
+#endif /* CONFIG_SCHED_BFS */
 
 #define MAX_PRIO		(MAX_RT_PRIO + NICE_WIDTH)
 #define DEFAULT_PRIO		(MAX_RT_PRIO + NICE_WIDTH / 2)
