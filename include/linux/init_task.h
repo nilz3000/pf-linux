@@ -227,8 +227,8 @@ extern struct cred init_cred;
  *  INIT_TASK is used to set up the first task table, touch at
  * your own risk!. Base=0, limit=0x1fffff (=2MB)
  */
-#ifdef CONFIG_SCHED_MUQSS
-#define INIT_TASK_COMM "MuQSS"
+#ifdef CONFIG_SCHED_BFS
+#define INIT_TASK_COMM "BFS"
 #define INIT_TASK(tsk)	\
 {									\
 	INIT_TASK_TI(tsk)						\
@@ -247,7 +247,9 @@ extern struct cred init_cred;
 	.restart_block = {						\
 		.fn = do_no_restart_syscall,				\
 	},								\
-	.time_slice	= 1000000,					\
+	.sl_level	= 0,						\
+	.sl_node	= SKIPLIST_NODE_INIT(tsk.sl_node),		\
+	.time_slice	= HZ,					\
 	.tasks		= LIST_HEAD_INIT(tsk.tasks),			\
 	INIT_PUSHABLE_TASKS(tsk)					\
 	.ptraced	= LIST_HEAD_INIT(tsk.ptraced),			\
@@ -296,10 +298,8 @@ extern struct cred init_cred;
 	INIT_VTIME(tsk)							\
 	INIT_NUMA_BALANCING(tsk)					\
 	INIT_KASAN(tsk)							\
-	INIT_LIVEPATCH(tsk)						\
-	INIT_TASK_SECURITY						\
 }
-#else /* CONFIG_SCHED_MUQSS */
+#else /* CONFIG_SCHED_BFS */
 #define INIT_TASK_COMM "swapper"
 #define INIT_TASK(tsk)	\
 {									\
@@ -378,7 +378,7 @@ extern struct cred init_cred;
 	INIT_LIVEPATCH(tsk)						\
 	INIT_TASK_SECURITY						\
 }
-#endif /* CONFIG_SCHED_MUQSS */
+#endif /* CONFIG_SCHED_BFS */
 
 /* Attach to the init_task data structure for proper alignment */
 #define __init_task_data __attribute__((__section__(".data..init_task")))
