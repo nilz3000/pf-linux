@@ -265,9 +265,8 @@ extern struct rq *uprq;
 DECLARE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 #define this_rq()		this_cpu_ptr(&runqueues)
 #define raw_rq()		raw_cpu_ptr(&runqueues)
-#endif /* CONFIG_SMP */
-
 #define task_rq(p)		cpu_rq(task_cpu(p))
+#endif /* CONFIG_SMP */
 
 static inline int task_current(struct rq *rq, struct task_struct *p)
 {
