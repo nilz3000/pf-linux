@@ -300,7 +300,7 @@ static bool blk_mq_sched_bypass_insert(struct blk_mq_hw_ctx *hctx,
 	 * the dispatch list.
 	 */
 	spin_lock(&hctx->lock);
-	list_add(&rq->queuelist, &hctx->dispatch);
+	list_add_tail(&rq->queuelist, &hctx->dispatch);
 	spin_unlock(&hctx->lock);
 	return true;
 }

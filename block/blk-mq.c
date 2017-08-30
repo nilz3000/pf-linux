@@ -1052,7 +1052,7 @@ bool blk_mq_dispatch_rq_list(struct request_queue *q, struct list_head *list)
 		blk_mq_put_driver_tag(rq);
 
 		spin_lock(&hctx->lock);
-		list_splice_init(list, &hctx->dispatch);
+		list_splice_tail_init(list, &hctx->dispatch);
 		spin_unlock(&hctx->lock);
 
 		/*
