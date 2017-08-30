@@ -300,7 +300,7 @@ static bool blk_mq_sched_bypass_insert(struct blk_mq_hw_ctx *hctx,
 	 * the dispatch list.
 	 */
 	spin_lock(&hctx->lock);
-	list_add(&rq->queuelist, &hctx->dispatch);
+	list_add_tail(&rq->queuelist, &hctx->dispatch);
 	spin_unlock(&hctx->lock);
 	return true;
 }
@@ -380,6 +380,64 @@ static void blk_mq_sched_insert_flush(struct blk_mq_hw_ctx *hctx,
 		blk_mq_run_hw_queue(hctx, true);
 	} else
 		blk_mq_add_to_requeue_list(rq, false, true);
+}
+
+static void blk_mq_flush_hctx(struct blk_mq_hw_ctx *hctx,
+			      struct elevator_queue *e,
+			      const bool has_sched_dispatch,
+			      struct list_head *rqs)
+{
+	LIST_HEAD(list);
+
+	if (!has_sched_dispatch)
+		blk_mq_flush_busy_ctxs(hctx, &list);
+	else {
+		while (true) {
+			struct request *rq;
+
+			rq = e->type->ops.mq.dispatch_request(hctx);
+			if (!rq)
+				break;
+			list_add_tail(&rq->queuelist, &list);
+		}
+	}
+
+	list_splice_tail(&list, rqs);
+}
+
+void blk_mq_sched_insert_request_bypass(struct request *rq, bool at_head,
+					bool run_queue, bool async,
+					bool can_block)
+{
+	struct request_queue *q = rq->q;
+	struct elevator_queue *e = q->elevator;
+	struct blk_mq_ctx *ctx = rq->mq_ctx;
+	struct blk_mq_hw_ctx *hctx = blk_mq_map_queue(q, ctx->cpu);
+	LIST_HEAD(list);
+	const bool has_sched_dispatch = e && e->type->ops.mq.dispatch_request;
+
+	if (rq->tag == -1 && op_is_flush(rq->cmd_flags)) {
+		blk_mq_sched_insert_flush(hctx, rq, can_block);
+		return;
+	}
+
+	if (at_head)
+		list_add_tail(&rq->queuelist, &list);
+	else {
+		blk_mq_flush_hctx(hctx, e, has_sched_dispatch, &list);
+		list_add_tail(&rq->queuelist, &list);
+		run_queue = true;
+	}
+
+	spin_lock(&hctx->lock);
+	if (at_head)
+		list_splice(&list, &hctx->dispatch);
+	else
+		list_splice_tail(&list, &hctx->dispatch);
+	spin_unlock(&hctx->lock);
+
+	if (run_queue)
+		blk_mq_run_hw_queue(hctx, async);
 }
 
 void blk_mq_sched_insert_request(struct request *rq, bool at_head,
