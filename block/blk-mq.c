@@ -83,16 +83,75 @@ static void blk_mq_hctx_clear_pending(struct blk_mq_hw_ctx *hctx,
 	sbitmap_clear_bit(&hctx->ctx_map, ctx->index_hw);
 }
 
-void blk_freeze_queue_start(struct request_queue *q)
+static bool queue_freeze_is_over(struct request_queue *q, bool preempt)
+{
+	/*
+	 * For preempt freeze, we simply call blk_queue_enter_live()
+	 * before allocating one request of RQF_PREEMPT, so we have
+	 * to check if queue is dead, otherwise we may hang on dead
+	 * queue.
+	 *
+	 * For normal freeze, no need to check blk_queue_dying()
+	 * because it is checked in blk_queue_enter().
+	 */
+	if (preempt)
+		return !(q->normal_freezing + q->preempt_freezing) ||
+			blk_queue_dying(q);
+	return !q->preempt_freezing;
+}
+
+static bool __blk_freeze_queue_start(struct request_queue *q, bool preempt)
 {
 	int freeze_depth;
+	bool start_freeze = true;
+
+	/*
+	 * Wait for completion of another kind of freezing.
+	 *
+	 * We have to sync between normal freeze and preempt
+	 * freeze. preempt freeze can only be started iff all
+	 * pending normal & preempt freezing are completed,
+	 * meantime normal freeze can be started only if there
+	 * isn't pending preempt freezing.
+	 *
+	 * rwsem should have been perfect for this kind of sync,
+	 * but we need to support nested normal freeze, so use
+	 * spin_lock with two flag for syncing between normal
+	 * freeze and preempt freeze.
+	 */
+	spin_lock(&q->freeze_lock);
+	wait_event_cmd(q->mq_freeze_wq,
+		       queue_freeze_is_over(q, preempt),
+		       spin_unlock(&q->freeze_lock),
+		       spin_lock(&q->freeze_lock));
+
+	if (preempt && blk_queue_dying(q)) {
+		start_freeze = false;
+		goto unlock;
+	}
 
 	freeze_depth = atomic_inc_return(&q->mq_freeze_depth);
 	if (freeze_depth == 1) {
+		if (preempt) {
+			q->preempt_freezing = 1;
+			q->preempt_unfreezing = 0;
+		} else
+			q->normal_freezing = 1;
+		spin_unlock(&q->freeze_lock);
+
 		percpu_ref_kill(&q->q_usage_counter);
 		if (q->mq_ops)
 			blk_mq_run_hw_queues(q, false);
-	}
+	} else
+ unlock:
+		spin_unlock(&q->freeze_lock);
+
+	return start_freeze;
+}
+
+void blk_freeze_queue_start(struct request_queue *q)
+{
+	__blk_freeze_queue_start(q, false);
 }
 EXPORT_SYMBOL_GPL(blk_freeze_queue_start);
 
@@ -131,7 +190,7 @@ void blk_freeze_queue(struct request_queue *q)
 }
 EXPORT_SYMBOL_GPL(blk_freeze_queue);
 
-void blk_unfreeze_queue(struct request_queue *q)
+static void __blk_unfreeze_queue(struct request_queue *q, bool preempt)
 {
 	int freeze_depth;
 
@@ -139,10 +198,65 @@ void blk_unfreeze_queue(struct request_queue *q)
 	WARN_ON_ONCE(freeze_depth < 0);
 	if (!freeze_depth) {
 		percpu_ref_reinit(&q->q_usage_counter);
+
+		/*
+		 * clearing the freeze flag so that any pending
+		 * freeze can move on
+		 */
+		spin_lock(&q->freeze_lock);
+		if (preempt)
+			q->preempt_freezing = 0;
+		else
+			q->normal_freezing = 0;
+		spin_unlock(&q->freeze_lock);
 		wake_up_all(&q->mq_freeze_wq);
 	}
 }
+
+void blk_unfreeze_queue(struct request_queue *q)
+{
+	__blk_unfreeze_queue(q, false);
+}
 EXPORT_SYMBOL_GPL(blk_unfreeze_queue);
+
+/*
+ * Once this function is returned, only allow to get request
+ * of RQF_PREEMPT.
+ */
+void blk_freeze_queue_preempt(struct request_queue *q)
+{
+	/*
+	 * If queue isn't in preempt_frozen, the queue has
+	 * to be dying, so do nothing since no I/O can
+	 * succeed any more.
+	 */
+	if (__blk_freeze_queue_start(q, true))
+		blk_freeze_queue_wait(q);
+}
+EXPORT_SYMBOL_GPL(blk_freeze_queue_preempt);
+
+/*
+ * It is the caller's responsibility to make sure no new
+ * request is allocated before calling this function.
+ */
+void blk_unfreeze_queue_preempt(struct request_queue *q)
+{
+	/*
+	 * If queue isn't in preempt_frozen, the queue should
+	 * be dying , so do nothing since no I/O can succeed.
+	 */
+	if (blk_queue_is_preempt_frozen(q)) {
+
+		/* no new request can be coming after unfreezing */
+		spin_lock(&q->freeze_lock);
+		q->preempt_unfreezing = 1;
+		spin_unlock(&q->freeze_lock);
+
+		blk_freeze_queue_wait(q);
+		__blk_unfreeze_queue(q, true);
+	}
+}
+EXPORT_SYMBOL_GPL(blk_unfreeze_queue_preempt);
 
 /*
  * FIXME: replace the scsi_internal_device_*block_nowait() calls in the
