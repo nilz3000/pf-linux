@@ -146,7 +146,6 @@ void blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
 	struct request_queue *q = hctx->queue;
 	struct elevator_queue *e = q->elevator;
 	const bool has_sched_dispatch = e && e->type->ops.mq.dispatch_request;
-	bool do_sched_dispatch = true;
 	LIST_HEAD(rq_list);
 
 	/* RCU or SRCU read lock is needed before checking quiesced flag */
@@ -177,8 +176,33 @@ void blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
 	 */
 	if (!list_empty(&rq_list)) {
 		blk_mq_sched_mark_restart_hctx(hctx);
-		do_sched_dispatch = blk_mq_dispatch_rq_list(q, &rq_list);
-	} else if (!has_sched_dispatch && !q->queue_depth) {
+		blk_mq_dispatch_rq_list(q, &rq_list);
+
+		/*
+		 * We may clear DISPATCH_BUSY just after it
+		 * is set from another context, the only cost
+		 * is that one request is dequeued a bit early,
+		 * we can survive that. Given the window is
+		 * small enough, no need to worry about performance
+		 * effect.
+		 */
+		if (list_empty_careful(&hctx->dispatch))
+			clear_bit(BLK_MQ_S_DISPATCH_BUSY, &hctx->state);
+	}
+
+	/*
+	 * If DISPATCH_BUSY is set, that means hw queue is busy
+	 * and requests in the list of hctx->dispatch need to
+	 * be flushed first, so return early.
+	 *
+	 * Wherever DISPATCH_BUSY is set, blk_mq_run_hw_queue()
+	 * will be run to try to make progress, so it is always
+	 * safe to check the state here.
+	 */
+	if (test_bit(BLK_MQ_S_DISPATCH_BUSY, &hctx->state))
+		return;
+
+	if (!has_sched_dispatch) {
 		/*
 		 * If there is no per-request_queue depth, we
 		 * flush all requests in this hw queue, otherwise
@@ -187,22 +211,21 @@ void blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
 		 * is busy, which can be triggered easily by
 		 * per-request_queue queue depth
 		 */
-		blk_mq_flush_busy_ctxs(hctx, &rq_list);
-		blk_mq_dispatch_rq_list(q, &rq_list);
-	}
+		if (!q->queue_depth) {
+			blk_mq_flush_busy_ctxs(hctx, &rq_list);
+			blk_mq_dispatch_rq_list(q, &rq_list);
+		} else {
+			blk_mq_do_dispatch_ctx(q, hctx);
+		}
+	} else {
 
-	if (!do_sched_dispatch)
-		return;
-
-	/*
-	 * We want to dispatch from the scheduler if we had no work left
-	 * on the dispatch list, OR if we did have work but weren't able
-	 * to make progress.
-	 */
-	if (has_sched_dispatch)
+		/*
+		 * We want to dispatch from the scheduler if we had no work left
+		 * on the dispatch list, OR if we did have work but weren't able
+		 * to make progress.
+		 */
 		blk_mq_do_dispatch_sched(q, e, hctx);
-	else
-		blk_mq_do_dispatch_ctx(q, hctx);
+	}
 }
 
 bool blk_mq_sched_try_merge(struct request_queue *q, struct bio *bio,
@@ -330,6 +353,7 @@ static bool blk_mq_sched_bypass_insert(struct blk_mq_hw_ctx *hctx,
 	 */
 	spin_lock(&hctx->lock);
 	list_add(&rq->queuelist, &hctx->dispatch);
+	set_bit(BLK_MQ_S_DISPATCH_BUSY, &hctx->state);
 	spin_unlock(&hctx->lock);
 	return true;
 }
