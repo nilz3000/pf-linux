@@ -18,6 +18,10 @@ struct blk_mq_ctx {
 	unsigned long		rq_dispatched[2];
 	unsigned long		rq_merged;
 
+	/* bio merge via request hash table */
+	struct request		*last_merge;
+	DECLARE_HASHTABLE(hash, ELV_HASH_BITS);
+
 	/* incremented at completion time */
 	unsigned long		____cacheline_aligned_in_smp rq_completed[2];
 
@@ -26,7 +30,6 @@ struct blk_mq_ctx {
 } ____cacheline_aligned_in_smp;
 
 void blk_mq_run_hw_queue(struct blk_mq_hw_ctx *hctx, bool async);
-void blk_mq_freeze_queue(struct request_queue *q);
 void blk_mq_free_queue(struct request_queue *q);
 int blk_mq_update_nr_requests(struct request_queue *q, unsigned int nr);
 void blk_mq_wake_waiters(struct request_queue *q);
@@ -35,6 +38,9 @@ void blk_mq_flush_busy_ctxs(struct blk_mq_hw_ctx *hctx, struct list_head *list);
 bool blk_mq_hctx_has_pending(struct blk_mq_hw_ctx *hctx);
 bool blk_mq_get_driver_tag(struct request *rq, struct blk_mq_hw_ctx **hctx,
 				bool wait);
+struct request *blk_mq_dispatch_rq_from_ctx(struct blk_mq_hw_ctx *hctx,
+					    struct blk_mq_ctx *start);
+int blk_mq_update_sched_queue_depth(struct request_queue *q);
 
 /*
  * Internal helpers for allocating/freeing the request map

@@ -64,6 +64,7 @@ void blk_rq_bio_prep(struct request_queue *q, struct request *rq,
 			struct bio *bio);
 void blk_queue_bypass_start(struct request_queue *q);
 void blk_queue_bypass_end(struct request_queue *q);
+void blk_drain_queue(struct request_queue *q);
 void blk_dequeue_request(struct request *rq);
 void __blk_queue_free_tags(struct request_queue *q);
 void blk_freeze_queue(struct request_queue *q);
@@ -77,6 +78,22 @@ static inline void blk_queue_enter_live(struct request_queue *q)
 	 * need not check that the queue has been frozen (marked dead).
 	 */
 	percpu_ref_get(&q->q_usage_counter);
+}
+
+static inline bool blk_queue_is_preempt_frozen(struct request_queue *q)
+{
+	bool preempt_frozen;
+	bool preempt_unfreezing;
+
+	if (!percpu_ref_is_dying(&q->q_usage_counter))
+		return false;
+
+	spin_lock(&q->freeze_lock);
+	preempt_frozen = q->preempt_freezing;
+	preempt_unfreezing = q->preempt_unfreezing;
+	spin_unlock(&q->freeze_lock);
+
+	return preempt_frozen && !preempt_unfreezing;
 }
 
 #ifdef CONFIG_BLK_DEV_INTEGRITY
@@ -146,6 +163,61 @@ static inline void blk_clear_rq_complete(struct request *rq)
  * Internal elevator interface
  */
 #define ELV_ON_HASH(rq) ((rq)->rq_flags & RQF_HASHED)
+
+/*
+ * Merge hash stuff.
+ */
+#define rq_hash_key(rq)		(blk_rq_pos(rq) + blk_rq_sectors(rq))
+
+#define bucket(head, key)	&((head)[hash_min((key), ELV_HASH_BITS)])
+
+static inline void __rqhash_del(struct request *rq)
+{
+	hash_del(&rq->hash);
+	rq->rq_flags &= ~RQF_HASHED;
+}
+
+static inline void rqhash_del(struct request *rq)
+{
+	if (ELV_ON_HASH(rq))
+		__rqhash_del(rq);
+}
+
+static inline void rqhash_add(struct hlist_head *hash, struct request *rq)
+{
+	BUG_ON(ELV_ON_HASH(rq));
+	hlist_add_head(&rq->hash, bucket(hash, rq_hash_key(rq)));
+	rq->rq_flags |= RQF_HASHED;
+}
+
+static inline void rqhash_reposition(struct hlist_head *hash, struct request *rq)
+{
+	__rqhash_del(rq);
+	rqhash_add(hash, rq);
+}
+
+static inline struct request *rqhash_find(struct hlist_head *hash, sector_t offset)
+{
+	struct hlist_node *next;
+	struct request *rq = NULL;
+
+	hlist_for_each_entry_safe(rq, next, bucket(hash, offset), hash) {
+		BUG_ON(!ELV_ON_HASH(rq));
+
+		if (unlikely(!rq_mergeable(rq))) {
+			__rqhash_del(rq);
+			continue;
+		}
+
+		if (rq_hash_key(rq) == offset)
+			return rq;
+	}
+
+	return NULL;
+}
+
+enum elv_merge elv_merge_ctx(struct request_queue *q, struct request **req,
+                struct bio *bio, struct blk_mq_ctx *ctx);
 
 void blk_insert_flush(struct request *rq);
 

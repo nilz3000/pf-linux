@@ -83,23 +83,85 @@ static void blk_mq_hctx_clear_pending(struct blk_mq_hw_ctx *hctx,
 	sbitmap_clear_bit(&hctx->ctx_map, ctx->index_hw);
 }
 
-void blk_freeze_queue_start(struct request_queue *q)
+static bool queue_freeze_is_over(struct request_queue *q, bool preempt)
+{
+	/*
+	 * For preempt freeze, we simply call blk_queue_enter_live()
+	 * before allocating one request of RQF_PREEMPT, so we have
+	 * to check if queue is dead, otherwise we may hang on dead
+	 * queue.
+	 *
+	 * For normal freeze, no need to check blk_queue_dying()
+	 * because it is checked in blk_queue_enter().
+	 */
+	if (preempt)
+		return !(q->normal_freezing + q->preempt_freezing) ||
+			blk_queue_dying(q);
+	return !q->preempt_freezing;
+}
+
+static bool __blk_freeze_queue_start(struct request_queue *q, bool preempt)
 {
 	int freeze_depth;
+	bool start_freeze = true;
+
+	/*
+	 * Wait for completion of another kind of freezing.
+	 *
+	 * We have to sync between normal freeze and preempt
+	 * freeze. preempt freeze can only be started iff all
+	 * pending normal & preempt freezing are completed,
+	 * meantime normal freeze can be started only if there
+	 * isn't pending preempt freezing.
+	 *
+	 * rwsem should have been perfect for this kind of sync,
+	 * but we need to support nested normal freeze, so use
+	 * spin_lock with two flag for syncing between normal
+	 * freeze and preempt freeze.
+	 */
+	spin_lock(&q->freeze_lock);
+	wait_event_cmd(q->mq_freeze_wq,
+		       queue_freeze_is_over(q, preempt),
+		       spin_unlock(&q->freeze_lock),
+		       spin_lock(&q->freeze_lock));
+
+	if (preempt && blk_queue_dying(q)) {
+		start_freeze = false;
+		goto unlock;
+	}
 
 	freeze_depth = atomic_inc_return(&q->mq_freeze_depth);
 	if (freeze_depth == 1) {
+		if (preempt) {
+			q->preempt_freezing = 1;
+			q->preempt_unfreezing = 0;
+		} else
+			q->normal_freezing = 1;
+		spin_unlock(&q->freeze_lock);
+
 		percpu_ref_kill(&q->q_usage_counter);
-		blk_mq_run_hw_queues(q, false);
-	}
+		if (q->mq_ops)
+			blk_mq_run_hw_queues(q, false);
+	} else
+ unlock:
+		spin_unlock(&q->freeze_lock);
+
+	return start_freeze;
+}
+
+void blk_freeze_queue_start(struct request_queue *q)
+{
+	__blk_freeze_queue_start(q, false);
 }
 EXPORT_SYMBOL_GPL(blk_freeze_queue_start);
 
-void blk_mq_freeze_queue_wait(struct request_queue *q)
+void blk_freeze_queue_wait(struct request_queue *q)
 {
+	if (!q->mq_ops)
+		blk_drain_queue(q);
 	wait_event(q->mq_freeze_wq, percpu_ref_is_zero(&q->q_usage_counter));
 }
-EXPORT_SYMBOL_GPL(blk_mq_freeze_queue_wait);
+EXPORT_SYMBOL_GPL(blk_freeze_queue_wait);
 
 int blk_mq_freeze_queue_wait_timeout(struct request_queue *q,
 				     unsigned long timeout)
@@ -124,20 +186,11 @@ void blk_freeze_queue(struct request_queue *q)
 	 * exported to drivers as the only user for unfreeze is blk_mq.
 	 */
 	blk_freeze_queue_start(q);
-	blk_mq_freeze_queue_wait(q);
+	blk_freeze_queue_wait(q);
 }
+EXPORT_SYMBOL_GPL(blk_freeze_queue);
 
-void blk_mq_freeze_queue(struct request_queue *q)
-{
-	/*
-	 * ...just an alias to keep freeze and unfreeze actions balanced
-	 * in the blk_mq_* namespace
-	 */
-	blk_freeze_queue(q);
-}
-EXPORT_SYMBOL_GPL(blk_mq_freeze_queue);
-
-void blk_mq_unfreeze_queue(struct request_queue *q)
+static void __blk_unfreeze_queue(struct request_queue *q, bool preempt)
 {
 	int freeze_depth;
 
@@ -145,10 +198,65 @@ void blk_mq_unfreeze_queue(struct request_queue *q)
 	WARN_ON_ONCE(freeze_depth < 0);
 	if (!freeze_depth) {
 		percpu_ref_reinit(&q->q_usage_counter);
+
+		/*
+		 * clearing the freeze flag so that any pending
+		 * freeze can move on
+		 */
+		spin_lock(&q->freeze_lock);
+		if (preempt)
+			q->preempt_freezing = 0;
+		else
+			q->normal_freezing = 0;
+		spin_unlock(&q->freeze_lock);
 		wake_up_all(&q->mq_freeze_wq);
 	}
 }
-EXPORT_SYMBOL_GPL(blk_mq_unfreeze_queue);
+
+void blk_unfreeze_queue(struct request_queue *q)
+{
+	__blk_unfreeze_queue(q, false);
+}
+EXPORT_SYMBOL_GPL(blk_unfreeze_queue);
+
+/*
+ * Once this function is returned, only allow to get request
+ * of RQF_PREEMPT.
+ */
+void blk_freeze_queue_preempt(struct request_queue *q)
+{
+	/*
+	 * If queue isn't in preempt_frozen, the queue has
+	 * to be dying, so do nothing since no I/O can
+	 * succeed any more.
+	 */
+	if (__blk_freeze_queue_start(q, true))
+		blk_freeze_queue_wait(q);
+}
+EXPORT_SYMBOL_GPL(blk_freeze_queue_preempt);
+
+/*
+ * It is the caller's responsibility to make sure no new
+ * request is allocated before calling this function.
+ */
+void blk_unfreeze_queue_preempt(struct request_queue *q)
+{
+	/*
+	 * If queue isn't in preempt_frozen, the queue should
+	 * be dying , so do nothing since no I/O can succeed.
+	 */
+	if (blk_queue_is_preempt_frozen(q)) {
+
+		/* no new request can be coming after unfreezing */
+		spin_lock(&q->freeze_lock);
+		q->preempt_unfreezing = 1;
+		spin_unlock(&q->freeze_lock);
+
+		blk_freeze_queue_wait(q);
+		__blk_unfreeze_queue(q, true);
+	}
+}
+EXPORT_SYMBOL_GPL(blk_unfreeze_queue_preempt);
 
 /*
  * FIXME: replace the scsi_internal_device_*block_nowait() calls in the
@@ -353,9 +461,19 @@ struct request *blk_mq_alloc_request(struct request_queue *q, unsigned int op,
 {
 	struct blk_mq_alloc_data alloc_data = { .flags = flags };
 	struct request *rq;
-	int ret;
+	int ret = 0;
 
-	ret = blk_queue_enter(q, flags & BLK_MQ_REQ_NOWAIT);
+	/*
+	 * We need to allocate req of REQF_PREEMPT in preempt freezing.
+	 * No normal freezing can be started when preempt freezing
+	 * is in-progress, and queue dying is checked before starting
+	 * preempt freezing, so it is safe to use blk_queue_enter_live()
+	 * in case of preempt freezing.
+	 */
+	if ((flags & BLK_MQ_REQ_PREEMPT) && blk_queue_is_preempt_frozen(q))
+		blk_queue_enter_live(q);
+	else
+		ret = blk_queue_enter(q, flags & BLK_MQ_REQ_NOWAIT);
 	if (ret)
 		return ERR_PTR(ret);
 
@@ -813,6 +931,18 @@ static void blk_mq_timeout_work(struct work_struct *work)
 	blk_queue_exit(q);
 }
 
+static void blk_mq_ctx_remove_rq_list(struct blk_mq_ctx *ctx,
+		struct list_head *head)
+{
+	struct request *rq;
+
+	lockdep_assert_held(&ctx->lock);
+
+	list_for_each_entry(rq, head, queuelist)
+		rqhash_del(rq);
+	ctx->last_merge = NULL;
+}
+
 struct flush_busy_ctx_data {
 	struct blk_mq_hw_ctx *hctx;
 	struct list_head *list;
@@ -827,6 +957,7 @@ static bool flush_busy_ctx(struct sbitmap *sb, unsigned int bitnr, void *data)
 	sbitmap_clear_bit(sb, bitnr);
 	spin_lock(&ctx->lock);
 	list_splice_tail_init(&ctx->rq_list, flush_data->list);
+	blk_mq_ctx_remove_rq_list(ctx, flush_data->list);
 	spin_unlock(&ctx->lock);
 	return true;
 }
@@ -845,6 +976,50 @@ void blk_mq_flush_busy_ctxs(struct blk_mq_hw_ctx *hctx, struct list_head *list)
 	sbitmap_for_each_set(&hctx->ctx_map, flush_busy_ctx, &data);
 }
 EXPORT_SYMBOL_GPL(blk_mq_flush_busy_ctxs);
+
+struct dispatch_rq_data {
+	struct blk_mq_hw_ctx *hctx;
+	struct request *rq;
+};
+
+static bool dispatch_rq_from_ctx(struct sbitmap *sb, unsigned int bitnr, void *data)
+{
+	struct dispatch_rq_data *dispatch_data = data;
+	struct blk_mq_hw_ctx *hctx = dispatch_data->hctx;
+	struct blk_mq_ctx *ctx = hctx->ctxs[bitnr];
+	struct request *rq = NULL;
+
+	spin_lock(&ctx->lock);
+	if (unlikely(!list_empty(&ctx->rq_list))) {
+		rq = list_entry_rq(ctx->rq_list.next);
+		list_del_init(&rq->queuelist);
+		rqhash_del(rq);
+		if (list_empty(&ctx->rq_list))
+			sbitmap_clear_bit(sb, bitnr);
+	}
+	if (ctx->last_merge == rq)
+		ctx->last_merge = NULL;
+	spin_unlock(&ctx->lock);
+
+	dispatch_data->rq = rq;
+
+	return !rq;
+}
+
+struct request *blk_mq_dispatch_rq_from_ctx(struct blk_mq_hw_ctx *hctx,
+					    struct blk_mq_ctx *start)
+{
+	unsigned off = start ? start->index_hw : 0;
+	struct dispatch_rq_data data = {
+		.hctx = hctx,
+		.rq   = NULL,
+	};
+
+	__sbitmap_for_each_set(&hctx->ctx_map, off,
+			       dispatch_rq_from_ctx, &data);
+
+	return data.rq;
+}
 
 static inline unsigned int queued_to_index(unsigned int queued)
 {
@@ -1068,6 +1243,11 @@ bool blk_mq_dispatch_rq_list(struct request_queue *q, struct list_head *list)
 
 		spin_lock(&hctx->lock);
 		list_splice_init(list, &hctx->dispatch);
+		/*
+		 * DISPATCH_BUSY won't be cleared until all requests
+		 * in hctx->dispatch are dispatched successfully
+		 */
+		set_bit(BLK_MQ_S_DISPATCH_BUSY, &hctx->state);
 		spin_unlock(&hctx->lock);
 
 		/*
@@ -1344,6 +1524,8 @@ static inline void __blk_mq_insert_req_list(struct blk_mq_hw_ctx *hctx,
 		list_add(&rq->queuelist, &ctx->rq_list);
 	else
 		list_add_tail(&rq->queuelist, &ctx->rq_list);
+
+	rqhash_add(ctx->hash, rq);
 }
 
 void __blk_mq_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
@@ -1836,6 +2018,7 @@ static int blk_mq_hctx_notify_dead(unsigned int cpu, struct hlist_node *node)
 	spin_lock(&ctx->lock);
 	if (!list_empty(&ctx->rq_list)) {
 		list_splice_init(&ctx->rq_list, &tmp);
+		blk_mq_ctx_remove_rq_list(ctx, &tmp);
 		blk_mq_hctx_clear_pending(hctx, ctx);
 	}
 	spin_unlock(&ctx->lock);
@@ -1845,6 +2028,7 @@ static int blk_mq_hctx_notify_dead(unsigned int cpu, struct hlist_node *node)
 
 	spin_lock(&hctx->lock);
 	list_splice_tail_init(&tmp, &hctx->dispatch);
+	set_bit(BLK_MQ_S_DISPATCH_BUSY, &hctx->state);
 	spin_unlock(&hctx->lock);
 
 	blk_mq_run_hw_queue(hctx, true);
@@ -2138,9 +2322,9 @@ static void blk_mq_update_tag_set_depth(struct blk_mq_tag_set *set,
 	lockdep_assert_held(&set->tag_list_lock);
 
 	list_for_each_entry(q, &set->tag_list, tag_set_list) {
-		blk_mq_freeze_queue(q);
+		blk_freeze_queue(q);
 		queue_set_hctx_shared(q, shared);
-		blk_mq_unfreeze_queue(q);
+		blk_unfreeze_queue(q);
 	}
 }
 
@@ -2562,7 +2746,9 @@ void blk_mq_free_tag_set(struct blk_mq_tag_set *set)
 }
 EXPORT_SYMBOL(blk_mq_free_tag_set);
 
-int blk_mq_update_nr_requests(struct request_queue *q, unsigned int nr)
+static int __blk_mq_update_nr_requests(struct request_queue *q,
+				       bool sched_only,
+				       unsigned int nr)
 {
 	struct blk_mq_tag_set *set = q->tag_set;
 	struct blk_mq_hw_ctx *hctx;
@@ -2571,7 +2757,7 @@ int blk_mq_update_nr_requests(struct request_queue *q, unsigned int nr)
 	if (!set)
 		return -EINVAL;
 
-	blk_mq_freeze_queue(q);
+	blk_freeze_queue(q);
 
 	ret = 0;
 	queue_for_each_hw_ctx(q, hctx, i) {
@@ -2581,7 +2767,7 @@ int blk_mq_update_nr_requests(struct request_queue *q, unsigned int nr)
 		 * If we're using an MQ scheduler, just update the scheduler
 		 * queue depth. This is similar to what the old code would do.
 		 */
-		if (!hctx->sched_tags) {
+		if (!sched_only && !hctx->sched_tags) {
 			ret = blk_mq_tag_update_depth(hctx, &hctx->tags,
 							min(nr, set->queue_depth),
 							false);
@@ -2596,9 +2782,30 @@ int blk_mq_update_nr_requests(struct request_queue *q, unsigned int nr)
 	if (!ret)
 		q->nr_requests = nr;
 
-	blk_mq_unfreeze_queue(q);
+	blk_unfreeze_queue(q);
 
 	return ret;
+}
+
+int blk_mq_update_nr_requests(struct request_queue *q, unsigned int nr)
+{
+	return __blk_mq_update_nr_requests(q, false, nr);
+}
+
+/*
+ * When drivers update q->queue_depth, this API is called so that
+ * we can use this queue depth as hint for adjusting scheduler
+ * queue depth.
+ */
+int blk_mq_update_sched_queue_depth(struct request_queue *q)
+{
+	unsigned nr;
+
+	if (!q->mq_ops || !q->elevator)
+		return 0;
+
+	nr = blk_mq_sched_queue_depth(q);
+	return __blk_mq_update_nr_requests(q, true, nr);
 }
 
 static void __blk_mq_update_nr_hw_queues(struct blk_mq_tag_set *set,
@@ -2614,7 +2821,7 @@ static void __blk_mq_update_nr_hw_queues(struct blk_mq_tag_set *set,
 		return;
 
 	list_for_each_entry(q, &set->tag_list, tag_set_list)
-		blk_mq_freeze_queue(q);
+		blk_freeze_queue(q);
 
 	set->nr_hw_queues = nr_hw_queues;
 	blk_mq_update_queue_map(set);
@@ -2624,7 +2831,7 @@ static void __blk_mq_update_nr_hw_queues(struct blk_mq_tag_set *set,
 	}
 
 	list_for_each_entry(q, &set->tag_list, tag_set_list)
-		blk_mq_unfreeze_queue(q);
+		blk_unfreeze_queue(q);
 }
 
 void blk_mq_update_nr_hw_queues(struct blk_mq_tag_set *set, int nr_hw_queues)
