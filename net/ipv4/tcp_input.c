@@ -2447,7 +2447,7 @@ static bool tcp_try_undo_loss(struct sock *sk, bool frto_undo)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
-	if (frto_undo || tcp_may_undo(tp)) {
+	if ((frto_undo || tcp_may_undo(tp)) && !tp->retrans_out) {
 		tcp_undo_cwnd_reduction(sk, true);
 
 		DBGUNDO(sk, "partial loss");
