@@ -243,12 +243,11 @@ int scsi_execute(struct scsi_device *sdev, const unsigned char *cmd,
 	struct request *req;
 	struct scsi_request *rq;
 	int ret = DRIVER_ERROR << 24;
-	unsigned flag = sdev->sdev_state == SDEV_QUIESCE ? BLK_REQ_PREEMPT : 0;
 
 	req = __blk_get_request(sdev->request_queue,
 			data_direction == DMA_TO_DEVICE ?
 			REQ_OP_SCSI_OUT : REQ_OP_SCSI_IN, __GFP_RECLAIM,
-			flag);
+			BLK_REQ_PREEMPT);
 	if (IS_ERR(req))
 		return ret;
 	rq = scsi_req(req);
@@ -2899,19 +2898,21 @@ scsi_device_quiesce(struct scsi_device *sdev)
 	 * Then no request can be allocated and we may hang
 	 * somewhere, such as system suspend/resume.
 	 *
-	 * So we freeze block queue in preempt mode first, no new
+	 * So we set block queue in preempt only first, no new
 	 * normal request can enter queue any more, and all pending
-	 * requests are drained once blk_freeze_queue is returned.
-	 * Only RQF_PREEMPT is allowed in preempt freeze.
+	 * requests are drained once blk_set_preempt_only()
+	 * returns. Only RQF_PREEMPT is allowed in preempt only mode.
 	 */
-	blk_freeze_queue_preempt(sdev->request_queue);
+	blk_set_preempt_only(sdev->request_queue, true);
 
 	mutex_lock(&sdev->state_mutex);
 	err = scsi_device_set_state(sdev, SDEV_QUIESCE);
 	mutex_unlock(&sdev->state_mutex);
 
-	if (err)
+	if (err) {
+		blk_set_preempt_only(sdev->request_queue, false);
 		return err;
+	}
 
 	scsi_run_queue(sdev->request_queue);
 	while (atomic_read(&sdev->device_busy)) {
@@ -2943,7 +2944,7 @@ void scsi_device_resume(struct scsi_device *sdev)
 		scsi_run_queue(sdev->request_queue);
 	mutex_unlock(&sdev->state_mutex);
 
-	blk_unfreeze_queue_preempt(sdev->request_queue);
+	blk_set_preempt_only(sdev->request_queue, false);
 }
 EXPORT_SYMBOL(scsi_device_resume);
 

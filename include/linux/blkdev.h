@@ -565,10 +565,6 @@ struct request_queue {
 
 	int			bypass_depth;
 	atomic_t		mq_freeze_depth;
-	spinlock_t		freeze_lock;
-	unsigned		normal_freezing:1;
-	unsigned		preempt_freezing:1;
-	unsigned		preempt_unfreezing:1;
 
 #if defined(CONFIG_BLK_DEV_BSG)
 	bsg_job_fn		*bsg_job_fn;
@@ -636,6 +632,7 @@ struct request_queue {
 #define QUEUE_FLAG_REGISTERED  29	/* queue has been registered to a disk */
 #define QUEUE_FLAG_SCSI_PASSTHROUGH 30	/* queue supports SCSI commands */
 #define QUEUE_FLAG_QUIESCED    31	/* queue has been quiesced */
+#define QUEUE_FLAG_PREEMPT_ONLY	QUEUE_FLAG_SYNCFULL	/* only process REQ_PREEMPT requests */
 
 #define QUEUE_FLAG_DEFAULT	((1 << QUEUE_FLAG_IO_STAT) |		\
 				 (1 << QUEUE_FLAG_STACKABLE)	|	\
@@ -740,6 +737,10 @@ static inline void queue_flag_clear(unsigned int flag, struct request_queue *q)
 	((rq)->cmd_flags & (REQ_FAILFAST_DEV|REQ_FAILFAST_TRANSPORT| \
 			     REQ_FAILFAST_DRIVER))
 #define blk_queue_quiesced(q)	test_bit(QUEUE_FLAG_QUIESCED, &(q)->queue_flags)
+#define blk_queue_preempt_only(q)				\
+	test_bit(QUEUE_FLAG_PREEMPT_ONLY, &(q)->queue_flags)
+
+extern void blk_set_preempt_only(struct request_queue *q, bool preempt_only);
 
 static inline bool blk_account_rq(struct request *rq)
 {
@@ -863,9 +864,12 @@ enum {
 	BLKPREP_INVALID,	/* invalid command, kill, return -EREMOTEIO */
 };
 
-/* passed to __blk_get_request */
+/* passed to blk_queue_enter */
 enum {
-	BLK_REQ_PREEMPT	= (1 << 0), /* allocate for RQF_PREEMPT */
+	BLK_REQ_NOWAIT		= (1 << 0),
+	BLK_REQ_PREEMPT		= (1 << 1),
+	BLK_REQ_MQ_START_BIT	= 2,
+	BLK_REQ_BITS_MASK	= (1U << BLK_REQ_MQ_START_BIT) - 1,
 };
 
 extern unsigned long blk_max_low_pfn, blk_max_pfn;
@@ -974,7 +978,7 @@ extern int scsi_cmd_ioctl(struct request_queue *, struct gendisk *, fmode_t,
 extern int sg_scsi_ioctl(struct request_queue *, struct gendisk *, fmode_t,
 			 struct scsi_ioctl_command __user *);
 
-extern int blk_queue_enter(struct request_queue *q, bool nowait);
+extern int blk_queue_enter(struct request_queue *q, unsigned flags);
 extern void blk_queue_exit(struct request_queue *q);
 extern void blk_start_queue(struct request_queue *q);
 extern void blk_start_queue_async(struct request_queue *q);
