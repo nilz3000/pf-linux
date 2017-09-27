@@ -64,7 +64,6 @@ void blk_rq_bio_prep(struct request_queue *q, struct request *rq,
 			struct bio *bio);
 void blk_queue_bypass_start(struct request_queue *q);
 void blk_queue_bypass_end(struct request_queue *q);
-void blk_drain_queue(struct request_queue *q);
 void blk_dequeue_request(struct request *rq);
 void __blk_queue_free_tags(struct request_queue *q);
 void blk_freeze_queue(struct request_queue *q);
@@ -78,22 +77,6 @@ static inline void blk_queue_enter_live(struct request_queue *q)
 	 * need not check that the queue has been frozen (marked dead).
 	 */
 	percpu_ref_get(&q->q_usage_counter);
-}
-
-static inline bool blk_queue_is_preempt_frozen(struct request_queue *q)
-{
-	bool preempt_frozen;
-	bool preempt_unfreezing;
-
-	if (!percpu_ref_is_dying(&q->q_usage_counter))
-		return false;
-
-	spin_lock(&q->freeze_lock);
-	preempt_frozen = q->preempt_freezing;
-	preempt_unfreezing = q->preempt_unfreezing;
-	spin_unlock(&q->freeze_lock);
-
-	return preempt_frozen && !preempt_unfreezing;
 }
 
 #ifdef CONFIG_BLK_DEV_INTEGRITY

@@ -530,21 +530,6 @@ static void __blk_drain_queue(struct request_queue *q, bool drain_all)
 }
 
 /**
- * blk_drain_queue - drain requests from request_queue
- * @q: queue to drain
- *
- * Drain requests from @q.  All pending requests are drained.
- * The caller is responsible for ensuring that no new requests
- * which need to be drained are queued.
- */
-void blk_drain_queue(struct request_queue *q)
-{
-	spin_lock_irq(q->queue_lock);
-	__blk_drain_queue(q, true);
-	spin_unlock_irq(q->queue_lock);
-}
-
-/**
  * blk_queue_bypass_start - enter queue bypass mode
  * @q: queue of interest
  *
@@ -668,6 +653,8 @@ void blk_cleanup_queue(struct request_queue *q)
 	 */
 	blk_freeze_queue(q);
 	spin_lock_irq(lock);
+	if (!q->mq_ops)
+		__blk_drain_queue(q, true);
 	queue_flag_set(QUEUE_FLAG_DEAD, q);
 	spin_unlock_irq(lock);
 
@@ -898,8 +885,6 @@ struct request_queue *blk_alloc_queue_node(gfp_t gfp_mask, int node_id)
 
 	if (blkcg_init_queue(q))
 		goto fail_ref;
-
-	spin_lock_init(&q->freeze_lock);
 
 	return q;
 
@@ -1404,36 +1389,19 @@ retry:
 }
 
 static struct request *blk_old_get_request(struct request_queue *q,
-					   unsigned int op, gfp_t gfp_mask,
-					   unsigned int flags)
+					   unsigned int op, gfp_t gfp_mask)
 {
 	struct request *rq;
-	int ret = 0;
 
 	WARN_ON_ONCE(q->mq_ops);
 
 	/* create ioc upfront */
 	create_io_context(gfp_mask, q->node);
 
-	/*
-	 * We need to allocate req of REQF_PREEMPT in preempt freezing.
-	 * No normal freezing can be started when preempt freezing
-	 * is in-progress, and queue dying is checked before starting
-	 * preempt freezing, so it is safe to use blk_queue_enter_live()
-	 * in case of preempt freezing.
-	 */
-	if ((flags & BLK_MQ_REQ_PREEMPT) && blk_queue_is_preempt_frozen(q))
-		blk_queue_enter_live(q);
-	else
-		ret = blk_queue_enter(q, !(gfp_mask & __GFP_DIRECT_RECLAIM));
-	if (ret)
-		return ERR_PTR(ret);
-
 	spin_lock_irq(q->queue_lock);
 	rq = get_request(q, op, NULL, gfp_mask);
 	if (IS_ERR(rq)) {
 		spin_unlock_irq(q->queue_lock);
-		blk_queue_exit(q);
 		return rq;
 	}
 
@@ -1444,26 +1412,26 @@ static struct request *blk_old_get_request(struct request_queue *q,
 	return rq;
 }
 
-struct request *__blk_get_request(struct request_queue *q, unsigned int op,
-				  gfp_t gfp_mask, unsigned int flags)
+struct request *blk_get_request(struct request_queue *q, unsigned int op,
+				gfp_t gfp_mask)
 {
 	struct request *req;
 
 	if (q->mq_ops) {
 		req = blk_mq_alloc_request(q, op,
-			flags | ((gfp_mask & __GFP_DIRECT_RECLAIM) ?
-				0 : BLK_MQ_REQ_NOWAIT));
+			(gfp_mask & __GFP_DIRECT_RECLAIM) ?
+				0 : BLK_MQ_REQ_NOWAIT);
 		if (!IS_ERR(req) && q->mq_ops->initialize_rq_fn)
 			q->mq_ops->initialize_rq_fn(req);
 	} else {
-		req = blk_old_get_request(q, op, gfp_mask, flags);
+		req = blk_old_get_request(q, op, gfp_mask);
 		if (!IS_ERR(req) && q->initialize_rq_fn)
 			q->initialize_rq_fn(req);
 	}
 
 	return req;
 }
-EXPORT_SYMBOL(__blk_get_request);
+EXPORT_SYMBOL(blk_get_request);
 
 /**
  * blk_requeue_request - put a request back on queue
@@ -1591,7 +1559,6 @@ void __blk_put_request(struct request_queue *q, struct request *req)
 		blk_free_request(rl, req);
 		freed_request(rl, sync, rq_flags);
 		blk_put_rl(rl);
-		blk_queue_exit(q);
 	}
 }
 EXPORT_SYMBOL_GPL(__blk_put_request);
@@ -1873,10 +1840,8 @@ get_rq:
 	 * Grab a free request. This is might sleep but can not fail.
 	 * Returns with the queue unlocked.
 	 */
-	blk_queue_enter_live(q);
 	req = get_request(q, bio->bi_opf, bio, GFP_NOIO);
 	if (IS_ERR(req)) {
-		blk_queue_exit(q);
 		__wbt_done(q->rq_wb, wb_acct);
 		if (PTR_ERR(req) == -ENOMEM)
 			bio->bi_status = BLK_STS_RESOURCE;

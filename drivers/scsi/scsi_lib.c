@@ -243,12 +243,10 @@ int scsi_execute(struct scsi_device *sdev, const unsigned char *cmd,
 	struct request *req;
 	struct scsi_request *rq;
 	int ret = DRIVER_ERROR << 24;
-	unsigned flag = sdev->sdev_state == SDEV_QUIESCE ? BLK_REQ_PREEMPT : 0;
 
-	req = __blk_get_request(sdev->request_queue,
+	req = blk_get_request(sdev->request_queue,
 			data_direction == DMA_TO_DEVICE ?
-			REQ_OP_SCSI_OUT : REQ_OP_SCSI_IN, __GFP_RECLAIM,
-			flag);
+			REQ_OP_SCSI_OUT : REQ_OP_SCSI_IN, __GFP_RECLAIM);
 	if (IS_ERR(req))
 		return ret;
 	rq = scsi_req(req);
@@ -2892,20 +2890,6 @@ scsi_device_quiesce(struct scsi_device *sdev)
 {
 	int err;
 
-	/*
-	 * Simply quiesing SCSI device isn't safe, it is easy
-	 * to use up requests because all these allocated requests
-	 * can't be dispatched when device is put in QIUESCE.
-	 * Then no request can be allocated and we may hang
-	 * somewhere, such as system suspend/resume.
-	 *
-	 * So we freeze block queue in preempt mode first, no new
-	 * normal request can enter queue any more, and all pending
-	 * requests are drained once blk_freeze_queue is returned.
-	 * Only RQF_PREEMPT is allowed in preempt freeze.
-	 */
-	blk_freeze_queue_preempt(sdev->request_queue);
-
 	mutex_lock(&sdev->state_mutex);
 	err = scsi_device_set_state(sdev, SDEV_QUIESCE);
 	mutex_unlock(&sdev->state_mutex);
@@ -2942,8 +2926,6 @@ void scsi_device_resume(struct scsi_device *sdev)
 	    scsi_device_set_state(sdev, SDEV_RUNNING) == 0)
 		scsi_run_queue(sdev->request_queue);
 	mutex_unlock(&sdev->state_mutex);
-
-	blk_unfreeze_queue_preempt(sdev->request_queue);
 }
 EXPORT_SYMBOL(scsi_device_resume);
 

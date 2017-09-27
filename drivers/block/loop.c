@@ -211,13 +211,13 @@ static void __loop_update_dio(struct loop_device *lo, bool dio)
 	 * LO_FLAGS_READ_ONLY, both are set from kernel, and losetup
 	 * will get updated by ioctl(LOOP_GET_STATUS)
 	 */
-	blk_freeze_queue(lo->lo_queue);
+	blk_mq_freeze_queue(lo->lo_queue);
 	lo->use_dio = use_dio;
 	if (use_dio)
 		lo->lo_flags |= LO_FLAGS_DIRECT_IO;
 	else
 		lo->lo_flags &= ~LO_FLAGS_DIRECT_IO;
-	blk_unfreeze_queue(lo->lo_queue);
+	blk_mq_unfreeze_queue(lo->lo_queue);
 }
 
 static int
@@ -592,13 +592,13 @@ static int loop_switch(struct loop_device *lo, struct file *file)
 	w.file = file;
 
 	/* freeze queue and wait for completion of scheduled requests */
-	blk_freeze_queue(lo->lo_queue);
+	blk_mq_freeze_queue(lo->lo_queue);
 
 	/* do the switch action */
 	do_loop_switch(lo, &w);
 
 	/* unfreeze */
-	blk_unfreeze_queue(lo->lo_queue);
+	blk_mq_unfreeze_queue(lo->lo_queue);
 
 	return 0;
 }
@@ -1035,7 +1035,7 @@ static int loop_clr_fd(struct loop_device *lo)
 		return -EINVAL;
 
 	/* freeze request queue during the transition */
-	blk_freeze_queue(lo->lo_queue);
+	blk_mq_freeze_queue(lo->lo_queue);
 
 	spin_lock_irq(&lo->lo_lock);
 	lo->lo_state = Lo_rundown;
@@ -1068,7 +1068,7 @@ static int loop_clr_fd(struct loop_device *lo)
 	lo->lo_state = Lo_unbound;
 	/* This is safe: open() is still holding a reference. */
 	module_put(THIS_MODULE);
-	blk_unfreeze_queue(lo->lo_queue);
+	blk_mq_unfreeze_queue(lo->lo_queue);
 
 	if (lo->lo_flags & LO_FLAGS_PARTSCAN && bdev)
 		loop_reread_partitions(lo, bdev);
@@ -1104,7 +1104,7 @@ loop_set_status(struct loop_device *lo, const struct loop_info64 *info)
 		return -EINVAL;
 
 	/* I/O need to be drained during transfer transition */
-	blk_freeze_queue(lo->lo_queue);
+	blk_mq_freeze_queue(lo->lo_queue);
 
 	err = loop_release_xfer(lo);
 	if (err)
@@ -1162,7 +1162,7 @@ loop_set_status(struct loop_device *lo, const struct loop_info64 *info)
 	__loop_update_dio(lo, lo->use_dio);
 
  exit:
-	blk_unfreeze_queue(lo->lo_queue);
+	blk_mq_unfreeze_queue(lo->lo_queue);
 
 	if (!err && (info->lo_flags & LO_FLAGS_PARTSCAN) &&
 	     !(lo->lo_flags & LO_FLAGS_PARTSCAN)) {

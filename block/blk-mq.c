@@ -83,85 +83,23 @@ static void blk_mq_hctx_clear_pending(struct blk_mq_hw_ctx *hctx,
 	sbitmap_clear_bit(&hctx->ctx_map, ctx->index_hw);
 }
 
-static bool queue_freeze_is_over(struct request_queue *q, bool preempt)
-{
-	/*
-	 * For preempt freeze, we simply call blk_queue_enter_live()
-	 * before allocating one request of RQF_PREEMPT, so we have
-	 * to check if queue is dead, otherwise we may hang on dead
-	 * queue.
-	 *
-	 * For normal freeze, no need to check blk_queue_dying()
-	 * because it is checked in blk_queue_enter().
-	 */
-	if (preempt)
-		return !(q->normal_freezing + q->preempt_freezing) ||
-			blk_queue_dying(q);
-	return !q->preempt_freezing;
-}
-
-static bool __blk_freeze_queue_start(struct request_queue *q, bool preempt)
+void blk_freeze_queue_start(struct request_queue *q)
 {
 	int freeze_depth;
-	bool start_freeze = true;
-
-	/*
-	 * Wait for completion of another kind of freezing.
-	 *
-	 * We have to sync between normal freeze and preempt
-	 * freeze. preempt freeze can only be started iff all
-	 * pending normal & preempt freezing are completed,
-	 * meantime normal freeze can be started only if there
-	 * isn't pending preempt freezing.
-	 *
-	 * rwsem should have been perfect for this kind of sync,
-	 * but we need to support nested normal freeze, so use
-	 * spin_lock with two flag for syncing between normal
-	 * freeze and preempt freeze.
-	 */
-	spin_lock(&q->freeze_lock);
-	wait_event_cmd(q->mq_freeze_wq,
-		       queue_freeze_is_over(q, preempt),
-		       spin_unlock(&q->freeze_lock),
-		       spin_lock(&q->freeze_lock));
-
-	if (preempt && blk_queue_dying(q)) {
-		start_freeze = false;
-		goto unlock;
-	}
 
 	freeze_depth = atomic_inc_return(&q->mq_freeze_depth);
 	if (freeze_depth == 1) {
-		if (preempt) {
-			q->preempt_freezing = 1;
-			q->preempt_unfreezing = 0;
-		} else
-			q->normal_freezing = 1;
-		spin_unlock(&q->freeze_lock);
-
 		percpu_ref_kill(&q->q_usage_counter);
-		if (q->mq_ops)
-			blk_mq_run_hw_queues(q, false);
-	} else
- unlock:
-		spin_unlock(&q->freeze_lock);
-
-	return start_freeze;
-}
-
-void blk_freeze_queue_start(struct request_queue *q)
-{
-	__blk_freeze_queue_start(q, false);
+		blk_mq_run_hw_queues(q, false);
+	}
 }
 EXPORT_SYMBOL_GPL(blk_freeze_queue_start);
 
-void blk_freeze_queue_wait(struct request_queue *q)
+void blk_mq_freeze_queue_wait(struct request_queue *q)
 {
-	if (!q->mq_ops)
-		blk_drain_queue(q);
 	wait_event(q->mq_freeze_wq, percpu_ref_is_zero(&q->q_usage_counter));
 }
-EXPORT_SYMBOL_GPL(blk_freeze_queue_wait);
+EXPORT_SYMBOL_GPL(blk_mq_freeze_queue_wait);
 
 int blk_mq_freeze_queue_wait_timeout(struct request_queue *q,
 				     unsigned long timeout)
@@ -186,11 +124,20 @@ void blk_freeze_queue(struct request_queue *q)
 	 * exported to drivers as the only user for unfreeze is blk_mq.
 	 */
 	blk_freeze_queue_start(q);
-	blk_freeze_queue_wait(q);
+	blk_mq_freeze_queue_wait(q);
 }
-EXPORT_SYMBOL_GPL(blk_freeze_queue);
 
-static void __blk_unfreeze_queue(struct request_queue *q, bool preempt)
+void blk_mq_freeze_queue(struct request_queue *q)
+{
+	/*
+	 * ...just an alias to keep freeze and unfreeze actions balanced
+	 * in the blk_mq_* namespace
+	 */
+	blk_freeze_queue(q);
+}
+EXPORT_SYMBOL_GPL(blk_mq_freeze_queue);
+
+void blk_mq_unfreeze_queue(struct request_queue *q)
 {
 	int freeze_depth;
 
@@ -198,65 +145,10 @@ static void __blk_unfreeze_queue(struct request_queue *q, bool preempt)
 	WARN_ON_ONCE(freeze_depth < 0);
 	if (!freeze_depth) {
 		percpu_ref_reinit(&q->q_usage_counter);
-
-		/*
-		 * clearing the freeze flag so that any pending
-		 * freeze can move on
-		 */
-		spin_lock(&q->freeze_lock);
-		if (preempt)
-			q->preempt_freezing = 0;
-		else
-			q->normal_freezing = 0;
-		spin_unlock(&q->freeze_lock);
 		wake_up_all(&q->mq_freeze_wq);
 	}
 }
-
-void blk_unfreeze_queue(struct request_queue *q)
-{
-	__blk_unfreeze_queue(q, false);
-}
-EXPORT_SYMBOL_GPL(blk_unfreeze_queue);
-
-/*
- * Once this function is returned, only allow to get request
- * of RQF_PREEMPT.
- */
-void blk_freeze_queue_preempt(struct request_queue *q)
-{
-	/*
-	 * If queue isn't in preempt_frozen, the queue has
-	 * to be dying, so do nothing since no I/O can
-	 * succeed any more.
-	 */
-	if (__blk_freeze_queue_start(q, true))
-		blk_freeze_queue_wait(q);
-}
-EXPORT_SYMBOL_GPL(blk_freeze_queue_preempt);
-
-/*
- * It is the caller's responsibility to make sure no new
- * request is allocated before calling this function.
- */
-void blk_unfreeze_queue_preempt(struct request_queue *q)
-{
-	/*
-	 * If queue isn't in preempt_frozen, the queue should
-	 * be dying , so do nothing since no I/O can succeed.
-	 */
-	if (blk_queue_is_preempt_frozen(q)) {
-
-		/* no new request can be coming after unfreezing */
-		spin_lock(&q->freeze_lock);
-		q->preempt_unfreezing = 1;
-		spin_unlock(&q->freeze_lock);
-
-		blk_freeze_queue_wait(q);
-		__blk_unfreeze_queue(q, true);
-	}
-}
-EXPORT_SYMBOL_GPL(blk_unfreeze_queue_preempt);
+EXPORT_SYMBOL_GPL(blk_mq_unfreeze_queue);
 
 /*
  * FIXME: replace the scsi_internal_device_*block_nowait() calls in the
@@ -461,19 +353,9 @@ struct request *blk_mq_alloc_request(struct request_queue *q, unsigned int op,
 {
 	struct blk_mq_alloc_data alloc_data = { .flags = flags };
 	struct request *rq;
-	int ret = 0;
+	int ret;
 
-	/*
-	 * We need to allocate req of REQF_PREEMPT in preempt freezing.
-	 * No normal freezing can be started when preempt freezing
-	 * is in-progress, and queue dying is checked before starting
-	 * preempt freezing, so it is safe to use blk_queue_enter_live()
-	 * in case of preempt freezing.
-	 */
-	if ((flags & BLK_MQ_REQ_PREEMPT) && blk_queue_is_preempt_frozen(q))
-		blk_queue_enter_live(q);
-	else
-		ret = blk_queue_enter(q, flags & BLK_MQ_REQ_NOWAIT);
+	ret = blk_queue_enter(q, flags & BLK_MQ_REQ_NOWAIT);
 	if (ret)
 		return ERR_PTR(ret);
 
@@ -2338,9 +2220,9 @@ static void blk_mq_update_tag_set_depth(struct blk_mq_tag_set *set,
 	lockdep_assert_held(&set->tag_list_lock);
 
 	list_for_each_entry(q, &set->tag_list, tag_set_list) {
-		blk_freeze_queue(q);
+		blk_mq_freeze_queue(q);
 		queue_set_hctx_shared(q, shared);
-		blk_unfreeze_queue(q);
+		blk_mq_unfreeze_queue(q);
 	}
 }
 
@@ -2773,7 +2655,7 @@ static int __blk_mq_update_nr_requests(struct request_queue *q,
 	if (!set)
 		return -EINVAL;
 
-	blk_freeze_queue(q);
+	blk_mq_freeze_queue(q);
 
 	ret = 0;
 	queue_for_each_hw_ctx(q, hctx, i) {
@@ -2798,7 +2680,7 @@ static int __blk_mq_update_nr_requests(struct request_queue *q,
 	if (!ret)
 		q->nr_requests = nr;
 
-	blk_unfreeze_queue(q);
+	blk_mq_unfreeze_queue(q);
 
 	return ret;
 }
@@ -2837,7 +2719,7 @@ static void __blk_mq_update_nr_hw_queues(struct blk_mq_tag_set *set,
 		return;
 
 	list_for_each_entry(q, &set->tag_list, tag_set_list)
-		blk_freeze_queue(q);
+		blk_mq_freeze_queue(q);
 
 	set->nr_hw_queues = nr_hw_queues;
 	blk_mq_update_queue_map(set);
@@ -2847,7 +2729,7 @@ static void __blk_mq_update_nr_hw_queues(struct blk_mq_tag_set *set,
 	}
 
 	list_for_each_entry(q, &set->tag_list, tag_set_list)
-		blk_unfreeze_queue(q);
+		blk_mq_unfreeze_queue(q);
 }
 
 void blk_mq_update_nr_hw_queues(struct blk_mq_tag_set *set, int nr_hw_queues)
