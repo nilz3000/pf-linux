@@ -346,6 +346,17 @@ void blk_sync_queue(struct request_queue *q)
 }
 EXPORT_SYMBOL(blk_sync_queue);
 
+void blk_set_preempt_only(struct request_queue *q, bool preempt_only)
+{
+	blk_mq_freeze_queue(q);
+	if (preempt_only)
+		queue_flag_set_unlocked(QUEUE_FLAG_PREEMPT_ONLY, q);
+	else
+		queue_flag_clear_unlocked(QUEUE_FLAG_PREEMPT_ONLY, q);
+	blk_mq_unfreeze_queue(q);
+}
+EXPORT_SYMBOL(blk_set_preempt_only);
+
 /**
  * __blk_run_queue_uncond - run a queue whether or not it has been stopped
  * @q:	The queue to run
@@ -771,9 +782,18 @@ int blk_queue_enter(struct request_queue *q, unsigned flags)
 	while (true) {
 		int ret;
 
+		/*
+		 * preempt_only flag has to be set after queue is frozen,
+		 * so it can be checked here lockless and safely
+		 */
+		if (blk_queue_preempt_only(q)) {
+			if (!(flags & BLK_REQ_PREEMPT))
+				goto slow_path;
+		}
+
 		if (percpu_ref_tryget_live(&q->q_usage_counter))
 			return 0;
-
+ slow_path:
 		if (flags & BLK_REQ_NOWAIT)
 			return -EBUSY;
 
@@ -787,7 +807,8 @@ int blk_queue_enter(struct request_queue *q, unsigned flags)
 		smp_rmb();
 
 		ret = wait_event_interruptible(q->mq_freeze_wq,
-				!atomic_read(&q->mq_freeze_depth) ||
+				(!atomic_read(&q->mq_freeze_depth) &&
+				!blk_queue_preempt_only(q)) ||
 				blk_queue_dying(q));
 		if (blk_queue_dying(q))
 			return -ENODEV;
