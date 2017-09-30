@@ -217,8 +217,8 @@ bool sbitmap_any_bit_clear(const struct sbitmap *sb);
 typedef bool (*sb_for_each_fn)(struct sbitmap *, unsigned int, void *);
 
 /**
- * sbitmap_for_each_set() - Iterate over each set bit in a &struct sbitmap.
- * @off: Where to start the iteration
+ * __sbitmap_for_each_set() - Iterate over each set bit in a &struct sbitmap.
+ * @start: Where to start the iteration.
  * @sb: Bitmap to iterate over.
  * @fn: Callback. Should return true to continue or false to break early.
  * @data: Pointer to pass to callback.
@@ -227,14 +227,19 @@ typedef bool (*sb_for_each_fn)(struct sbitmap *, unsigned int, void *);
  * callback will hopefully get optimized away.
  */
 static inline void __sbitmap_for_each_set(struct sbitmap *sb,
-					  unsigned int off,
+					  unsigned int start,
 					  sb_for_each_fn fn, void *data)
 {
-	unsigned int index = SB_NR_TO_INDEX(sb, off);
-	unsigned int nr = SB_NR_TO_BIT(sb, off);
+	unsigned int index;
+	unsigned int nr;
 	unsigned int scanned = 0;
 
-	while (1) {
+	if (start >= sb->depth)
+		start = 0;
+	index = SB_NR_TO_INDEX(sb, start);
+	nr = SB_NR_TO_BIT(sb, start);
+
+	while (scanned < sb->depth) {
 		struct sbitmap_word *word = &sb->map[index];
 		unsigned int depth = min_t(unsigned int, word->depth - nr,
 					   sb->depth - scanned);
@@ -243,20 +248,22 @@ static inline void __sbitmap_for_each_set(struct sbitmap *sb,
 		if (!word->word)
 			goto next;
 
+		/*
+		 * On the first iteration of the outer loop, we need to add the
+		 * bit offset back to the size of the word for find_next_bit().
+		 * On all other iterations, nr is zero, so this is a noop.
+		 */
 		depth += nr;
-		off = index << sb->shift;
 		while (1) {
 			nr = find_next_bit(&word->word, depth, nr);
 			if (nr >= depth)
 				break;
-			if (!fn(sb, off + nr, data))
+			if (!fn(sb, (index << sb->shift) + nr, data))
 				return;
 
 			nr++;
 		}
- next:
-		if (scanned >= sb->depth)
-			break;
+next:
 		nr = 0;
 		if (++index >= sb->map_nr)
 			index = 0;
@@ -268,9 +275,6 @@ static inline void __sbitmap_for_each_set(struct sbitmap *sb,
  * @sb: Bitmap to iterate over.
  * @fn: Callback. Should return true to continue or false to break early.
  * @data: Pointer to pass to callback.
- *
- * This is inline even though it's non-trivial so that the function calls to the
- * callback will hopefully get optimized away.
  */
 static inline void sbitmap_for_each_set(struct sbitmap *sb, sb_for_each_fn fn,
 					void *data)

@@ -126,7 +126,7 @@ static void blk_mq_do_dispatch_ctx(struct request_queue *q,
 	do {
 		struct request *rq;
 
-		rq = blk_mq_dispatch_rq_from_ctx(hctx, ctx);
+		rq = blk_mq_dequeue_from_ctx(hctx, ctx);
 		if (!rq)
 			break;
 		list_add(&rq->queuelist, &rq_list);
@@ -138,7 +138,7 @@ static void blk_mq_do_dispatch_ctx(struct request_queue *q,
 	} while (dispatched);
 
 	if (!dispatched)
-		WRITE_ONCE(hctx->dispatch_from, blk_mq_next_ctx(hctx, ctx));
+		WRITE_ONCE(hctx->dispatch_from, ctx);
 }
 
 void blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
@@ -208,8 +208,8 @@ void blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
 		 * flush all requests in this hw queue, otherwise
 		 * pick up request one by one from sw queue for
 		 * avoiding to mess up I/O merge when dispatch
-		 * is busy, which can be triggered easily by
-		 * per-request_queue queue depth
+		 * run out of resource, which can be triggered
+		 * easily by per-request_queue queue depth
 		 */
 		if (!q->queue_depth) {
 			blk_mq_flush_busy_ctxs(hctx, &rq_list);
@@ -218,12 +218,6 @@ void blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
 			blk_mq_do_dispatch_ctx(q, hctx);
 		}
 	} else {
-
-		/*
-		 * We want to dispatch from the scheduler if we had no work left
-		 * on the dispatch list, OR if we did have work but weren't able
-		 * to make progress.
-		 */
 		blk_mq_do_dispatch_sched(q, e, hctx);
 	}
 }
@@ -336,7 +330,6 @@ static bool blk_mq_sched_bypass_insert(struct blk_mq_hw_ctx *hctx,
 	 */
 	spin_lock(&hctx->lock);
 	list_add(&rq->queuelist, &hctx->dispatch);
-	set_bit(BLK_MQ_S_DISPATCH_BUSY, &hctx->state);
 	spin_unlock(&hctx->lock);
 	return true;
 }
