@@ -71,6 +71,10 @@ bool elv_bio_merge_ok(struct request *rq, struct bio *bio)
 	if (!blk_rq_merge_ok(rq, bio))
 		return false;
 
+	/* We need to support to merge bio from sw queue */
+	if (!rq->q->elevator)
+		return true;
+
 	if (!elv_iosched_allow_bio_merge(rq, bio))
 		return false;
 
@@ -456,6 +460,10 @@ static enum elv_merge __elv_merge(struct request_queue *q,
 		return ELEVATOR_BACK_MERGE;
 	}
 
+	/* no elevator when merging bio to blk-mq sw queue */
+	if (!e)
+		return ELEVATOR_NO_MERGE;
+
 	if (e->uses_mq && e->type->ops.mq.request_merge)
 		return e->type->ops.mq.request_merge(q, req, bio);
 	else if (!e->uses_mq && e->type->ops.sq.elevator_merge_fn)
@@ -718,6 +726,10 @@ struct request *elv_latter_request(struct request_queue *q, struct request *rq)
 {
 	struct elevator_queue *e = q->elevator;
 
+	/* no elevator when merging bio to blk-mq sw queue */
+	if (!e)
+		return NULL;
+
 	if (e->uses_mq && e->type->ops.mq.next_request)
 		return e->type->ops.mq.next_request(q, rq);
 	else if (!e->uses_mq && e->type->ops.sq.elevator_latter_req_fn)
@@ -729,6 +741,10 @@ struct request *elv_latter_request(struct request_queue *q, struct request *rq)
 struct request *elv_former_request(struct request_queue *q, struct request *rq)
 {
 	struct elevator_queue *e = q->elevator;
+
+	/* no elevator when merging bio to blk-mq sw queue */
+	if (!e)
+		return NULL;
 
 	if (e->uses_mq && e->type->ops.mq.former_request)
 		return e->type->ops.mq.former_request(q, rq);
