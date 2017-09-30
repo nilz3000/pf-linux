@@ -808,7 +808,8 @@ int blk_queue_enter(struct request_queue *q, unsigned flags)
 
 		ret = wait_event_interruptible(q->mq_freeze_wq,
 				(!atomic_read(&q->mq_freeze_depth) &&
-				!blk_queue_preempt_only(q)) ||
+				((flags & BLK_REQ_PREEMPT) ||
+				 !blk_queue_preempt_only(q))) ||
 				blk_queue_dying(q));
 		if (blk_queue_dying(q))
 			return -ENODEV;
