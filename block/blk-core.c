@@ -346,17 +346,6 @@ void blk_sync_queue(struct request_queue *q)
 }
 EXPORT_SYMBOL(blk_sync_queue);
 
-void blk_set_preempt_only(struct request_queue *q, bool preempt_only)
-{
-	blk_mq_freeze_queue(q);
-	if (preempt_only)
-		queue_flag_set_unlocked(QUEUE_FLAG_PREEMPT_ONLY, q);
-	else
-		queue_flag_clear_unlocked(QUEUE_FLAG_PREEMPT_ONLY, q);
-	blk_mq_unfreeze_queue(q);
-}
-EXPORT_SYMBOL(blk_set_preempt_only);
-
 /**
  * __blk_run_queue_uncond - run a queue whether or not it has been stopped
  * @q:	The queue to run
@@ -621,12 +610,6 @@ void blk_set_queue_dying(struct request_queue *q)
 		}
 		spin_unlock_irq(q->queue_lock);
 	}
-
-	/*
-	 * We need to ensure that processes currently waiting on
-	 * the queue are notified as well.
-	 */
-	wake_up_all(&q->mq_freeze_wq);
 }
 EXPORT_SYMBOL_GPL(blk_set_queue_dying);
 
@@ -777,24 +760,15 @@ struct request_queue *blk_alloc_queue(gfp_t gfp_mask)
 }
 EXPORT_SYMBOL(blk_alloc_queue);
 
-int blk_queue_enter(struct request_queue *q, unsigned flags)
+int blk_queue_enter(struct request_queue *q, bool nowait)
 {
 	while (true) {
 		int ret;
 
-		/*
-		 * preempt_only flag has to be set after queue is frozen,
-		 * so it can be checked here lockless and safely
-		 */
-		if (blk_queue_preempt_only(q)) {
-			if (!(flags & BLK_REQ_PREEMPT))
-				goto slow_path;
-		}
-
 		if (percpu_ref_tryget_live(&q->q_usage_counter))
 			return 0;
- slow_path:
-		if (flags & BLK_REQ_NOWAIT)
+
+		if (nowait)
 			return -EBUSY;
 
 		/*
@@ -807,9 +781,7 @@ int blk_queue_enter(struct request_queue *q, unsigned flags)
 		smp_rmb();
 
 		ret = wait_event_interruptible(q->mq_freeze_wq,
-				(!atomic_read(&q->mq_freeze_depth) &&
-				((flags & BLK_REQ_PREEMPT) ||
-				 !blk_queue_preempt_only(q))) ||
+				!atomic_read(&q->mq_freeze_depth) ||
 				blk_queue_dying(q));
 		if (blk_queue_dying(q))
 			return -ENODEV;
@@ -1417,25 +1389,19 @@ retry:
 }
 
 static struct request *blk_old_get_request(struct request_queue *q,
-					   unsigned int op, gfp_t gfp_mask,
-					   unsigned int flags)
+					   unsigned int op, gfp_t gfp_mask)
 {
 	struct request *rq;
-	int ret = 0;
 
 	WARN_ON_ONCE(q->mq_ops);
 
 	/* create ioc upfront */
 	create_io_context(gfp_mask, q->node);
 
-	ret = blk_queue_enter(q, flags & BLK_REQ_BITS_MASK);
-	if (ret)
-		return ERR_PTR(ret);
 	spin_lock_irq(q->queue_lock);
 	rq = get_request(q, op, NULL, gfp_mask);
 	if (IS_ERR(rq)) {
 		spin_unlock_irq(q->queue_lock);
-		blk_queue_exit(q);
 		return rq;
 	}
 
@@ -1446,25 +1412,26 @@ static struct request *blk_old_get_request(struct request_queue *q,
 	return rq;
 }
 
-struct request *__blk_get_request(struct request_queue *q, unsigned int op,
-				  gfp_t gfp_mask, unsigned int flags)
+struct request *blk_get_request(struct request_queue *q, unsigned int op,
+				gfp_t gfp_mask)
 {
 	struct request *req;
 
-	flags |= gfp_mask & __GFP_DIRECT_RECLAIM ? 0 : BLK_REQ_NOWAIT;
 	if (q->mq_ops) {
-		req = blk_mq_alloc_request(q, op, flags);
+		req = blk_mq_alloc_request(q, op,
+			(gfp_mask & __GFP_DIRECT_RECLAIM) ?
+				0 : BLK_MQ_REQ_NOWAIT);
 		if (!IS_ERR(req) && q->mq_ops->initialize_rq_fn)
 			q->mq_ops->initialize_rq_fn(req);
 	} else {
-		req = blk_old_get_request(q, op, gfp_mask, flags);
+		req = blk_old_get_request(q, op, gfp_mask);
 		if (!IS_ERR(req) && q->initialize_rq_fn)
 			q->initialize_rq_fn(req);
 	}
 
 	return req;
 }
-EXPORT_SYMBOL(__blk_get_request);
+EXPORT_SYMBOL(blk_get_request);
 
 /**
  * blk_requeue_request - put a request back on queue
@@ -1592,7 +1559,6 @@ void __blk_put_request(struct request_queue *q, struct request *req)
 		blk_free_request(rl, req);
 		freed_request(rl, sync, rq_flags);
 		blk_put_rl(rl);
-		blk_queue_exit(q);
 	}
 }
 EXPORT_SYMBOL_GPL(__blk_put_request);
@@ -1874,10 +1840,8 @@ get_rq:
 	 * Grab a free request. This is might sleep but can not fail.
 	 * Returns with the queue unlocked.
 	 */
-	blk_queue_enter_live(q);
 	req = get_request(q, bio->bi_opf, bio, GFP_NOIO);
 	if (IS_ERR(req)) {
-		blk_queue_exit(q);
 		__wbt_done(q->rq_wb, wb_acct);
 		if (PTR_ERR(req) == -ENOMEM)
 			bio->bi_status = BLK_STS_RESOURCE;
@@ -2221,8 +2185,7 @@ blk_qc_t generic_make_request(struct bio *bio)
 	do {
 		struct request_queue *q = bdev_get_queue(bio->bi_bdev);
 
-		if (likely(blk_queue_enter(q, (bio->bi_opf & REQ_NOWAIT) ?
-						BLK_REQ_NOWAIT : 0) == 0)) {
+		if (likely(blk_queue_enter(q, bio->bi_opf & REQ_NOWAIT) == 0)) {
 			struct bio_list lower, same;
 
 			/* Create a fresh bio_list for all subordinate requests */
