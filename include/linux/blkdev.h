@@ -96,9 +96,6 @@ typedef __u32 __bitwise req_flags_t;
 #define RQF_MQ_INFLIGHT		((__force req_flags_t)(1 << 6))
 /* don't call prep for this one */
 #define RQF_DONTPREP		((__force req_flags_t)(1 << 7))
-/* set for "ide_preempt" requests and also for requests for which the SCSI
-   "quiesce" state must be ignored. */
-#define RQF_PREEMPT		((__force req_flags_t)(1 << 8))
 /* contains copies of user pages */
 #define RQF_COPY_USER		((__force req_flags_t)(1 << 9))
 /* vaguely specified driver internal error.  Ignored by the block layer */
@@ -864,14 +861,6 @@ enum {
 	BLKPREP_INVALID,	/* invalid command, kill, return -EREMOTEIO */
 };
 
-/* passed to blk_queue_enter */
-enum {
-	BLK_REQ_NOWAIT		= (1 << 0),
-	BLK_REQ_PREEMPT		= (1 << 1),
-	BLK_REQ_MQ_START_BIT	= 2,
-	BLK_REQ_BITS_MASK	= (1U << BLK_REQ_MQ_START_BIT) - 1,
-};
-
 extern unsigned long blk_max_low_pfn, blk_max_pfn;
 
 /*
@@ -954,9 +943,8 @@ extern void blk_rq_init(struct request_queue *q, struct request *rq);
 extern void blk_init_request_from_bio(struct request *req, struct bio *bio);
 extern void blk_put_request(struct request *);
 extern void __blk_put_request(struct request_queue *, struct request *);
-extern struct request *__blk_get_request(struct request_queue *,
-					 unsigned int op, gfp_t gfp_mask,
-					 unsigned int flags);
+extern struct request *blk_get_request(struct request_queue *, unsigned int op,
+				       gfp_t gfp_mask);
 extern void blk_requeue_request(struct request_queue *, struct request *);
 extern int blk_lld_busy(struct request_queue *q);
 extern int blk_rq_prep_clone(struct request *rq, struct request *rq_src,
@@ -978,7 +966,7 @@ extern int scsi_cmd_ioctl(struct request_queue *, struct gendisk *, fmode_t,
 extern int sg_scsi_ioctl(struct request_queue *, struct gendisk *, fmode_t,
 			 struct scsi_ioctl_command __user *);
 
-extern int blk_queue_enter(struct request_queue *q, unsigned flags);
+extern int blk_queue_enter(struct request_queue *q, unsigned int op);
 extern void blk_queue_exit(struct request_queue *q);
 extern void blk_start_queue(struct request_queue *q);
 extern void blk_start_queue_async(struct request_queue *q);
@@ -1006,13 +994,6 @@ int blk_status_to_errno(blk_status_t status);
 blk_status_t errno_to_blk_status(int errno);
 
 bool blk_mq_poll(struct request_queue *q, blk_qc_t cookie);
-
-static inline struct request *blk_get_request(struct request_queue *q,
-					      unsigned int op,
-					      gfp_t gfp_mask)
-{
-	return __blk_get_request(q, op, gfp_mask, 0);
-}
 
 static inline struct request_queue *bdev_get_queue(struct block_device *bdev)
 {

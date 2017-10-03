@@ -85,7 +85,7 @@ static void blk_mq_hctx_clear_pending(struct blk_mq_hw_ctx *hctx,
 	sbitmap_clear_bit(&hctx->ctx_map, ctx->index_hw);
 }
 
-void blk_freeze_queue_start(struct request_queue *q)
+bool blk_freeze_queue_start(struct request_queue *q)
 {
 	int freeze_depth;
 
@@ -94,7 +94,9 @@ void blk_freeze_queue_start(struct request_queue *q)
 		percpu_ref_kill(&q->q_usage_counter);
 		if (q->mq_ops)
 			blk_mq_run_hw_queues(q, false);
+		return true;
 	}
+	return false;
 }
 EXPORT_SYMBOL_GPL(blk_freeze_queue_start);
 
@@ -117,7 +119,7 @@ EXPORT_SYMBOL_GPL(blk_mq_freeze_queue_wait_timeout);
  * Guarantee no request is in use, so we can change any data structure of
  * the queue afterward.
  */
-void blk_freeze_queue(struct request_queue *q)
+bool blk_freeze_queue(struct request_queue *q)
 {
 	/*
 	 * In the !blk_mq case we are only calling this to kill the
@@ -126,17 +128,18 @@ void blk_freeze_queue(struct request_queue *q)
 	 * no blk_unfreeze_queue(), and blk_freeze_queue() is not
 	 * exported to drivers as the only user for unfreeze is blk_mq.
 	 */
-	blk_freeze_queue_start(q);
+	bool ret = blk_freeze_queue_start(q);
 	blk_mq_freeze_queue_wait(q);
+	return ret;
 }
 
-void blk_mq_freeze_queue(struct request_queue *q)
+bool blk_mq_freeze_queue(struct request_queue *q)
 {
 	/*
 	 * ...just an alias to keep freeze and unfreeze actions balanced
 	 * in the blk_mq_* namespace
 	 */
-	blk_freeze_queue(q);
+	return blk_freeze_queue(q);
 }
 EXPORT_SYMBOL_GPL(blk_mq_freeze_queue);
 
@@ -351,7 +354,8 @@ struct request *blk_mq_alloc_request(struct request_queue *q, unsigned int op,
 	struct request *rq;
 	int ret;
 
-	ret = blk_queue_enter(q, flags & BLK_REQ_BITS_MASK);
+	ret = blk_queue_enter(q, !(flags & BLK_MQ_REQ_NOWAIT) ? op :
+			op | REQ_NOWAIT);
 	if (ret)
 		return ERR_PTR(ret);
 
@@ -390,7 +394,7 @@ struct request *blk_mq_alloc_request_hctx(struct request_queue *q,
 	if (hctx_idx >= q->nr_hw_queues)
 		return ERR_PTR(-EIO);
 
-	ret = blk_queue_enter(q, BLK_REQ_NOWAIT);
+	ret = blk_queue_enter(q, true);
 	if (ret)
 		return ERR_PTR(ret);
 
