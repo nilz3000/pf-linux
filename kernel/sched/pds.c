@@ -3160,7 +3160,12 @@ static inline bool pds_trigger_load_balance(struct rq *rq)
 	while (level < preempt_level) {
 		if (cpumask_and(&check, &sched_rq_queued_masks[level],
 				&p->cpus_allowed)) {
-			WARN_ON_ONCE(cpumask_test_cpu(cpu, &check));
+			WARN_ONCE(cpumask_test_cpu(cpu, &check),
+				  "pds: %d - %d, %d, %llu %d, %d, %llu",
+				  level,
+				  preempt_level, p->prio, p->deadline,
+				  task_running_policy_level(rq->curr, rq),
+				  rq->curr->prio, rq->curr->deadline);
 
 			raw_spin_unlock(&rq->lock);
 			raw_spin_lock(&p->pi_lock);
