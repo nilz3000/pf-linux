@@ -96,7 +96,7 @@ enum {
 
 static inline void print_scheduler_version(void)
 {
-	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.98a by Alfred Chen.\n");
+	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.98b by Alfred Chen.\n");
 }
 
 /* task_struct::on_rq states: */
@@ -3160,7 +3160,12 @@ static inline bool pds_trigger_load_balance(struct rq *rq)
 	while (level < preempt_level) {
 		if (cpumask_and(&check, &sched_rq_queued_masks[level],
 				&p->cpus_allowed)) {
-			WARN_ON_ONCE(cpumask_test_cpu(cpu, &check));
+			WARN_ONCE(cpumask_test_cpu(cpu, &check),
+				  "pds: %d - %d, %d, %llu %d, %d, %llu",
+				  level,
+				  preempt_level, p->prio, p->deadline,
+				  task_running_policy_level(rq->curr, rq),
+				  rq->curr->prio, rq->curr->deadline);
 
 			raw_spin_unlock(&rq->lock);
 			raw_spin_lock(&p->pi_lock);
@@ -3303,7 +3308,8 @@ static void time_slice_expired(struct task_struct *p, struct rq *rq)
 
 	if (unlikely(p->policy == SCHED_RR))
 		return;
-	p->deadline = rq->clock + task_deadline_diff(p);
+	p->deadline /= 2;
+	p->deadline += (rq->clock + task_deadline_diff(p)) / 2;
 	update_task_priodl(p);
 }
 
@@ -4027,15 +4033,6 @@ static inline int rt_effective_prio(struct task_struct *p, int prio)
 }
 #endif
 
-/*
- * Adjust the deadline for when the priority is to change, before it's
- * changed.
- */
-static inline void adjust_deadline(struct task_struct *p, int new_prio)
-{
-	p->deadline += static_deadline_diff(new_prio) - task_deadline_diff(p);
-}
-
 void set_user_nice(struct task_struct *p, long nice)
 {
 	int new_static;
@@ -4066,7 +4063,8 @@ void set_user_nice(struct task_struct *p, long nice)
 		goto out_unlock;
 	}
 
-	adjust_deadline(p, new_static);
+	p->deadline -= task_deadline_diff(p);
+	p->deadline += static_deadline_diff(new_static);
 	p->static_prio = new_static;
 	p->prio = effective_prio(p);
 	update_task_priodl(p);
@@ -6016,16 +6014,15 @@ static void cpuset_cpu_active(void)
 		 * operation in the resume sequence, just build a single sched
 		 * domain, ignoring cpusets.
 		 */
-		num_cpus_frozen--;
-		if (likely(num_cpus_frozen)) {
-			partition_sched_domains(1, NULL, NULL);
+		partition_sched_domains(1, NULL, NULL);
+		if (--num_cpus_frozen)
 			return;
-		}
 		/*
 		 * This is the last CPU online operation. So fall through and
 		 * restore the original sched domains by considering the
 		 * cpuset configurations.
 		 */
+		cpuset_force_rebuild();
 	}
 
 	cpuset_update_active_cpus();
