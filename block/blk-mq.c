@@ -980,7 +980,16 @@ static bool blk_mq_dispatch_wait_add(struct blk_mq_hw_ctx *hctx)
 	return true;
 }
 
-bool blk_mq_dispatch_rq_list(struct request_queue *q, struct list_head *list)
+static void blk_mq_put_budget(struct blk_mq_hw_ctx *hctx, bool got_budget)
+{
+	struct request_queue *q = hctx->queue;
+
+	if (q->mq_ops->put_budget && got_budget)
+		q->mq_ops->put_budget(hctx);
+}
+
+bool blk_mq_dispatch_rq_list(struct request_queue *q, struct list_head *list,
+		bool got_budget)
 {
 	struct blk_mq_hw_ctx *hctx;
 	struct request *rq;
@@ -988,6 +997,8 @@ bool blk_mq_dispatch_rq_list(struct request_queue *q, struct list_head *list)
 
 	if (list_empty(list))
 		return false;
+
+	WARN_ON(!list_is_singular(list) && got_budget);
 
 	/*
 	 * Now process all the entries, sending them to the driver.
@@ -1006,15 +1017,25 @@ bool blk_mq_dispatch_rq_list(struct request_queue *q, struct list_head *list)
 			 * The initial allocation attempt failed, so we need to
 			 * rerun the hardware queue when a tag is freed.
 			 */
-			if (!blk_mq_dispatch_wait_add(hctx))
+			if (!blk_mq_dispatch_wait_add(hctx)) {
+				blk_mq_put_budget(hctx, got_budget);
 				break;
+			}
 
 			/*
 			 * It's possible that a tag was freed in the window
 			 * between the allocation failure and adding the
 			 * hardware queue to the wait queue.
 			 */
-			if (!blk_mq_get_driver_tag(rq, &hctx, false))
+			if (!blk_mq_get_driver_tag(rq, &hctx, false)) {
+				blk_mq_put_budget(hctx, got_budget);
+				break;
+			}
+		}
+
+		if (!got_budget) {
+			if (q->mq_ops->get_budget &&
+					!q->mq_ops->get_budget(hctx))
 				break;
 		}
 
@@ -1524,6 +1545,11 @@ static blk_status_t __blk_mq_try_issue_directly(struct blk_mq_hw_ctx *hctx,
 	ret = BLK_STS_RESOURCE;
 	if (!blk_mq_get_driver_tag(rq, NULL, false))
 		goto insert;
+
+	if (q->mq_ops->get_budget && !q->mq_ops->get_budget(hctx)) {
+		blk_mq_put_driver_tag(rq);
+		goto insert;
+	}
 
 	new_cookie = request_to_qc_t(hctx, rq);
 
@@ -2532,6 +2558,9 @@ int blk_mq_alloc_tag_set(struct blk_mq_tag_set *set)
 		return -EINVAL;
 
 	if (!set->ops->queue_rq)
+		return -EINVAL;
+
+	if ((!!set->ops->get_budget) != (!!set->ops->put_budget))
 		return -EINVAL;
 
 	if (set->queue_depth > BLK_MQ_MAX_DEPTH) {
