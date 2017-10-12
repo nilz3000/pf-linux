@@ -1911,6 +1911,33 @@ static void scsi_mq_done(struct scsi_cmnd *cmd)
 	blk_mq_complete_request(cmd->request);
 }
 
+static void scsi_mq_put_budget(struct blk_mq_hw_ctx *hctx)
+{
+	struct request_queue *q = hctx->queue;
+	struct scsi_device *sdev = q->queuedata;
+
+	atomic_dec(&sdev->device_busy);
+	put_device(&sdev->sdev_gendev);
+}
+
+static bool scsi_mq_get_budget(struct blk_mq_hw_ctx *hctx)
+{
+	struct request_queue *q = hctx->queue;
+	struct scsi_device *sdev = q->queuedata;
+
+	if (!get_device(&sdev->sdev_gendev))
+		goto out;
+	if (!scsi_dev_queue_ready(q, sdev))
+		goto out_put_device;
+
+	return true;
+
+out_put_device:
+	put_device(&sdev->sdev_gendev);
+out:
+	return false;
+}
+
 static blk_status_t scsi_queue_rq(struct blk_mq_hw_ctx *hctx,
 			 const struct blk_mq_queue_data *bd)
 {
@@ -1927,13 +1954,8 @@ static blk_status_t scsi_queue_rq(struct blk_mq_hw_ctx *hctx,
 		goto out;
 
 	ret = BLK_STS_RESOURCE;
-	if (!get_device(&sdev->sdev_gendev))
-		goto out;
-
-	if (!scsi_dev_queue_ready(q, sdev))
-		goto out_put_device;
 	if (!scsi_target_queue_ready(shost, sdev))
-		goto out_dec_device_busy;
+		goto out_put_budget;
 	if (!scsi_host_queue_ready(q, shost, sdev))
 		goto out_dec_target_busy;
 
@@ -1968,10 +1990,8 @@ out_dec_host_busy:
 out_dec_target_busy:
 	if (scsi_target(sdev)->can_queue > 0)
 		atomic_dec(&scsi_target(sdev)->target_busy);
-out_dec_device_busy:
-	atomic_dec(&sdev->device_busy);
-out_put_device:
-	put_device(&sdev->sdev_gendev);
+out_put_budget:
+	scsi_mq_put_budget(hctx);
 out:
 	switch (ret) {
 	case BLK_STS_OK:
@@ -2175,6 +2195,8 @@ struct request_queue *scsi_alloc_queue(struct scsi_device *sdev)
 }
 
 static const struct blk_mq_ops scsi_mq_ops = {
+	.get_budget	= scsi_mq_get_budget,
+	.put_budget	= scsi_mq_put_budget,
 	.queue_rq	= scsi_queue_rq,
 	.complete	= scsi_softirq_done,
 	.timeout	= scsi_timeout,
