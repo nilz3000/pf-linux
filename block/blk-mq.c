@@ -813,18 +813,6 @@ static void blk_mq_timeout_work(struct work_struct *work)
 	blk_queue_exit(q);
 }
 
-static void blk_mq_ctx_remove_rq_list(struct blk_mq_ctx *ctx,
-		struct list_head *head)
-{
-	struct request *rq;
-
-	lockdep_assert_held(&ctx->lock);
-
-	list_for_each_entry(rq, head, queuelist)
-		rqhash_del(rq);
-	ctx->last_merge = NULL;
-}
-
 struct flush_busy_ctx_data {
 	struct blk_mq_hw_ctx *hctx;
 	struct list_head *list;
@@ -839,7 +827,6 @@ static bool flush_busy_ctx(struct sbitmap *sb, unsigned int bitnr, void *data)
 	sbitmap_clear_bit(sb, bitnr);
 	spin_lock(&ctx->lock);
 	list_splice_tail_init(&ctx->rq_list, flush_data->list);
-	blk_mq_ctx_remove_rq_list(ctx, flush_data->list);
 	spin_unlock(&ctx->lock);
 	return true;
 }
@@ -864,28 +851,23 @@ struct dispatch_rq_data {
 	struct request *rq;
 };
 
-static bool dispatch_rq_from_ctx(struct sbitmap *sb, unsigned int bitnr, void *data)
+static bool dispatch_rq_from_ctx(struct sbitmap *sb, unsigned int bitnr,
+		void *data)
 {
 	struct dispatch_rq_data *dispatch_data = data;
 	struct blk_mq_hw_ctx *hctx = dispatch_data->hctx;
 	struct blk_mq_ctx *ctx = hctx->ctxs[bitnr];
-	struct request *rq = NULL;
 
 	spin_lock(&ctx->lock);
 	if (unlikely(!list_empty(&ctx->rq_list))) {
-		rq = list_entry_rq(ctx->rq_list.next);
-		list_del_init(&rq->queuelist);
-		rqhash_del(rq);
+		dispatch_data->rq = list_entry_rq(ctx->rq_list.next);
+		list_del_init(&dispatch_data->rq->queuelist);
 		if (list_empty(&ctx->rq_list))
 			sbitmap_clear_bit(sb, bitnr);
 	}
-	if (ctx->last_merge == rq)
-		ctx->last_merge = NULL;
 	spin_unlock(&ctx->lock);
 
-	dispatch_data->rq = rq;
-
-	return !rq;
+	return !dispatch_data->rq;
 }
 
 struct request *blk_mq_dequeue_from_ctx(struct blk_mq_hw_ctx *hctx,
@@ -1037,7 +1019,16 @@ static bool blk_mq_dispatch_wait_add(struct blk_mq_hw_ctx *hctx)
 	return true;
 }
 
-bool blk_mq_dispatch_rq_list(struct request_queue *q, struct list_head *list)
+static void blk_mq_put_budget(struct blk_mq_hw_ctx *hctx, bool got_budget)
+{
+	struct request_queue *q = hctx->queue;
+
+	if (q->mq_ops->put_budget && got_budget)
+		q->mq_ops->put_budget(hctx);
+}
+
+bool blk_mq_dispatch_rq_list(struct request_queue *q, struct list_head *list,
+		bool got_budget)
 {
 	struct blk_mq_hw_ctx *hctx;
 	struct request *rq;
@@ -1045,6 +1036,8 @@ bool blk_mq_dispatch_rq_list(struct request_queue *q, struct list_head *list)
 
 	if (list_empty(list))
 		return false;
+
+	WARN_ON(!list_is_singular(list) && got_budget);
 
 	/*
 	 * Now process all the entries, sending them to the driver.
@@ -1063,15 +1056,25 @@ bool blk_mq_dispatch_rq_list(struct request_queue *q, struct list_head *list)
 			 * The initial allocation attempt failed, so we need to
 			 * rerun the hardware queue when a tag is freed.
 			 */
-			if (!blk_mq_dispatch_wait_add(hctx))
+			if (!blk_mq_dispatch_wait_add(hctx)) {
+				blk_mq_put_budget(hctx, got_budget);
 				break;
+			}
 
 			/*
 			 * It's possible that a tag was freed in the window
 			 * between the allocation failure and adding the
 			 * hardware queue to the wait queue.
 			 */
-			if (!blk_mq_get_driver_tag(rq, &hctx, false))
+			if (!blk_mq_get_driver_tag(rq, &hctx, false)) {
+				blk_mq_put_budget(hctx, got_budget);
+				break;
+			}
+		}
+
+		if (!got_budget) {
+			if (q->mq_ops->get_budget &&
+					!q->mq_ops->get_budget(hctx))
 				break;
 		}
 
@@ -1125,11 +1128,6 @@ bool blk_mq_dispatch_rq_list(struct request_queue *q, struct list_head *list)
 
 		spin_lock(&hctx->lock);
 		list_splice_init(list, &hctx->dispatch);
-		/*
-		 * DISPATCH_BUSY won't be cleared until all requests
-		 * in hctx->dispatch are dispatched successfully
-		 */
-		set_bit(BLK_MQ_S_DISPATCH_BUSY, &hctx->state);
 		spin_unlock(&hctx->lock);
 
 		/*
@@ -1406,8 +1404,6 @@ static inline void __blk_mq_insert_req_list(struct blk_mq_hw_ctx *hctx,
 		list_add(&rq->queuelist, &ctx->rq_list);
 	else
 		list_add_tail(&rq->queuelist, &ctx->rq_list);
-
-	rqhash_add(ctx->hash, rq);
 }
 
 void __blk_mq_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
@@ -1426,7 +1422,6 @@ static void blk_mq_request_direct_insert(struct blk_mq_hw_ctx *hctx,
 {
 	spin_lock(&hctx->lock);
 	list_add_tail(&rq->queuelist, &hctx->dispatch);
-	set_bit(BLK_MQ_S_DISPATCH_BUSY, &hctx->state);
 	spin_unlock(&hctx->lock);
 
 	blk_mq_run_hw_queue(hctx, false);
@@ -1589,6 +1584,11 @@ static blk_status_t __blk_mq_try_issue_directly(struct blk_mq_hw_ctx *hctx,
 	ret = BLK_STS_RESOURCE;
 	if (!blk_mq_get_driver_tag(rq, NULL, false))
 		goto insert;
+
+	if (q->mq_ops->get_budget && !q->mq_ops->get_budget(hctx)) {
+		blk_mq_put_driver_tag(rq);
+		goto insert;
+	}
 
 	new_cookie = request_to_qc_t(hctx, rq);
 
@@ -1943,7 +1943,6 @@ static int blk_mq_hctx_notify_dead(unsigned int cpu, struct hlist_node *node)
 	spin_lock(&ctx->lock);
 	if (!list_empty(&ctx->rq_list)) {
 		list_splice_init(&ctx->rq_list, &tmp);
-		blk_mq_ctx_remove_rq_list(ctx, &tmp);
 		blk_mq_hctx_clear_pending(hctx, ctx);
 	}
 	spin_unlock(&ctx->lock);
@@ -2600,6 +2599,9 @@ int blk_mq_alloc_tag_set(struct blk_mq_tag_set *set)
 	if (!set->ops->queue_rq)
 		return -EINVAL;
 
+	if ((!!set->ops->get_budget) != (!!set->ops->put_budget))
+		return -EINVAL;
+
 	if (set->queue_depth > BLK_MQ_MAX_DEPTH) {
 		pr_info("blk-mq: reduced tag depth to %u\n",
 			BLK_MQ_MAX_DEPTH);
@@ -2670,9 +2672,7 @@ void blk_mq_free_tag_set(struct blk_mq_tag_set *set)
 }
 EXPORT_SYMBOL(blk_mq_free_tag_set);
 
-static int __blk_mq_update_nr_requests(struct request_queue *q,
-				       bool sched_only,
-				       unsigned int nr)
+int blk_mq_update_nr_requests(struct request_queue *q, unsigned int nr)
 {
 	struct blk_mq_tag_set *set = q->tag_set;
 	struct blk_mq_hw_ctx *hctx;
@@ -2691,7 +2691,7 @@ static int __blk_mq_update_nr_requests(struct request_queue *q,
 		 * If we're using an MQ scheduler, just update the scheduler
 		 * queue depth. This is similar to what the old code would do.
 		 */
-		if (!sched_only && !hctx->sched_tags) {
+		if (!hctx->sched_tags) {
 			ret = blk_mq_tag_update_depth(hctx, &hctx->tags,
 							min(nr, set->queue_depth),
 							false);
@@ -2709,27 +2709,6 @@ static int __blk_mq_update_nr_requests(struct request_queue *q,
 	blk_mq_unfreeze_queue(q);
 
 	return ret;
-}
-
-int blk_mq_update_nr_requests(struct request_queue *q, unsigned int nr)
-{
-	return __blk_mq_update_nr_requests(q, false, nr);
-}
-
-/*
- * When drivers update q->queue_depth, this API is called so that
- * we can use this queue depth as hint for adjusting scheduler
- * queue depth.
- */
-int blk_mq_update_sched_queue_depth(struct request_queue *q)
-{
-	unsigned nr;
-
-	if (!q->mq_ops || !q->elevator)
-		return 0;
-
-	nr = blk_mq_sched_queue_depth(q);
-	return __blk_mq_update_nr_requests(q, true, nr);
 }
 
 static void __blk_mq_update_nr_hw_queues(struct blk_mq_tag_set *set,

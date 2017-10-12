@@ -89,20 +89,32 @@ static bool blk_mq_sched_restart_hctx(struct blk_mq_hw_ctx *hctx)
 	return false;
 }
 
-static void blk_mq_do_dispatch_sched(struct request_queue *q,
-				     struct elevator_queue *e,
-				     struct blk_mq_hw_ctx *hctx)
+static bool blk_mq_do_dispatch_sched(struct blk_mq_hw_ctx *hctx)
 {
+	struct request_queue *q = hctx->queue;
+	struct elevator_queue *e = q->elevator;
 	LIST_HEAD(rq_list);
 
 	do {
 		struct request *rq;
 
-		rq = e->type->ops.mq.dispatch_request(hctx);
-		if (!rq)
+		if (e->type->ops.mq.has_work &&
+				!e->type->ops.mq.has_work(hctx))
 			break;
+
+		if (q->mq_ops->get_budget && !q->mq_ops->get_budget(hctx))
+			return true;
+
+		rq = e->type->ops.mq.dispatch_request(hctx);
+		if (!rq) {
+			if (q->mq_ops->put_budget)
+				q->mq_ops->put_budget(hctx);
+			break;
+		}
 		list_add(&rq->queuelist, &rq_list);
-	} while (blk_mq_dispatch_rq_list(q, &rq_list));
+	} while (blk_mq_dispatch_rq_list(q, &rq_list, true));
+
+	return false;
 }
 
 static struct blk_mq_ctx *blk_mq_next_ctx(struct blk_mq_hw_ctx *hctx,
@@ -116,29 +128,37 @@ static struct blk_mq_ctx *blk_mq_next_ctx(struct blk_mq_hw_ctx *hctx,
 	return hctx->ctxs[idx];
 }
 
-static void blk_mq_do_dispatch_ctx(struct request_queue *q,
-				   struct blk_mq_hw_ctx *hctx)
+static bool blk_mq_do_dispatch_ctx(struct blk_mq_hw_ctx *hctx)
 {
+	struct request_queue *q = hctx->queue;
 	LIST_HEAD(rq_list);
 	struct blk_mq_ctx *ctx = READ_ONCE(hctx->dispatch_from);
-	bool dispatched;
 
 	do {
 		struct request *rq;
 
-		rq = blk_mq_dequeue_from_ctx(hctx, ctx);
-		if (!rq)
+		if (!sbitmap_any_bit_set(&hctx->ctx_map))
 			break;
+
+		if (q->mq_ops->get_budget && !q->mq_ops->get_budget(hctx))
+			return true;
+
+		rq = blk_mq_dequeue_from_ctx(hctx, ctx);
+		if (!rq) {
+			if (q->mq_ops->put_budget)
+				q->mq_ops->put_budget(hctx);
+			break;
+		}
 		list_add(&rq->queuelist, &rq_list);
 
 		/* round robin for fair dispatch */
 		ctx = blk_mq_next_ctx(hctx, rq->mq_ctx);
 
-		dispatched = blk_mq_dispatch_rq_list(q, &rq_list);
-	} while (dispatched);
+	} while (blk_mq_dispatch_rq_list(q, &rq_list, true));
 
-	if (!dispatched)
-		WRITE_ONCE(hctx->dispatch_from, ctx);
+	WRITE_ONCE(hctx->dispatch_from, ctx);
+
+	return false;
 }
 
 void blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
@@ -147,6 +167,7 @@ void blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
 	struct elevator_queue *e = q->elevator;
 	const bool has_sched_dispatch = e && e->type->ops.mq.dispatch_request;
 	LIST_HEAD(rq_list);
+	bool run_queue = false;
 
 	/* RCU or SRCU read lock is needed before checking quiesced flag */
 	if (unlikely(blk_mq_hctx_stopped(hctx) || blk_queue_quiesced(q)))
@@ -173,60 +194,51 @@ void blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
 	 * scheduler, we can no longer merge or sort them. So it's best to
 	 * leave them there for as long as we can. Mark the hw queue as
 	 * needing a restart in that case.
+	 *
+	 * We want to dispatch from the scheduler if there was nothing
+	 * on the dispatch list or we were able to dispatch from the
+	 * dispatch list.
 	 */
 	if (!list_empty(&rq_list)) {
 		blk_mq_sched_mark_restart_hctx(hctx);
-		blk_mq_dispatch_rq_list(q, &rq_list);
-
+		if (blk_mq_dispatch_rq_list(q, &rq_list, false)) {
+			if (has_sched_dispatch)
+				run_queue = blk_mq_do_dispatch_sched(hctx);
+			else
+				run_queue = blk_mq_do_dispatch_ctx(hctx);
+		}
+	} else if (has_sched_dispatch) {
+		run_queue = blk_mq_do_dispatch_sched(hctx);
+	} else if (q->mq_ops->get_budget) {
 		/*
-		 * We may clear DISPATCH_BUSY just after it
-		 * is set from another context, the only cost
-		 * is that one request is dequeued a bit early,
-		 * we can survive that. Given the window is
-		 * small enough, no need to worry about performance
-		 * effect.
+		 * If we need to get budget before queuing request, we
+		 * dequeue request one by one from sw queue for avoiding
+		 * to mess up I/O merge when dispatch runs out of resource.
+		 *
+		 * TODO: get more budgets, and dequeue more requests in
+		 * one time.
 		 */
-		if (list_empty_careful(&hctx->dispatch))
-			clear_bit(BLK_MQ_S_DISPATCH_BUSY, &hctx->state);
+		run_queue = blk_mq_do_dispatch_ctx(hctx);
+	} else {
+		blk_mq_flush_busy_ctxs(hctx, &rq_list);
+		blk_mq_dispatch_rq_list(q, &rq_list, false);
 	}
 
-	/*
-	 * If DISPATCH_BUSY is set, that means hw queue is busy
-	 * and requests in the list of hctx->dispatch need to
-	 * be flushed first, so return early.
-	 *
-	 * Wherever DISPATCH_BUSY is set, blk_mq_run_hw_queue()
-	 * will be run to try to make progress, so it is always
-	 * safe to check the state here.
-	 */
-	if (test_bit(BLK_MQ_S_DISPATCH_BUSY, &hctx->state))
-		return;
-
-	if (!has_sched_dispatch) {
-		/*
-		 * If there is no per-request_queue depth, we
-		 * flush all requests in this hw queue, otherwise
-		 * pick up request one by one from sw queue for
-		 * avoiding to mess up I/O merge when dispatch
-		 * run out of resource, which can be triggered
-		 * easily by per-request_queue queue depth
-		 */
-		if (!q->queue_depth) {
-			blk_mq_flush_busy_ctxs(hctx, &rq_list);
-			blk_mq_dispatch_rq_list(q, &rq_list);
-		} else {
-			blk_mq_do_dispatch_ctx(q, hctx);
+	if (run_queue) {
+		if (!blk_mq_sched_needs_restart(hctx) &&
+		    !test_bit(BLK_MQ_S_TAG_WAITING, &hctx->state)) {
+			blk_mq_sched_mark_restart_hctx(hctx);
+			blk_mq_run_hw_queue(hctx, true);
 		}
-	} else {
-		blk_mq_do_dispatch_sched(q, e, hctx);
 	}
 }
 
-static bool __blk_mq_try_merge(struct request_queue *q,
-		struct bio *bio, struct request **merged_request,
-		struct request *rq, enum elv_merge type)
+bool blk_mq_sched_try_merge(struct request_queue *q, struct bio *bio,
+			    struct request **merged_request)
 {
-	switch (type) {
+	struct request *rq;
+
+	switch (elv_merge(q, &rq, bio)) {
 	case ELEVATOR_BACK_MERGE:
 		if (!blk_mq_sched_allow_merge(q, rq, bio))
 			return false;
@@ -249,36 +261,52 @@ static bool __blk_mq_try_merge(struct request_queue *q,
 		return false;
 	}
 }
-
-bool blk_mq_sched_try_merge(struct request_queue *q, struct bio *bio,
-		struct request **merged_request)
-{
-	struct request *rq;
-	enum elv_merge type = elv_merge(q, &rq, bio);
-
-	return __blk_mq_try_merge(q, bio, merged_request, rq, type);
-}
 EXPORT_SYMBOL_GPL(blk_mq_sched_try_merge);
 
-static bool blk_mq_ctx_try_merge(struct request_queue *q,
+/*
+ * Reverse check our software queue for entries that we could potentially
+ * merge with. Currently includes a hand-wavy stop count of 8, to not spend
+ * too much time checking for merges.
+ */
+static bool blk_mq_attempt_merge(struct request_queue *q,
 				 struct blk_mq_ctx *ctx, struct bio *bio)
 {
-	struct request *rq, *free = NULL;
-	enum elv_merge type;
-	bool merged;
+	struct request *rq;
+	int checked = 8;
 
 	lockdep_assert_held(&ctx->lock);
 
-	type = elv_merge_ctx(q, &rq, bio, ctx);
-	merged = __blk_mq_try_merge(q, bio, &free, rq, type);
+	list_for_each_entry_reverse(rq, &ctx->rq_list, queuelist) {
+		bool merged = false;
 
-	if (free)
-		blk_mq_free_request(free);
+		if (!checked--)
+			break;
 
-	if (merged)
-		ctx->rq_merged++;
+		if (!blk_rq_merge_ok(rq, bio))
+			continue;
 
-	return merged;
+		switch (blk_try_merge(rq, bio)) {
+		case ELEVATOR_BACK_MERGE:
+			if (blk_mq_sched_allow_merge(q, rq, bio))
+				merged = bio_attempt_back_merge(q, rq, bio);
+			break;
+		case ELEVATOR_FRONT_MERGE:
+			if (blk_mq_sched_allow_merge(q, rq, bio))
+				merged = bio_attempt_front_merge(q, rq, bio);
+			break;
+		case ELEVATOR_DISCARD_MERGE:
+			merged = bio_attempt_discard_merge(q, rq, bio);
+			break;
+		default:
+			continue;
+		}
+
+		if (merged)
+			ctx->rq_merged++;
+		return merged;
+	}
+
+	return false;
 }
 
 bool __blk_mq_sched_bio_merge(struct request_queue *q, struct bio *bio)
@@ -296,7 +324,7 @@ bool __blk_mq_sched_bio_merge(struct request_queue *q, struct bio *bio)
 	if (hctx->flags & BLK_MQ_F_SHOULD_MERGE) {
 		/* default per sw-queue merge */
 		spin_lock(&ctx->lock);
-		ret = blk_mq_ctx_try_merge(q, ctx, bio);
+		ret = blk_mq_attempt_merge(q, ctx, bio);
 		spin_unlock(&ctx->lock);
 	}
 
@@ -571,7 +599,13 @@ int blk_mq_init_sched(struct request_queue *q, struct elevator_type *e)
 		return 0;
 	}
 
-	q->nr_requests = blk_mq_sched_queue_depth(q);
+	/*
+	 * Default to double of smaller one between hw queue_depth and 128,
+	 * since we don't split into sync/async like the old code did.
+	 * Additionally, this is a per-hw queue depth.
+	 */
+	q->nr_requests = 2 * min_t(unsigned int, q->tag_set->queue_depth,
+				   BLKDEV_MAX_RQ);
 
 	queue_for_each_hw_ctx(q, hctx, i) {
 		ret = blk_mq_sched_alloc_tags(q, hctx, i);
