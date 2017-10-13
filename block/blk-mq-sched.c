@@ -97,19 +97,23 @@ static bool blk_mq_do_dispatch_sched(struct blk_mq_hw_ctx *hctx)
 
 	do {
 		struct request *rq;
+		blk_status_t ret;
 
 		if (e->type->ops.mq.has_work &&
 				!e->type->ops.mq.has_work(hctx))
 			break;
 
-		if (q->mq_ops->get_budget && !q->mq_ops->get_budget(hctx))
+		ret = blk_mq_get_dispatch_budget(hctx);
+		if (ret == BLK_STS_RESOURCE)
 			return true;
 
 		rq = e->type->ops.mq.dispatch_request(hctx);
 		if (!rq) {
-			if (q->mq_ops->put_budget)
-				q->mq_ops->put_budget(hctx);
+			blk_mq_put_dispatch_budget(hctx, true);
 			break;
+		} else if (ret != BLK_STS_OK) {
+			blk_mq_end_request(rq, ret);
+			continue;
 		}
 		list_add(&rq->queuelist, &rq_list);
 	} while (blk_mq_dispatch_rq_list(q, &rq_list, true));
@@ -136,19 +140,24 @@ static bool blk_mq_do_dispatch_ctx(struct blk_mq_hw_ctx *hctx)
 
 	do {
 		struct request *rq;
+		blk_status_t ret;
 
 		if (!sbitmap_any_bit_set(&hctx->ctx_map))
 			break;
 
-		if (q->mq_ops->get_budget && !q->mq_ops->get_budget(hctx))
+		ret = blk_mq_get_dispatch_budget(hctx);
+		if (ret == BLK_STS_RESOURCE)
 			return true;
 
 		rq = blk_mq_dequeue_from_ctx(hctx, ctx);
 		if (!rq) {
-			if (q->mq_ops->put_budget)
-				q->mq_ops->put_budget(hctx);
+			blk_mq_put_dispatch_budget(hctx, true);
 			break;
+		} else if (ret != BLK_STS_OK) {
+			blk_mq_end_request(rq, ret);
+			continue;
 		}
+
 		list_add(&rq->queuelist, &rq_list);
 
 		/* round robin for fair dispatch */
