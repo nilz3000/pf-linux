@@ -89,6 +89,7 @@ static bool blk_mq_sched_restart_hctx(struct blk_mq_hw_ctx *hctx)
 	return false;
 }
 
+/* return true if hctx need to run again */
 static bool blk_mq_do_dispatch_sched(struct blk_mq_hw_ctx *hctx)
 {
 	struct request_queue *q = hctx->queue;
@@ -109,12 +110,18 @@ static bool blk_mq_do_dispatch_sched(struct blk_mq_hw_ctx *hctx)
 
 		rq = e->type->ops.mq.dispatch_request(hctx);
 		if (!rq) {
-			blk_mq_put_dispatch_budget(hctx, true);
+			blk_mq_put_dispatch_budget(hctx);
 			break;
 		} else if (ret != BLK_STS_OK) {
 			blk_mq_end_request(rq, ret);
 			continue;
 		}
+
+		/*
+		 * Now this rq owns the budget which has to be released
+		 * if this rq won't be queued to driver via .queue_rq()
+		 * in blk_mq_dispatch_rq_list().
+		 */
 		list_add(&rq->queuelist, &rq_list);
 	} while (blk_mq_dispatch_rq_list(q, &rq_list, true));
 
@@ -132,6 +139,7 @@ static struct blk_mq_ctx *blk_mq_next_ctx(struct blk_mq_hw_ctx *hctx,
 	return hctx->ctxs[idx];
 }
 
+/* return true if hctx need to run again */
 static bool blk_mq_do_dispatch_ctx(struct blk_mq_hw_ctx *hctx)
 {
 	struct request_queue *q = hctx->queue;
@@ -151,13 +159,18 @@ static bool blk_mq_do_dispatch_ctx(struct blk_mq_hw_ctx *hctx)
 
 		rq = blk_mq_dequeue_from_ctx(hctx, ctx);
 		if (!rq) {
-			blk_mq_put_dispatch_budget(hctx, true);
+			blk_mq_put_dispatch_budget(hctx);
 			break;
 		} else if (ret != BLK_STS_OK) {
 			blk_mq_end_request(rq, ret);
 			continue;
 		}
 
+		/*
+		 * Now this rq owns the budget which has to be released
+		 * if this rq won't be queued to driver via .queue_rq()
+		 * in blk_mq_dispatch_rq_list().
+		 */
 		list_add(&rq->queuelist, &rq_list);
 
 		/* round robin for fair dispatch */
@@ -170,7 +183,8 @@ static bool blk_mq_do_dispatch_ctx(struct blk_mq_hw_ctx *hctx)
 	return false;
 }
 
-void blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
+/* return true if hw queue need to be run again */
+bool blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
 {
 	struct request_queue *q = hctx->queue;
 	struct elevator_queue *e = q->elevator;
@@ -180,7 +194,7 @@ void blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
 
 	/* RCU or SRCU read lock is needed before checking quiesced flag */
 	if (unlikely(blk_mq_hctx_stopped(hctx) || blk_queue_quiesced(q)))
-		return;
+		return false;
 
 	hctx->run++;
 
@@ -233,13 +247,13 @@ void blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
 		blk_mq_dispatch_rq_list(q, &rq_list, false);
 	}
 
-	if (run_queue) {
-		if (!blk_mq_sched_needs_restart(hctx) &&
-		    !test_bit(BLK_MQ_S_TAG_WAITING, &hctx->state)) {
-			blk_mq_sched_mark_restart_hctx(hctx);
-			blk_mq_run_hw_queue(hctx, true);
-		}
+	if (run_queue && !blk_mq_sched_needs_restart(hctx) &&
+			!test_bit(BLK_MQ_S_TAG_WAITING, &hctx->state)) {
+		blk_mq_sched_mark_restart_hctx(hctx);
+		return true;
 	}
+
+	return false;
 }
 
 bool blk_mq_sched_try_merge(struct request_queue *q, struct bio *bio,

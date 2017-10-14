@@ -135,12 +135,11 @@ static inline bool blk_mq_hw_queue_mapped(struct blk_mq_hw_ctx *hctx)
 	return hctx->nr_ctx && hctx->tags;
 }
 
-static inline void blk_mq_put_dispatch_budget(struct blk_mq_hw_ctx *hctx,
-		bool got_budget)
+static inline void blk_mq_put_dispatch_budget(struct blk_mq_hw_ctx *hctx)
 {
 	struct request_queue *q = hctx->queue;
 
-	if (q->mq_ops->put_budget && got_budget)
+	if (q->mq_ops->put_budget)
 		q->mq_ops->put_budget(hctx);
 }
 

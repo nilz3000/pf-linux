@@ -1049,7 +1049,8 @@ bool blk_mq_dispatch_rq_list(struct request_queue *q, struct list_head *list,
 			 * rerun the hardware queue when a tag is freed.
 			 */
 			if (!blk_mq_dispatch_wait_add(hctx)) {
-				blk_mq_put_dispatch_budget(hctx, got_budget);
+				if (got_budget)
+					blk_mq_put_dispatch_budget(hctx);
 				break;
 			}
 
@@ -1059,7 +1060,8 @@ bool blk_mq_dispatch_rq_list(struct request_queue *q, struct list_head *list,
 			 * hardware queue to the wait queue.
 			 */
 			if (!blk_mq_get_driver_tag(rq, &hctx, false)) {
-				blk_mq_put_dispatch_budget(hctx, got_budget);
+				if (got_budget)
+					blk_mq_put_dispatch_budget(hctx);
 				break;
 			}
 		}
@@ -1156,21 +1158,25 @@ bool blk_mq_dispatch_rq_list(struct request_queue *q, struct list_head *list,
 static void __blk_mq_run_hw_queue(struct blk_mq_hw_ctx *hctx)
 {
 	int srcu_idx;
+	bool run_queue;
 
 	WARN_ON(!cpumask_test_cpu(raw_smp_processor_id(), hctx->cpumask) &&
 		cpu_online(hctx->next_cpu));
 
 	if (!(hctx->flags & BLK_MQ_F_BLOCKING)) {
 		rcu_read_lock();
-		blk_mq_sched_dispatch_requests(hctx);
+		run_queue = blk_mq_sched_dispatch_requests(hctx);
 		rcu_read_unlock();
 	} else {
 		might_sleep();
 
 		srcu_idx = srcu_read_lock(hctx->queue_rq_srcu);
-		blk_mq_sched_dispatch_requests(hctx);
+		run_queue = blk_mq_sched_dispatch_requests(hctx);
 		srcu_read_unlock(hctx->queue_rq_srcu, srcu_idx);
 	}
+
+	if (run_queue)
+		blk_mq_run_hw_queue(hctx, true);
 }
 
 /*
