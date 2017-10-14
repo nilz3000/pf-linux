@@ -846,45 +846,6 @@ void blk_mq_flush_busy_ctxs(struct blk_mq_hw_ctx *hctx, struct list_head *list)
 }
 EXPORT_SYMBOL_GPL(blk_mq_flush_busy_ctxs);
 
-struct dispatch_rq_data {
-	struct blk_mq_hw_ctx *hctx;
-	struct request *rq;
-};
-
-static bool dispatch_rq_from_ctx(struct sbitmap *sb, unsigned int bitnr,
-		void *data)
-{
-	struct dispatch_rq_data *dispatch_data = data;
-	struct blk_mq_hw_ctx *hctx = dispatch_data->hctx;
-	struct blk_mq_ctx *ctx = hctx->ctxs[bitnr];
-
-	spin_lock(&ctx->lock);
-	if (unlikely(!list_empty(&ctx->rq_list))) {
-		dispatch_data->rq = list_entry_rq(ctx->rq_list.next);
-		list_del_init(&dispatch_data->rq->queuelist);
-		if (list_empty(&ctx->rq_list))
-			sbitmap_clear_bit(sb, bitnr);
-	}
-	spin_unlock(&ctx->lock);
-
-	return !dispatch_data->rq;
-}
-
-struct request *blk_mq_dequeue_from_ctx(struct blk_mq_hw_ctx *hctx,
-					struct blk_mq_ctx *start)
-{
-	unsigned off = start ? start->index_hw : 0;
-	struct dispatch_rq_data data = {
-		.hctx = hctx,
-		.rq   = NULL,
-	};
-
-	__sbitmap_for_each_set(&hctx->ctx_map, off,
-			       dispatch_rq_from_ctx, &data);
-
-	return data.rq;
-}
-
 static inline unsigned int queued_to_index(unsigned int queued)
 {
 	if (!queued)
@@ -1019,8 +980,7 @@ static bool blk_mq_dispatch_wait_add(struct blk_mq_hw_ctx *hctx)
 	return true;
 }
 
-bool blk_mq_dispatch_rq_list(struct request_queue *q, struct list_head *list,
-		bool got_budget)
+bool blk_mq_dispatch_rq_list(struct request_queue *q, struct list_head *list)
 {
 	struct blk_mq_hw_ctx *hctx;
 	struct request *rq;
@@ -1028,8 +988,6 @@ bool blk_mq_dispatch_rq_list(struct request_queue *q, struct list_head *list,
 
 	if (list_empty(list))
 		return false;
-
-	WARN_ON(!list_is_singular(list) && got_budget);
 
 	/*
 	 * Now process all the entries, sending them to the driver.
@@ -1048,28 +1006,16 @@ bool blk_mq_dispatch_rq_list(struct request_queue *q, struct list_head *list,
 			 * The initial allocation attempt failed, so we need to
 			 * rerun the hardware queue when a tag is freed.
 			 */
-			if (!blk_mq_dispatch_wait_add(hctx)) {
-				blk_mq_put_dispatch_budget(hctx, got_budget);
+			if (!blk_mq_dispatch_wait_add(hctx))
 				break;
-			}
 
 			/*
 			 * It's possible that a tag was freed in the window
 			 * between the allocation failure and adding the
 			 * hardware queue to the wait queue.
 			 */
-			if (!blk_mq_get_driver_tag(rq, &hctx, false)) {
-				blk_mq_put_dispatch_budget(hctx, got_budget);
+			if (!blk_mq_get_driver_tag(rq, &hctx, false))
 				break;
-			}
-		}
-
-		if (!got_budget) {
-			ret = blk_mq_get_dispatch_budget(hctx);
-			if (ret == BLK_STS_RESOURCE)
-				break;
-			if (ret != BLK_STS_OK)
-				goto fail_rq;
 		}
 
 		list_del_init(&rq->queuelist);
@@ -1097,7 +1043,6 @@ bool blk_mq_dispatch_rq_list(struct request_queue *q, struct list_head *list,
 			break;
 		}
 
- fail_rq:
 		if (unlikely(ret != BLK_STS_OK)) {
 			errors++;
 			blk_mq_end_request(rq, BLK_STS_IOERR);
@@ -1580,13 +1525,6 @@ static blk_status_t __blk_mq_try_issue_directly(struct blk_mq_hw_ctx *hctx,
 	if (!blk_mq_get_driver_tag(rq, NULL, false))
 		goto insert;
 
-	ret = blk_mq_get_dispatch_budget(hctx);
-	if (ret == BLK_STS_RESOURCE) {
-		blk_mq_put_driver_tag(rq);
-		goto insert;
-	} else if (ret != BLK_STS_OK)
-		goto fail_rq;
-
 	new_cookie = request_to_qc_t(hctx, rq);
 
 	/*
@@ -1603,7 +1541,6 @@ static blk_status_t __blk_mq_try_issue_directly(struct blk_mq_hw_ctx *hctx,
 		__blk_mq_requeue_request(rq);
 		goto insert;
 	default:
- fail_rq:
 		*cookie = BLK_QC_T_NONE;
 		if (!dispatch_only)
 			blk_mq_end_request(rq, ret);
@@ -2595,9 +2532,6 @@ int blk_mq_alloc_tag_set(struct blk_mq_tag_set *set)
 		return -EINVAL;
 
 	if (!set->ops->queue_rq)
-		return -EINVAL;
-
-	if (!set->ops->get_budget ^ !set->ops->put_budget)
 		return -EINVAL;
 
 	if (set->queue_depth > BLK_MQ_MAX_DEPTH) {
