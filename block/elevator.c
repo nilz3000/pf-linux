@@ -852,6 +852,15 @@ int elv_register_queue(struct request_queue *q)
 	struct elevator_queue *e = q->elevator;
 	int error;
 
+	/*
+	 * When queue isn't registerd to gendisk, the elevator queue
+	 * will be added after it is registered to gendisk; When queue
+	 * is being unregistered, not necessary to add elevator queue
+	 * any more.
+	 */
+	if (!test_bit(QUEUE_FLAG_REGISTERED, &q->queue_flags))
+		return 0;
+
 	error = kobject_add(&e->kobj, &q->kobj, "%s", "iosched");
 	if (!error) {
 		struct elv_fs_entry *attr = e->type->elevator_attrs;
@@ -1054,10 +1063,6 @@ static int __elevator_change(struct request_queue *q, const char *name)
 {
 	char elevator_name[ELV_NAME_MAX];
 	struct elevator_type *e;
-
-	/* Make sure queue is not in the middle of being removed */
-	if (!test_bit(QUEUE_FLAG_REGISTERED, &q->queue_flags))
-		return -ENOENT;
 
 	/*
 	 * Special case for mq, turn off scheduling
