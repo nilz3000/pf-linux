@@ -127,13 +127,6 @@ static char chosen_elevator[ELV_NAME_MAX];
 static int __init elevator_setup(char *str)
 {
 	/*
-	 * blk-mq framework does not support "elevator" option.
-	 * Warn other users too.
-	 */
-	printk(KERN_WARNING
-		"Setting I/O scheduler via kernel command line " \
-		"is deprecated. Use udev rules instead.\n");
-	/*
 	 * Be backwards-compatible with previous kernels, so users
 	 * won't get the wrong elevator.
 	 */
