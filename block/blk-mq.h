@@ -26,16 +26,15 @@ struct blk_mq_ctx {
 } ____cacheline_aligned_in_smp;
 
 void blk_mq_run_hw_queue(struct blk_mq_hw_ctx *hctx, bool async);
+void blk_mq_freeze_queue(struct request_queue *q);
 void blk_mq_free_queue(struct request_queue *q);
 int blk_mq_update_nr_requests(struct request_queue *q, unsigned int nr);
 void blk_mq_wake_waiters(struct request_queue *q);
-bool blk_mq_dispatch_rq_list(struct request_queue *, struct list_head *, bool);
+bool blk_mq_dispatch_rq_list(struct request_queue *, struct list_head *);
 void blk_mq_flush_busy_ctxs(struct blk_mq_hw_ctx *hctx, struct list_head *list);
 bool blk_mq_hctx_has_pending(struct blk_mq_hw_ctx *hctx);
 bool blk_mq_get_driver_tag(struct request *rq, struct blk_mq_hw_ctx **hctx,
 				bool wait);
-struct request *blk_mq_dequeue_from_ctx(struct blk_mq_hw_ctx *hctx,
-					struct blk_mq_ctx *start);
 
 /*
  * Internal helpers for allocating/freeing the request map
@@ -55,7 +54,6 @@ int blk_mq_alloc_rqs(struct blk_mq_tag_set *set, struct blk_mq_tags *tags,
  */
 void __blk_mq_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
 				bool at_head);
-blk_status_t blk_mq_request_bypass_insert(struct request *rq);
 void blk_mq_insert_requests(struct blk_mq_hw_ctx *hctx, struct blk_mq_ctx *ctx,
 				struct list_head *list);
 
@@ -133,24 +131,6 @@ static inline bool blk_mq_hctx_stopped(struct blk_mq_hw_ctx *hctx)
 static inline bool blk_mq_hw_queue_mapped(struct blk_mq_hw_ctx *hctx)
 {
 	return hctx->nr_ctx && hctx->tags;
-}
-
-static inline void blk_mq_put_dispatch_budget(struct blk_mq_hw_ctx *hctx)
-{
-	struct request_queue *q = hctx->queue;
-
-	if (q->mq_ops->put_budget)
-		q->mq_ops->put_budget(hctx);
-}
-
-static inline blk_status_t blk_mq_get_dispatch_budget(
-		struct blk_mq_hw_ctx *hctx)
-{
-	struct request_queue *q = hctx->queue;
-
-	if (q->mq_ops->get_budget)
-		return q->mq_ops->get_budget(hctx);
-	return BLK_STS_OK;
 }
 
 #endif

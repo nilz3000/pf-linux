@@ -245,9 +245,8 @@ int scsi_execute(struct scsi_device *sdev, const unsigned char *cmd,
 	int ret = DRIVER_ERROR << 24;
 
 	req = blk_get_request(sdev->request_queue,
-			      (data_direction == DMA_TO_DEVICE ?
-			       REQ_OP_SCSI_OUT : REQ_OP_SCSI_IN) | REQ_PREEMPT,
-			      __GFP_RECLAIM);
+			data_direction == DMA_TO_DEVICE ?
+			REQ_OP_SCSI_OUT : REQ_OP_SCSI_IN, __GFP_RECLAIM);
 	if (IS_ERR(req))
 		return ret;
 	rq = scsi_req(req);
@@ -261,7 +260,7 @@ int scsi_execute(struct scsi_device *sdev, const unsigned char *cmd,
 	rq->retries = retries;
 	req->timeout = timeout;
 	req->cmd_flags |= flags;
-	req->rq_flags |= rq_flags | RQF_QUIET;
+	req->rq_flags |= rq_flags | RQF_QUIET | RQF_PREEMPT;
 
 	/*
 	 * head injection *required* here otherwise quiesce won't work
@@ -1272,7 +1271,7 @@ scsi_prep_state_check(struct scsi_device *sdev, struct request *req)
 			/*
 			 * If the devices is blocked we defer normal commands.
 			 */
-			if (req && !(req->cmd_flags & REQ_PREEMPT))
+			if (!(req->rq_flags & RQF_PREEMPT))
 				ret = BLKPREP_DEFER;
 			break;
 		default:
@@ -1281,7 +1280,7 @@ scsi_prep_state_check(struct scsi_device *sdev, struct request *req)
 			 * special commands.  In particular any user initiated
 			 * command is not allowed.
 			 */
-			if (req && !(req->cmd_flags & REQ_PREEMPT))
+			if (!(req->rq_flags & RQF_PREEMPT))
 				ret = BLKPREP_KILL;
 			break;
 		}
@@ -1911,32 +1910,25 @@ static void scsi_mq_done(struct scsi_cmnd *cmd)
 	blk_mq_complete_request(cmd->request);
 }
 
-static void scsi_mq_put_budget(struct blk_mq_hw_ctx *hctx)
+static blk_status_t scsi_queue_rq(struct blk_mq_hw_ctx *hctx,
+			 const struct blk_mq_queue_data *bd)
 {
-	struct request_queue *q = hctx->queue;
+	struct request *req = bd->rq;
+	struct request_queue *q = req->q;
 	struct scsi_device *sdev = q->queuedata;
 	struct Scsi_Host *shost = sdev->host;
-
-	atomic_dec(&shost->host_busy);
-	if (scsi_target(sdev)->can_queue > 0)
-		atomic_dec(&scsi_target(sdev)->target_busy);
-	atomic_dec(&sdev->device_busy);
-	put_device(&sdev->sdev_gendev);
-}
-
-static blk_status_t scsi_mq_get_budget(struct blk_mq_hw_ctx *hctx)
-{
-	struct request_queue *q = hctx->queue;
-	struct scsi_device *sdev = q->queuedata;
-	struct Scsi_Host *shost = sdev->host;
+	struct scsi_cmnd *cmd = blk_mq_rq_to_pdu(req);
 	blk_status_t ret;
+	int reason;
 
-	ret = prep_to_mq(scsi_prep_state_check(sdev, NULL));
-	if (ret == BLK_STS_RESOURCE || ret != BLK_STS_OK)
-		return ret;
+	ret = prep_to_mq(scsi_prep_state_check(sdev, req));
+	if (ret != BLK_STS_OK)
+		goto out;
 
+	ret = BLK_STS_RESOURCE;
 	if (!get_device(&sdev->sdev_gendev))
 		goto out;
+
 	if (!scsi_dev_queue_ready(q, sdev))
 		goto out_put_device;
 	if (!scsi_target_queue_ready(shost, sdev))
@@ -1944,38 +1936,10 @@ static blk_status_t scsi_mq_get_budget(struct blk_mq_hw_ctx *hctx)
 	if (!scsi_host_queue_ready(q, shost, sdev))
 		goto out_dec_target_busy;
 
-	return BLK_STS_OK;
-
-out_dec_target_busy:
-	if (scsi_target(sdev)->can_queue > 0)
-		atomic_dec(&scsi_target(sdev)->target_busy);
-out_dec_device_busy:
-	atomic_dec(&sdev->device_busy);
-out_put_device:
-	put_device(&sdev->sdev_gendev);
-out:
-	return BLK_STS_RESOURCE;
-}
-
-static blk_status_t scsi_queue_rq(struct blk_mq_hw_ctx *hctx,
-			 const struct blk_mq_queue_data *bd)
-{
-	struct request *req = bd->rq;
-	struct request_queue *q = req->q;
-	struct scsi_device *sdev = q->queuedata;
-	struct scsi_cmnd *cmd = blk_mq_rq_to_pdu(req);
-	blk_status_t ret;
-	int reason;
-
-	ret = prep_to_mq(scsi_prep_state_check(sdev, req));
-	if (ret != BLK_STS_OK)
-		goto out_put_budget;
-
-	ret = BLK_STS_RESOURCE;
 	if (!(req->rq_flags & RQF_DONTPREP)) {
 		ret = prep_to_mq(scsi_mq_prep_fn(req));
 		if (ret != BLK_STS_OK)
-			goto out_put_budget;
+			goto out_dec_host_busy;
 		req->rq_flags |= RQF_DONTPREP;
 	} else {
 		blk_mq_start_request(req);
@@ -1993,13 +1957,21 @@ static blk_status_t scsi_queue_rq(struct blk_mq_hw_ctx *hctx,
 	if (reason) {
 		scsi_set_blocked(cmd, reason);
 		ret = BLK_STS_RESOURCE;
-		goto out_put_budget;
+		goto out_dec_host_busy;
 	}
 
 	return BLK_STS_OK;
 
-out_put_budget:
-	scsi_mq_put_budget(hctx);
+out_dec_host_busy:
+	atomic_dec(&shost->host_busy);
+out_dec_target_busy:
+	if (scsi_target(sdev)->can_queue > 0)
+		atomic_dec(&scsi_target(sdev)->target_busy);
+out_dec_device_busy:
+	atomic_dec(&sdev->device_busy);
+out_put_device:
+	put_device(&sdev->sdev_gendev);
+out:
 	switch (ret) {
 	case BLK_STS_OK:
 		break;
@@ -2202,8 +2174,6 @@ struct request_queue *scsi_alloc_queue(struct scsi_device *sdev)
 }
 
 static const struct blk_mq_ops scsi_mq_ops = {
-	.get_budget	= scsi_mq_get_budget,
-	.put_budget	= scsi_mq_put_budget,
 	.queue_rq	= scsi_queue_rq,
 	.complete	= scsi_softirq_done,
 	.timeout	= scsi_timeout,
@@ -2920,28 +2890,12 @@ scsi_device_quiesce(struct scsi_device *sdev)
 {
 	int err;
 
-	/*
-	 * Simply quiesing SCSI device isn't safe, it is easy
-	 * to use up requests because all these allocated requests
-	 * can't be dispatched when device is put in QIUESCE.
-	 * Then no request can be allocated and we may hang
-	 * somewhere, such as system suspend/resume.
-	 *
-	 * So we set block queue in preempt only first, no new
-	 * normal request can enter queue any more, and all pending
-	 * requests are drained once blk_set_preempt_only()
-	 * returns. Only RQF_PREEMPT is allowed in preempt only mode.
-	 */
-	blk_set_preempt_only(sdev->request_queue, true);
-
 	mutex_lock(&sdev->state_mutex);
 	err = scsi_device_set_state(sdev, SDEV_QUIESCE);
 	mutex_unlock(&sdev->state_mutex);
 
-	if (err) {
-		blk_set_preempt_only(sdev->request_queue, false);
+	if (err)
 		return err;
-	}
 
 	scsi_run_queue(sdev->request_queue);
 	while (atomic_read(&sdev->device_busy)) {
@@ -2972,8 +2926,6 @@ void scsi_device_resume(struct scsi_device *sdev)
 	    scsi_device_set_state(sdev, SDEV_RUNNING) == 0)
 		scsi_run_queue(sdev->request_queue);
 	mutex_unlock(&sdev->state_mutex);
-
-	blk_set_preempt_only(sdev->request_queue, false);
 }
 EXPORT_SYMBOL(scsi_device_resume);
 

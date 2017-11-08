@@ -927,18 +927,11 @@ unlock:
 void blk_unregister_queue(struct gendisk *disk)
 {
 	struct request_queue *q = disk->queue;
-	bool elv_registered;
 
 	if (WARN_ON(!q))
 		return;
 
-	mutex_lock(&q->sysfs_lock);
 	queue_flag_clear_unlocked(QUEUE_FLAG_REGISTERED, q);
-	if (q->request_fn || (q->mq_ops && q->elevator))
-		elv_registered = q->elevator->registered;
-	else
-		elv_registered = false;
-	mutex_unlock(&q->sysfs_lock);
 
 	wbt_exit(q);
 
@@ -946,7 +939,7 @@ void blk_unregister_queue(struct gendisk *disk)
 	if (q->mq_ops)
 		blk_mq_unregister_dev(disk_to_dev(disk), q);
 
-	if (elv_registered)
+	if (q->request_fn || (q->mq_ops && q->elevator))
 		elv_unregister_queue(q);
 
 	kobject_uevent(&q->kobj, KOBJ_REMOVE);
