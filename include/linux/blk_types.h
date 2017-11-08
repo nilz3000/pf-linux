@@ -161,6 +161,8 @@ struct bio {
  */
 #define BIO_RESET_BITS	BVEC_POOL_OFFSET
 
+typedef __u32 __bitwise blk_mq_req_flags_t;
+
 /*
  * Operations and flags common to the bio and request structures.
  * We use 8 bits for encoding the operation, and the remaining 24 for flags.
@@ -228,11 +230,6 @@ enum req_flag_bits {
 	__REQ_NOUNMAP,		/* do not free blocks when zeroing */
 
 	__REQ_NOWAIT,           /* Don't wait if request will block */
-	/*
-	 * set for "ide_preempt" requests and also for requests for which the
-	 * SCSI "quiesce" state must be ignored.
-	 */
-	__REQ_PREEMPT,
 	__REQ_NR_BITS,		/* stops here */
 };
 
@@ -252,7 +249,6 @@ enum req_flag_bits {
 
 #define REQ_NOUNMAP		(1ULL << __REQ_NOUNMAP)
 #define REQ_NOWAIT		(1ULL << __REQ_NOWAIT)
-#define REQ_PREEMPT		(1ULL << __REQ_PREEMPT)
 
 #define REQ_FAILFAST_MASK \
 	(REQ_FAILFAST_DEV | REQ_FAILFAST_TRANSPORT | REQ_FAILFAST_DRIVER)

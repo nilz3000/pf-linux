@@ -2630,7 +2630,7 @@ void tcp_simple_retransmit(struct sock *sk)
 
 	tcp_clear_retrans_hints_partial(tp);
 
-	if (prior_lost == tp->lost_out)
+	if (!tp->lost_out)
 		return;
 
 	if (tcp_is_reno(tp))
@@ -2823,6 +2823,7 @@ static void tcp_fastretrans_alert(struct sock *sk, const int acked,
 	/* D. Check state exit conditions. State can be terminated
 	 *    when high_seq is ACKed. */
 	if (icsk->icsk_ca_state == TCP_CA_Open) {
+		WARN_ON(tp->retrans_out != 0);
 		tp->retrans_stamp = 0;
 	} else if (!before(tp->snd_una, tp->high_seq)) {
 		switch (icsk->icsk_ca_state) {
