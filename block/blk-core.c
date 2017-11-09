@@ -818,9 +818,6 @@ int blk_queue_enter(struct request_queue *q, blk_mq_req_flags_t flags)
 				success = true;
 			} else {
 				percpu_ref_put(&q->q_usage_counter);
-				WARN_ONCE(true,
-					  "%s: Attempt to allocate non-preempt request in preempt-only mode.\n",
-					  kobject_name(q->kobj.parent));
 			}
 		}
 		rcu_read_unlock_sched();
