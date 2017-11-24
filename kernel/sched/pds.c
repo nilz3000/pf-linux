@@ -96,7 +96,7 @@ enum {
 
 static inline void print_scheduler_version(void)
 {
-	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.98f by Alfred Chen.\n");
+	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.98g by Alfred Chen.\n");
 }
 
 /* task_struct::on_rq states: */
@@ -928,8 +928,6 @@ static enum hrtimer_restart hrtick(struct hrtimer *timer)
 	WARN_ON_ONCE(cpu_of(rq) != smp_processor_id());
 
 	raw_spin_lock(&rq->lock);
-	update_rq_clock(rq);
-
 	p = rq->curr;
 	p->time_slice = 0;
 	resched_curr(rq);
