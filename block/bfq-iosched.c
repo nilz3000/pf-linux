@@ -450,8 +450,10 @@ static void bfq_merged_requests(struct request_queue *q, struct request *rq,
 	 * reposition in fifo if next is older than rq
 	 */
 	if (!list_empty(&rq->queuelist) && !list_empty(&next->queuelist) &&
-	    time_before(next->start_time, rq->start_time))
+	    time_before(rq_fifo_time(next), rq_fifo_time(rq))) {
 		list_move(&rq->queuelist, &next->queuelist);
+		rq_set_fifo_time(rq, rq_fifo_time(next));
+	}
 
 	bfq_remove_request(next);
 }
@@ -564,6 +566,7 @@ static void bfq_dispatch_insert(struct request_queue *q, struct request *rq)
 	struct bfq_data *bfqd = q->elevator->elevator_data;
 	struct bfq_queue *bfqq = RQ_BFQQ(rq);
 
+	bfqq->next_rq = bfq_find_next_rq(bfqd, bfqq, rq);
 	bfq_remove_request(rq);
 	bfqq->dispatched++;
 	elv_dispatch_sort(q, rq);
@@ -577,9 +580,7 @@ static void bfq_dispatch_insert(struct request_queue *q, struct request *rq)
  */
 static struct request *bfq_check_fifo(struct bfq_queue *bfqq)
 {
-	struct bfq_data *bfqd = bfqq->bfqd;
-	struct request *rq;
-	int fifo;
+	struct request *rq = NULL;
 
 	if (bfq_bfqq_fifo_expire(bfqq))
 		return NULL;
@@ -589,10 +590,8 @@ static struct request *bfq_check_fifo(struct bfq_queue *bfqq)
 	if (list_empty(&bfqq->fifo))
 		return NULL;
 
-	fifo = bfq_bfqq_sync(bfqq);
 	rq = rq_entry_fifo(bfqq->fifo.next);
-
-	if (time_before(jiffies, rq->start_time + bfqd->bfq_fifo_expire[fifo]))
+	if (time_before(jiffies, rq_fifo_time(rq)))
 		return NULL;
 
 	return rq;
@@ -1360,11 +1359,14 @@ static void bfq_update_idle_window(struct bfq_data *bfqd,
 
 	enable_idle = bfq_bfqq_idle_window(bfqq);
 
-	if (atomic_read(&cic->ioc->nr_tasks) == 0 ||
-	    bfqd->bfq_slice_idle == 0 || (bfqd->hw_tag && CIC_SEEKY(cic)))
+	if (atomic_read(&cic->ioc->nr_tasks) == 0 || bfqd->bfq_slice_idle == 0 ||
+		(!bfqd->bfq_desktop && bfqd->hw_tag && CIC_SEEKY(cic)))
 		enable_idle = 0;
 	else if (bfq_sample_valid(cic->ttime_samples)) {
-		if (cic->ttime_mean > bfqd->bfq_slice_idle)
+		unsigned int slice_idle = bfqd->bfq_slice_idle;
+		if (bfq_sample_valid(cic->seek_samples) && CIC_SEEKY(cic))
+			slice_idle = msecs_to_jiffies(BFQ_MIN_TT);
+		if (cic->ttime_mean > slice_idle)
 			enable_idle = 0;
 		else
 			enable_idle = 1;
@@ -1418,6 +1420,7 @@ static void bfq_insert_request(struct request_queue *q, struct request *rq)
 
 	bfq_add_rq_rb(rq);
 
+	rq_set_fifo_time(rq, jiffies + bfqd->bfq_fifo_expire[rq_is_sync(rq)]);
 	list_add_tail(&rq->queuelist, &bfqq->fifo);
 
 	bfq_rq_enqueued(bfqd, bfqq, rq);
@@ -1787,6 +1790,7 @@ static void *bfq_init_queue(struct request_queue *q)
 	bfqd->bfq_max_budget_async_rq = bfq_max_budget_async_rq;
 	bfqd->bfq_timeout[ASYNC] = bfq_timeout_async;
 	bfqd->bfq_timeout[SYNC] = bfq_timeout_sync;
+	bfqd->bfq_desktop = 1;
 
 	return bfqd;
 }
@@ -1850,6 +1854,7 @@ SHOW_FUNCTION(bfq_max_budget_show, bfqd->bfq_user_max_budget, 0);
 SHOW_FUNCTION(bfq_max_budget_async_rq_show, bfqd->bfq_max_budget_async_rq, 0);
 SHOW_FUNCTION(bfq_timeout_sync_show, bfqd->bfq_timeout[SYNC], 1);
 SHOW_FUNCTION(bfq_timeout_async_show, bfqd->bfq_timeout[ASYNC], 1);
+SHOW_FUNCTION(bfq_desktop_show, bfqd->bfq_desktop, 0);
 #undef SHOW_FUNCTION
 
 #define STORE_FUNCTION(__FUNC, __PTR, MIN, MAX, __CONV)			\
@@ -1882,6 +1887,7 @@ STORE_FUNCTION(bfq_max_budget_async_rq_store, &bfqd->bfq_max_budget_async_rq,
 		1, INT_MAX, 0);
 STORE_FUNCTION(bfq_timeout_async_store, &bfqd->bfq_timeout[ASYNC], 0,
 		INT_MAX, 1);
+STORE_FUNCTION(bfq_desktop_store, &bfqd->bfq_desktop, 0, 1, 0);
 #undef STORE_FUNCTION
 
 static inline bfq_service_t bfq_estimated_max_budget(struct bfq_data *bfqd)
@@ -1947,6 +1953,7 @@ static struct elv_fs_entry bfq_attrs[] = {
 	BFQ_ATTR(max_budget_async_rq),
 	BFQ_ATTR(timeout_sync),
 	BFQ_ATTR(timeout_async),
+	BFQ_ATTR(desktop),
 	__ATTR_NULL
 };
 

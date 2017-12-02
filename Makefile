@@ -1,8 +1,8 @@
 VERSION = 2
 PATCHLEVEL = 6
 SUBLEVEL = 31
-EXTRAVERSION = -pf6
-NAME = Man-Eating Seals of Antiquity
+EXTRAVERSION = -pf7
+NAME = Crazy World
 
 # *DOCUMENTATION*
 # To see a list of typical targets execute "make help"

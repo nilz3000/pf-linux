@@ -269,17 +269,15 @@ if multiple SCHED_ISO tasks are running, they purely round robin at rr_interval
 rate). However if ISO tasks run for more than a tunable finite amount of time,
 they are then demoted back to SCHED_NORMAL scheduling. This finite amount of
 time is the percentage of _total CPU_ available across the machine, configurable
-as a percentage in the following "resource handling" tunable (as opposed to a
-scheduler tunable):
+as a percentage in the following tunable:
 
 	/proc/sys/kernel/iso_cpu
 
-and is set to 70% by default. It is calculated over a rolling 5 second average
-Because it is the total CPU available, it means that on a multi CPU machine, it
-is possible to have an ISO task running as realtime scheduling indefinitely on
-just one CPU, as the other CPUs will be available. Setting this to 100 is the
-equivalent of giving all users SCHED_RR access and setting it to 0 removes the
-ability to run any pseudo-realtime tasks.
+and is set to 70% by default. Because it is the total CPU available, it means
+that on a multi CPU machine, it is possible to have an ISO task running as
+realtime scheduling indefinitely on just one CPU, as the other CPUs will be
+available. Setting this to 100 is the equivalent of giving all users SCHED_RR
+access and setting it to 0 removes the ability to run any pseudo-realtime tasks.
 
 A feature of BFS is that it detects when an application tries to obtain a
 realtime policy (SCHED_RR or SCHED_FIFO) and the caller does not have the

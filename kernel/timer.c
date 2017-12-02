@@ -1153,7 +1153,13 @@ void update_process_times(int user_tick)
 	struct task_struct *p = current;
 	int cpu = smp_processor_id();
 
-	/* Accounting is done within sched_bfs.c */
+#ifdef CONFIG_CPU_CFS
+	/* 
+	 * Note: this timer irq context must be accounted for as well. 
+	 * Accounting is done within BFS
+	 */
+	account_process_tick(p, user_tick);
+#endif
 	run_local_timers();
 	if (rcu_pending(cpu))
 		rcu_check_callbacks(cpu, user_tick);

@@ -240,6 +240,7 @@ struct bfq_data {
 	unsigned int bfq_back_penalty;
 	unsigned int bfq_back_max;
 	unsigned int bfq_slice_idle;
+	unsigned int bfq_desktop;
 
 	unsigned int bfq_user_max_budget;
 	unsigned int bfq_max_budget_async_rq;
