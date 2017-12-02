@@ -930,6 +930,171 @@ DECLARE_PCI_FIXUP_FINAL(PCI_ANY_ID, PCI_ANY_ID, quirk_cardbus_legacy);
 DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_ANY_ID, PCI_ANY_ID, quirk_cardbus_legacy);
 
 /*
+ * Optional quirk which forces Intel ICH SATA IDE controllers into AHCI mode.
+ */
+
+static bool ich_force_ahci;
+module_param(ich_force_ahci, bool, 0444);
+MODULE_PARM_DESC(ich_force_ahci, "AHCI mode for ICH6 and later");
+
+struct ich_sata_bits {
+	u8  prog, device;
+	u16 map;
+	u32 sir;
+};
+
+static bool quirk_ahci_sata_dev_setup(struct pci_dev *pdev, bool warn, struct ich_sata_bits *bits_ret)
+{
+	struct ich_sata_bits bits;
+
+	/* If we're in IDE mode, select AHCI mode, else abort.
+	 * It's likely that the PCI ID will vary according to mode; for such
+	 * controllers, the mode checking isn't really relevant.
+	 */
+	pci_read_config_word(pdev, 0x90, &bits.map);
+	switch (bits.map & 0xC0) {
+	case 0x00: /* IDE mode */
+		break;
+	case 0x40: /* AHCI mode */
+		if (warn)
+			printk (KERN_INFO "Not quirking ICH SATA controller to AHCI mode (already there)\n");
+		return true;
+	case 0x80: /* RAID mode */
+		if (warn)
+			printk (KERN_INFO "Not quirking ICH SATA controller to AHCI mode (in RAID mode)\n");
+		return true;
+	default: /* reserved/unknown */
+		if (warn)
+			printk (KERN_INFO "Not quirking ICH SATA controller to AHCI mode (unknown mode)\n");
+		return true;
+	}
+	pci_write_config_word(pdev, 0x90, 0x40); /* AHCI + non-combined */
+
+	/* Need to set the SCRAE bit */
+	pci_read_config_dword(pdev, 0x94, &bits.sir);
+	pci_write_config_dword(pdev, 0x94, bits.sir | 0x200);
+
+	/* Set PCI_CLASS_STORAGE_SATA */
+	if ((pdev->class >> 8) == PCI_CLASS_STORAGE_IDE ||
+	    (pdev->class >> 8) == PCI_CLASS_STORAGE_SATA_AHCI /* just in case :-) */) {
+		pci_read_config_byte(pdev, PCI_CLASS_PROG, &bits.prog);
+		pci_read_config_byte(pdev, PCI_CLASS_DEVICE, &bits.device);
+		pci_write_config_byte(pdev, PCI_CLASS_PROG, 0x01);
+		pci_write_config_byte(pdev, PCI_CLASS_DEVICE, 0x06);
+		pdev->class = PCI_CLASS_STORAGE_SATA_AHCI;
+	}
+
+	/* The PCI device ID may have been changed */
+	pci_read_config_word(pdev, PCI_DEVICE_ID, &pdev->device);
+	/* Report the ID in case a resume quirk is needed */
+	printk(KERN_DEBUG "ICH AHCI quirk: SATA AHCI controller has device ID %04x:%04x\n",
+	       pdev->vendor, pdev->device);
+
+	if (bits_ret)
+		*bits_ret = bits;
+
+	return false;
+}
+
+static inline void quirk_ahci_sata_undo(struct pci_dev *pdev, const struct ich_sata_bits *bits)
+{
+	/* Restore configuration */
+	pci_write_config_byte(pdev, PCI_CLASS_PROG, bits->prog);
+	pci_write_config_byte(pdev, PCI_CLASS_DEVICE, bits->device);
+	pci_write_config_dword(pdev, 0x94, bits->sir);
+	pci_write_config_word(pdev, 0x90, bits->map);
+
+	/* The PCI device ID may have been changed back */
+	pci_read_config_word(pdev, PCI_DEVICE_ID, &pdev->device);
+}
+
+static void quirk_ahci_sata(struct pci_dev *pdev)
+{
+	int ret = 0;
+	struct ich_sata_bits bits;
+
+	if (!ich_force_ahci)
+		return;
+
+	if (quirk_ahci_sata_dev_setup(pdev, true, &bits))
+		return; /* nothing to do */
+
+	/* Try to allocate the resource on BAR 5.
+	 * If we have a bad alignment, don't even try,
+	 * thus neatly avoiding a scary warning.
+	 */
+	if (!pci_resource_alignment(pdev, &pdev->resource[5]))
+		goto done;
+
+	ret = pci_assign_resource(pdev, 5);
+	if (!ret)
+	{
+done:
+		printk (KERN_INFO "Quirked ICH SATA controller to AHCI mode\n");
+		if (bits.map & 3) /* was in combined mode? */
+			printk (KERN_WARNING "Your ICH SATA controller is in AHCI mode. PATA devices attached to it WILL be ignored.\n");
+		return;
+	}
+	/* If we've succeeded, we don't reach this point */
+
+	/* Eek! Quick! Unquirk it and prevent re-quirking on resume */
+	quirk_ahci_sata_undo(pdev, &bits);
+	ich_force_ahci = 0;
+	printk (KERN_ERR "ICH AHCI quirk: pci_assign_resource returned %d - continuing anyway\n", ret);
+}
+
+/* We may need to re-quirk on resume */
+static void quirk_ahci_sata_resume(struct pci_dev *pdev)
+{
+	if (ich_force_ahci && !quirk_ahci_sata_dev_setup(pdev, false, NULL)) {
+		pci_update_resource(pdev, 5);
+		printk (KERN_INFO "Re-quirked ICH SATA controller to AHCI mode\n");
+	}
+}
+
+/* Quirks which are applied on device initialisation.
+ * PCI IDs are of SATA controllers in IDE mode.
+ */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x2652, quirk_ahci_sata);	/* ICH6R, ICH6RW */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x2653, quirk_ahci_sata);	/* ICH6M */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x2680, quirk_ahci_sata);	/* 631xESB, 632xESB */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x27c4, quirk_ahci_sata);	/* ICH7M */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x2828, quirk_ahci_sata);	/* ICH8M */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x2928, quirk_ahci_sata);	/* ICH9M */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x292d, quirk_ahci_sata);	/* ICH9M */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x292e, quirk_ahci_sata);	/* ICH9M */
+
+#if 0
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x2651, quirk_ahci_sata);	/* ICH6, ICH6W */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x27c0, quirk_ahci_sata);	/* ICH7 */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x2820, quirk_ahci_sata);	/* ICH8 */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x2825, quirk_ahci_sata);	/* ICH8 */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x2920, quirk_ahci_sata);	/* ICH9 */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x2921, quirk_ahci_sata);	/* ICH9 */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x2926, quirk_ahci_sata);	/* ICH9 */
+
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x3a00, quirk_ahci_sata);	/* ICH10 */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x3a06, quirk_ahci_sata);	/* ICH10 */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x3a20, quirk_ahci_sata);	/* ICH10 */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x3a26, quirk_ahci_sata);	/* ICH10 */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x3b20, quirk_ahci_sata);	/* PCH */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x3b20, quirk_ahci_sata);	/* PCH */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x3b21, quirk_ahci_sata);	/* PCH */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x3b26, quirk_ahci_sata);	/* PCH */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x3b28, quirk_ahci_sata);	/* PCH */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x3b2d, quirk_ahci_sata);	/* PCH */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x3b2e, quirk_ahci_sata);	/* PCH */
+#endif
+
+/* Quirks which are applied on resuming from suspend.
+ * PCI IDs are of SATA controllers in AHCI mode.
+ * The controllers are probably actually in IDE mode.
+ * If forcing AHCI mode at boot causes resume failure (wait for three
+ * minutes; you'll see a time-out), you need to add an entry here.
+ */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL, 0x27c5, quirk_ahci_sata_resume); /* ICH7M AHCI */
+
+/*
  * Following the PCI ordering rules is optional on the AMD762. I'm not
  * sure what the designers were smoking but let's not inhale...
  *
@@ -1457,7 +1622,8 @@ static void quirk_jmicron_ata(struct pci_dev *pdev)
 	conf5 &= ~(1 << 24);  /* Clear bit 24 */
 
 	switch (pdev->device) {
-	case PCI_DEVICE_ID_JMICRON_JMB360:
+	case PCI_DEVICE_ID_JMICRON_JMB360: /* SATA single port */
+	case PCI_DEVICE_ID_JMICRON_JMB362: /* SATA dual ports */
 		/* The controller should be in single function ahci mode */
 		conf1 |= 0x0002A100; /* Set 8, 13, 15, 17 */
 		break;
@@ -1493,12 +1659,14 @@ static void quirk_jmicron_ata(struct pci_dev *pdev)
 }
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB360, quirk_jmicron_ata);
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB361, quirk_jmicron_ata);
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB362, quirk_jmicron_ata);
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB363, quirk_jmicron_ata);
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB365, quirk_jmicron_ata);
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB366, quirk_jmicron_ata);
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB368, quirk_jmicron_ata);
 DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB360, quirk_jmicron_ata);
 DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB361, quirk_jmicron_ata);
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB362, quirk_jmicron_ata);
 DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB363, quirk_jmicron_ata);
 DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB365, quirk_jmicron_ata);
 DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB366, quirk_jmicron_ata);
@@ -2127,6 +2295,7 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD, 0x9602, quirk_disable_msi);
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ASUSTEK, 0x9602, quirk_disable_msi);
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AI, 0x9602, quirk_disable_msi);
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA, 0xa238, quirk_disable_msi);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x5a3f, quirk_disable_msi);
 
 /* Go through the list of Hypertransport capabilities and
  * return 1 if a HT MSI capability is found and enabled */
@@ -2218,15 +2387,16 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SERVERWORKS,
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_8132_BRIDGE,
 			 ht_enable_msi_mapping);
 
-/* The P5N32-SLI Premium motherboard from Asus has a problem with msi
+/* The P5N32-SLI motherboards from Asus have a problem with msi
  * for the MCP55 NIC. It is not yet determined whether the msi problem
  * also affects other devices. As for now, turn off msi for this device.
  */
 static void __devinit nvenet_msi_disable(struct pci_dev *dev)
 {
-	if (dmi_name_in_vendors("P5N32-SLI PREMIUM")) {
+	if (dmi_name_in_vendors("P5N32-SLI PREMIUM") ||
+	    dmi_name_in_vendors("P5N32-E SLI")) {
 		dev_info(&dev->dev,
-			 "Disabling msi for MCP55 NIC on P5N32-SLI Premium\n");
+			 "Disabling msi for MCP55 NIC on P5N32-SLI\n");
 		dev->no_msi = 1;
 	}
 }

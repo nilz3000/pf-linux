@@ -1620,6 +1620,7 @@ static struct file *do_last(struct nameidata *nd, struct path *path,
 	case LAST_DOTDOT:
 		follow_dotdot(nd);
 		dir = nd->path.dentry;
+	case LAST_DOT:
 		if (nd->path.mnt->mnt_sb->s_type->fs_flags & FS_REVAL_DOT) {
 			if (!dir->d_op->d_revalidate(dir, nd)) {
 				error = -ESTALE;
@@ -1627,7 +1628,6 @@ static struct file *do_last(struct nameidata *nd, struct path *path,
 			}
 		}
 		/* fallthrough */
-	case LAST_DOT:
 	case LAST_ROOT:
 		if (open_flag & O_CREAT)
 			goto exit;
@@ -2254,6 +2254,8 @@ int vfs_unlink(struct inode *dir, struct dentry *dentry)
 
 	if (!dir->i_op->unlink)
 		return -EPERM;
+
+	vfs_check_frozen(dir->i_sb, SB_FREEZE_WRITE);
 
 	mutex_lock(&dentry->d_inode->i_mutex);
 	if (d_mountpoint(dentry))

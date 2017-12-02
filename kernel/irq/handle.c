@@ -419,6 +419,7 @@ irqreturn_t handle_IRQ_event(unsigned int irq, struct irqaction *action)
 		}
 
 		retval |= ret;
+		action->watch.last_ret = ret;
 		action = action->next;
 	} while (action);
 
@@ -464,8 +465,7 @@ unsigned int __do_IRQ(unsigned int irq)
 			desc->chip->ack(irq);
 		if (likely(!(desc->status & IRQ_DISABLED))) {
 			action_ret = handle_IRQ_event(irq, desc->action);
-			if (!noirqdebug)
-				note_interrupt(irq, desc, action_ret);
+			note_interrupt(irq, desc, action_ret);
 		}
 		desc->chip->end(irq);
 		return 1;
@@ -518,8 +518,7 @@ unsigned int __do_IRQ(unsigned int irq)
 		raw_spin_unlock(&desc->lock);
 
 		action_ret = handle_IRQ_event(irq, action);
-		if (!noirqdebug)
-			note_interrupt(irq, desc, action_ret);
+		note_interrupt(irq, desc, action_ret);
 
 		raw_spin_lock(&desc->lock);
 		if (likely(!(desc->status & IRQ_PENDING)))

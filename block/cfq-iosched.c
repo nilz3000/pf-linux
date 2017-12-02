@@ -1788,6 +1788,10 @@ static bool cfq_should_idle(struct cfq_data *cfqd, struct cfq_queue *cfqq)
 	if (prio == IDLE_WORKLOAD)
 		return false;
 
+	/* Don't idle if slice idling is disabled by the user */
+	if (cfqd->cfq_slice_idle == 0)
+		return false;
+
 	/* We do for queues that were marked with idle window flag. */
 	if (cfq_cfqq_idle_window(cfqq) &&
 	   !(blk_queue_nonrot(cfqd->queue) && cfqd->hw_tag))
@@ -2503,14 +2507,9 @@ static void cfq_free_io_context(struct io_context *ioc)
 	__call_for_each_cic(ioc, cic_free_func);
 }
 
-static void cfq_exit_cfqq(struct cfq_data *cfqd, struct cfq_queue *cfqq)
+static void cfq_put_cooperator(struct cfq_queue *cfqq)
 {
 	struct cfq_queue *__cfqq, *next;
-
-	if (unlikely(cfqq == cfqd->active_queue)) {
-		__cfq_slice_expired(cfqd, cfqq, 0);
-		cfq_schedule_dispatch(cfqd);
-	}
 
 	/*
 	 * If this queue was scheduled to merge with another queue, be
@@ -2527,6 +2526,16 @@ static void cfq_exit_cfqq(struct cfq_data *cfqd, struct cfq_queue *cfqq)
 		cfq_put_queue(__cfqq);
 		__cfqq = next;
 	}
+}
+
+static void cfq_exit_cfqq(struct cfq_data *cfqd, struct cfq_queue *cfqq)
+{
+	if (unlikely(cfqq == cfqd->active_queue)) {
+		__cfq_slice_expired(cfqd, cfqq, 0);
+		cfq_schedule_dispatch(cfqd);
+	}
+
+	cfq_put_cooperator(cfqq);
 
 	cfq_put_queue(cfqq);
 }
@@ -2685,7 +2694,6 @@ static void changed_ioprio(struct io_context *ioc, struct cfq_io_context *cic)
 static void cfq_ioc_set_ioprio(struct io_context *ioc)
 {
 	call_for_each_cic(ioc, changed_ioprio);
-	ioc->ioprio_changed = 0;
 }
 
 static void cfq_init_cfqq(struct cfq_data *cfqd, struct cfq_queue *cfqq,
@@ -2971,8 +2979,13 @@ cfq_get_io_context(struct cfq_data *cfqd, gfp_t gfp_mask)
 		goto err_free;
 
 out:
-	smp_read_barrier_depends();
-	if (unlikely(ioc->ioprio_changed))
+	/*
+	 * test_and_clear_bit() implies a memory barrier, paired with
+	 * the wmb() in fs/ioprio.c, so the value seen for ioprio is the
+	 * new one.
+	 */
+	if (unlikely(test_and_clear_bit(IOC_CFQ_IOPRIO_CHANGED,
+					ioc->ioprio_changed)))
 		cfq_ioc_set_ioprio(ioc);
 
 #ifdef CONFIG_CFQ_GROUP_IOSCHED
@@ -3470,6 +3483,9 @@ split_cfqq(struct cfq_io_context *cic, struct cfq_queue *cfqq)
 	}
 
 	cic_set_cfqq(cic, NULL, 1);
+
+	cfq_put_cooperator(cfqq);
+
 	cfq_put_queue(cfqq);
 	return NULL;
 }
