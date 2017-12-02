@@ -1,7 +1,7 @@
 VERSION = 2
 PATCHLEVEL = 6
 SUBLEVEL = 32
-EXTRAVERSION = -pf6
+EXTRAVERSION = -pf7
 NAME = Man-Eating Seals of Antiquity
 
 # *DOCUMENTATION*
