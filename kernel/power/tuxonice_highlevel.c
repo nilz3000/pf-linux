@@ -105,7 +105,7 @@ EXPORT_SYMBOL_GPL(tuxonice_signature);
 unsigned long boot_kernel_data_buffer;
 
 static char *result_strings[] = {
-	"Hiberation was aborted",
+	"Hibernation was aborted",
 	"The user requested that we cancel the hibernation",
 	"No storage was available",
 	"Insufficient storage was available",
@@ -1228,6 +1228,8 @@ static struct toi_sysfs_data sysfs_params[] = {
 			TOI_LATE_CPU_HOTPLUG, 0),
 	SYSFS_STRING("binary_signature", SYSFS_READONLY,
 			tuxonice_signature, 9, 0, NULL),
+	SYSFS_INT("max_workers", SYSFS_RW, &toi_max_workers, 0, NR_CPUS, 0,
+			NULL),
 #ifdef CONFIG_TOI_KEEP_IMAGE
 	SYSFS_BIT("keep_image", SYSFS_RW , &toi_bkd.toi_action, TOI_KEEP_IMAGE,
 			0),
