@@ -1,7 +1,7 @@
 /*
  * kernel/power/tuxonice_file.c
  *
- * Copyright (C) 2005-2008 Nigel Cunningham (nigel at tuxonice net)
+ * Copyright (C) 2005-2010 Nigel Cunningham (nigel at tuxonice net)
  *
  * Distributed under GPLv2.
  *
@@ -116,7 +116,8 @@ static unsigned long get_usable_pages(struct toi_bdev_info *dev_info)
 static int toi_file_register_storage(void)
 {
 	struct toi_bdev_info *devinfo;
-	int result;
+	int result = 0;
+	struct fs_info *fs_info;
 
 	toi_message(TOI_IO, TOI_VERBOSE, 0, "toi_file_register_storage.");
 	if (!strlen(toi_file_target)) {
@@ -146,8 +147,7 @@ static int toi_file_register_storage(void)
 				toi_file_dev_t = stat.rdev;
 		}
 
-		toi_file_target_bdev = toi_open_by_devnum(toi_file_dev_t,
-				FMODE_READ | FMODE_NDELAY);
+		toi_file_target_bdev = toi_open_by_devnum(toi_file_dev_t);
 		if (IS_ERR(toi_file_target_bdev)) {
 			printk(KERN_INFO "Got a dev_num (%lx) but failed to "
 					"open it.\n",
@@ -194,9 +194,19 @@ static int toi_file_register_storage(void)
 	devinfo->allocator = &toi_fileops;
 	devinfo->allocator_index = 0;
 
-	result = uuid_from_block_dev(toi_file_target_bdev, devinfo->uuid);
+	fs_info = fs_info_from_block_dev(toi_file_target_bdev);
+	if (fs_info && !IS_ERR(fs_info)) {
+		memcpy(devinfo->uuid, &fs_info->uuid, 16);
+		free_fs_info(fs_info);
+	} else
+		result = (int) PTR_ERR(fs_info);
+
+	/* Unlike swap code, only complain if fs_info_from_block_dev returned
+	 * -ENOMEM. The 'file' might be a full partition, so might validly not
+	 * have an identifiable type, UUID etc.
+	 */
 	if (result)
-		printk(KERN_DEBUG "Failed to get uuid for file device (%d).\n",
+		printk(KERN_DEBUG "Failed to get fs_info for file device (%d).\n",
 				result);
 	devinfo->dev_t = toi_file_dev_t;
 	devinfo->prio = file_target_priority;
@@ -388,7 +398,8 @@ static void test_toi_file_target(void)
 {
 	int result = toi_file_register_storage();
 	sector_t sector;
-	char uuid[17], buf[50];
+	char buf[33];
+	struct fs_info *fs_info;
 
 	if (result || !file_chain)
 		return;
@@ -407,13 +418,14 @@ static void test_toi_file_target(void)
 			file_chain->blocks_per_page) << file_chain->bmap_shift;
 
 	/* Use the uuid, or the dev_t if that fails */
-	if (uuid_from_block_dev(toi_file_target_bdev, uuid)) {
+	fs_info = fs_info_from_block_dev(toi_file_target_bdev);
+	if (!fs_info || IS_ERR(fs_info)) {
 		bdevname(toi_file_target_bdev, buf);
 		sprintf(resume_file, "/dev/%s:%llu", buf,
 				(unsigned long long) sector);
 	} else {
 		int i;
-		hex_dump_to_buffer(uuid, 16, 32, 1, buf, 50, 0);
+		hex_dump_to_buffer(fs_info->uuid, 16, 32, 1, buf, 50, 0);
 
 		/* Remove the spaces */
 		for (i = 1; i < 16; i++) {
@@ -421,8 +433,9 @@ static void test_toi_file_target(void)
 			buf[2 * i + 1] = buf[3 * i + 1];
 		}
 		buf[32] = 0;
-		sprintf(resume_file, "UUID=%s:%llu", buf,
+		sprintf(resume_file, "UUID=%s:0x%llx", buf,
 				(unsigned long long) sector);
+		free_fs_info(fs_info);
 	}
 
 	toi_attempt_to_parse_resume_device(0);

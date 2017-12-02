@@ -1,7 +1,7 @@
 /*
  * kernel/power/tuxonice_io.h
  *
- * Copyright (C) 2005-2008 Nigel Cunningham (nigel at tuxonice net)
+ * Copyright (C) 2005-2010 Nigel Cunningham (nigel at tuxonice net)
  *
  * This file is released under the GPLv2.
  *
@@ -68,3 +68,5 @@ extern dev_t name_to_dev_t(char *line);
 
 extern wait_queue_head_t toi_io_queue_flusher;
 extern int toi_bio_queue_flusher_should_finish;
+
+int fs_info_space_needed(void);

@@ -4,7 +4,7 @@
  * Copyright (C) 1998-2001 Gabor Kuti <seasons@fornax.hu>
  * Copyright (C) 1998,2001,2002 Pavel Machek <pavel@suse.cz>
  * Copyright (C) 2002-2003 Florent Chabaud <fchabaud@free.fr>
- * Copyright (C) 2002-2008 Nigel Cunningham (nigel at tuxonice net)
+ * Copyright (C) 2002-2010 Nigel Cunningham (nigel at tuxonice net)
  *
  * This file is released under the GPLv2.
  *
@@ -21,6 +21,7 @@
 #include <linux/cpu.h>
 #include <linux/fs_struct.h>
 #include <linux/bio.h>
+#include <linux/uuid.h>
 #include <asm/tlbflush.h>
 
 #include "tuxonice.h"
@@ -504,6 +505,30 @@ static void use_read_page(unsigned long write_pfn, struct page *buffer)
 	}
 }
 
+static unsigned long status_update(int writing, unsigned long done,
+		unsigned long ticks)
+{
+	int cs_index = writing ? 0 : 1;
+	unsigned long ticks_so_far = toi_bkd.toi_io_time[cs_index][1] + ticks;
+	unsigned long msec = jiffies_to_msecs(abs(ticks_so_far));
+	unsigned long pgs_per_s, estimate = 0, pages_left;
+
+	if (msec) {
+		pages_left = io_barmax - done;
+		pgs_per_s = 1000 * done / msec;
+		if (pgs_per_s)
+			estimate = pages_left / pgs_per_s;
+	}
+
+	if (estimate && ticks > HZ / 2)
+		return toi_update_status(done, io_barmax,
+			" %d/%d MB (%lu sec left)",
+			MB(done+1), MB(io_barmax), estimate);
+
+	return toi_update_status(done, io_barmax, " %d/%d MB",
+		MB(done+1), MB(io_barmax));
+}
+
 /**
  * worker_rw_loop - main loop to read/write pages
  *
@@ -513,8 +538,8 @@ static void use_read_page(unsigned long write_pfn, struct page *buffer)
  **/
 static int worker_rw_loop(void *data)
 {
-	unsigned long data_pfn, write_pfn, next_jiffies = jiffies + HZ / 2,
-		      jif_index = 1;
+	unsigned long data_pfn, write_pfn, next_jiffies = jiffies + HZ / 4,
+		      jif_index = 1, start_time = jiffies;
 	int result = 0, my_io_index = 0, last_worker;
 	struct toi_module_ops *first_filter = toi_get_next_filter(NULL);
 	struct page *buffer = toi_alloc_page(28, TOI_ATOMIC_GFP);
@@ -526,7 +551,7 @@ static int worker_rw_loop(void *data)
 
 	do {
 		if (data && jiffies > next_jiffies) {
-			next_jiffies += HZ / 2;
+			next_jiffies += HZ / 4;
 			if (toiActiveAllocator->update_throughput_throttle)
 				toiActiveAllocator->update_throughput_throttle(
 						jif_index);
@@ -575,9 +600,8 @@ static int worker_rw_loop(void *data)
 			use_read_page(write_pfn, buffer);
 
 		if (my_io_index + io_base == io_nextupdate)
-			io_nextupdate = toi_update_status(my_io_index +
-				io_base, io_barmax, " %d/%d MB ",
-				MB(io_base+my_io_index+1), MB(io_barmax));
+			io_nextupdate = status_update(io_write, my_io_index +
+					io_base, jiffies - start_time);
 
 		if (my_io_index == io_pc) {
 			printk(KERN_CONT "...%d%%", 20 * io_pc_step);
@@ -709,7 +733,6 @@ static int do_rw_loop(int write, int finish_at, struct memory_bitmap *pageflags,
 	while (atomic_read(&toi_io_workers))
 		schedule();
 
-	set_toi_state(TOI_IO_STOPPED);
 	if (unlikely(test_toi_state(TOI_STOP_RESUME))) {
 		if (!atomic_read(&toi_io_workers)) {
 			rw_cleanup_modules(READ);
@@ -718,6 +741,7 @@ static int do_rw_loop(int write, int finish_at, struct memory_bitmap *pageflags,
 		while (1)
 			schedule();
 	}
+	set_toi_state(TOI_IO_STOPPED);
 
 	if (!io_result && !result && !test_result_state(TOI_ABORTED)) {
 		unsigned long next;
@@ -752,10 +776,11 @@ static int do_rw_loop(int write, int finish_at, struct memory_bitmap *pageflags,
  **/
 int write_pageset(struct pagedir *pagedir)
 {
-	int finish_at, base = 0, start_time, end_time;
+	int finish_at, base = 0;
 	int barmax = pagedir1.size + pagedir2.size;
 	long error = 0;
 	struct memory_bitmap *pageflags;
+	unsigned long start_time, end_time;
 
 	/*
 	 * Even if there is nothing to read or write, the allocator
@@ -817,10 +842,11 @@ int write_pageset(struct pagedir *pagedir)
  **/
 static int read_pageset(struct pagedir *pagedir, int overwrittenpagesonly)
 {
-	int result = 0, base = 0, start_time, end_time;
+	int result = 0, base = 0;
 	int finish_at = pagedir->size;
 	int barmax = pagedir1.size + pagedir2.size;
 	struct memory_bitmap *pageflags;
+	unsigned long start_time, end_time;
 
 	if (pagedir->id == 1) {
 		toi_prepare_status(DONT_CLEAR_BAR,
@@ -1063,6 +1089,172 @@ static int read_module_configs(void)
 	return 0;
 }
 
+static inline int save_fs_info(struct fs_info *fs, struct block_device *bdev)
+{
+	return (!fs || IS_ERR(fs) || !fs->last_mount_size) ? 0 : 1;
+}
+
+int fs_info_space_needed(void)
+{
+	const struct super_block *sb;
+	int result = sizeof(int);
+
+	list_for_each_entry(sb, &super_blocks, s_list) {
+		struct fs_info *fs;
+
+		if (!sb->s_bdev)
+			continue;
+
+		fs = fs_info_from_block_dev(sb->s_bdev);
+		if (save_fs_info(fs, sb->s_bdev))
+			result += 16 + sizeof(int) + fs->last_mount_size;
+		free_fs_info(fs);
+	}
+	return result;
+}
+
+static int fs_info_num_to_save(void)
+{
+	const struct super_block *sb;
+	int to_save = 0;
+
+	list_for_each_entry(sb, &super_blocks, s_list) {
+		struct fs_info *fs;
+
+		if (!sb->s_bdev)
+			continue;
+
+		fs = fs_info_from_block_dev(sb->s_bdev);
+		if (save_fs_info(fs, sb->s_bdev))
+			to_save++;
+		free_fs_info(fs);
+	}
+
+	return to_save;
+}
+
+static int fs_info_save(void)
+{
+	const struct super_block *sb;
+	int to_save = fs_info_num_to_save();
+
+	if (toiActiveAllocator->rw_header_chunk(WRITE, NULL, (char *) &to_save,
+				sizeof(int))) {
+		abort_hibernate(TOI_FAILED_IO, "Failed to write num fs_info"
+				" to save.");
+		return -EIO;
+	}
+
+	list_for_each_entry(sb, &super_blocks, s_list) {
+		struct fs_info *fs;
+
+		if (!sb->s_bdev)
+			continue;
+
+		fs = fs_info_from_block_dev(sb->s_bdev);
+		if (save_fs_info(fs, sb->s_bdev)) {
+			if (toiActiveAllocator->rw_header_chunk(WRITE, NULL,
+					&fs->uuid[0], 16)) {
+				abort_hibernate(TOI_FAILED_IO, "Failed to "
+						"write uuid.");
+				return -EIO;
+			}
+			if (toiActiveAllocator->rw_header_chunk(WRITE, NULL,
+					(char *) &fs->last_mount_size, sizeof(int))) {
+				abort_hibernate(TOI_FAILED_IO, "Failed to "
+						"write last mount length.");
+				return -EIO;
+			}
+			if (toiActiveAllocator->rw_header_chunk(WRITE, NULL,
+					fs->last_mount, fs->last_mount_size)) {
+				abort_hibernate(TOI_FAILED_IO, "Failed to "
+						"write uuid.");
+				return -EIO;
+			}
+		}
+		free_fs_info(fs);
+	}
+	return 0;
+}
+
+static int fs_info_load_and_check_one(void)
+{
+	char uuid[16], *last_mount;
+	int result = 0, ln;
+	dev_t dev_t;
+	struct block_device *dev;
+	struct fs_info *fs_info;
+
+	if (toiActiveAllocator->rw_header_chunk(READ, NULL, uuid, 16)) {
+		abort_hibernate(TOI_FAILED_IO, "Failed to read uuid.");
+		return -EIO;
+	}
+
+	if (toiActiveAllocator->rw_header_chunk(READ, NULL, (char *) &ln,
+				sizeof(int))) {
+		abort_hibernate(TOI_FAILED_IO,
+				"Failed to read last mount size.");
+		return -EIO;
+	}
+
+	last_mount = kzalloc(ln, GFP_KERNEL);
+
+	if (!last_mount)
+		return -ENOMEM;
+
+	if (toiActiveAllocator->rw_header_chunk(READ, NULL, last_mount,	ln)) {
+		abort_hibernate(TOI_FAILED_IO,
+				"Failed to read last mount timestamp.");
+		result = -EIO;
+		goto out_lmt;
+	}
+
+	dev_t = blk_lookup_uuid(uuid);
+	if (!dev_t)
+		goto out_lmt;
+
+	dev = toi_open_by_devnum(dev_t);
+
+	fs_info = fs_info_from_block_dev(dev);
+	if (fs_info && !IS_ERR(fs_info)) {
+		if (ln != fs_info->last_mount_size) {
+			printk(KERN_EMERG "Found matching uuid but last mount "
+					"time lengths differ?! "
+					"(%d vs %d).\n", ln,
+					fs_info->last_mount_size);
+			result = -EINVAL;
+		} else {
+			char buf[BDEVNAME_SIZE];
+			result = !!memcmp(fs_info->last_mount, last_mount, ln);
+			if (result)
+				printk(KERN_EMERG "Last mount time for %s has "
+					"changed!\n", bdevname(dev, buf));
+		}
+	}
+	toi_close_bdev(dev);
+	free_fs_info(fs_info);
+out_lmt:
+	kfree(last_mount);
+	return result;
+}
+
+static int fs_info_load_and_check(void)
+{
+	int to_do, result;
+
+	if (toiActiveAllocator->rw_header_chunk(READ, NULL, (char *) &to_do,
+				sizeof(int))) {
+		abort_hibernate(TOI_FAILED_IO, "Failed to read num fs_info "
+				"to load.");
+		return -EIO;
+	}
+
+	while(to_do--)
+		result |= fs_info_load_and_check_one();
+
+	return result;
+}
+
 /**
  * write_image_header - write the image header after write the image proper
  *
@@ -1102,6 +1294,10 @@ int write_image_header(void)
 			header_buffer, sizeof(struct toi_header));
 
 	toi_free_page(24, (unsigned long) header_buffer);
+
+	/* Write filesystem info */
+	if (fs_info_save())
+		goto write_image_header_abort;
 
 	/* Write module configurations */
 	ret = write_module_configs();
@@ -1292,6 +1488,13 @@ static int __read_pageset1(void)
 
 	set_toi_state(TOI_BOOT_KERNEL);
 	boot_kernel_data_buffer = toi_header->bkd;
+
+	/* Read filesystem info */
+	if (fs_info_load_and_check()) {
+		printk(KERN_EMERG "TuxOnIce: File system mount time checks "
+			"failed. Refusing to corrupt your filesystems!\n");
+		goto out_remove_image;
+	}
 
 	/* Read module configurations */
 	result = read_module_configs();

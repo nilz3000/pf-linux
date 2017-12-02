@@ -1,7 +1,7 @@
 /*
  * kernel/power/tuxonice_swap.c
  *
- * Copyright (C) 2004-2008 Nigel Cunningham (nigel at tuxonice net)
+ * Copyright (C) 2004-2010 Nigel Cunningham (nigel at tuxonice net)
  *
  * Distributed under GPLv2.
  *
@@ -285,7 +285,7 @@ static int toi_swap_allocate_storage(struct toi_bdev_info *chain,
 
 static int toi_swap_register_storage(void)
 {
-	int i, result;
+	int i, result = 0;
 
 	toi_message(TOI_IO, TOI_VERBOSE, 0, "toi_swap_register_storage.");
 	for (i = 0; i < MAX_SWAPFILES; i++) {
@@ -293,6 +293,7 @@ static int toi_swap_register_storage(void)
 		struct toi_bdev_info *devinfo;
 		unsigned char *p;
 		unsigned char buf[256];
+		struct fs_info *fs_info;
 
 		if (!si || !(si->flags & SWP_WRITEOK) ||
 		    !strncmp(si->bdev->bd_disk->disk_name, "ram", 3))
@@ -310,9 +311,15 @@ static int toi_swap_register_storage(void)
 		devinfo->allocator = &toi_swapops;
 		devinfo->allocator_index = i;
 
-		result = uuid_from_block_dev(si->bdev, devinfo->uuid);
-		if (result)
-			printk("uuid from block dev returned %d.\n", result);
+		fs_info = fs_info_from_block_dev(si->bdev);
+		if (fs_info && !IS_ERR(fs_info)) {
+			memcpy(devinfo->uuid, &fs_info->uuid, 16);
+			free_fs_info(fs_info);
+		} else
+			result = (int) PTR_ERR(fs_info);
+
+		if (!fs_info)
+			printk("fs_info from block dev returned %d.\n", result);
 		devinfo->dev_t = si->bdev->bd_dev;
 		devinfo->prio = si->prio;
 		devinfo->bmap_shift = 3;
@@ -399,7 +406,7 @@ static int header_locations_read_sysfs(const char *page, int count)
 
 			path = d_path(&si->swap_file->f_path, path_page,
 					PAGE_SIZE);
-			path_len = snprintf(path_page, 31, "%s", path);
+			path_len = snprintf(path_page, PAGE_SIZE, "%s", path);
 
 			haveswap = 1;
 			swapf = si->swap_file->f_mapping->host;
@@ -410,7 +417,7 @@ static int header_locations_read_sysfs(const char *page, int count)
 					" mkswap on it and try again.\n",
 					path_page);
 			} else {
-				char name_buffer[255];
+				char name_buffer[BDEVNAME_SIZE];
 				len += sprintf(output + len,
 					"For swapfile `%s`,"
 					" use resume=swap:/dev/%s:0x%x.\n",

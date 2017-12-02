@@ -1,7 +1,7 @@
 /*
  * kernel/power/tuxonice_bio_signature.c
  *
- * Copyright (C) 2004-2008 Nigel Cunningham (nigel at tuxonice net)
+ * Copyright (C) 2004-2010 Nigel Cunningham (nigel at tuxonice net)
  *
  * Distributed under GPLv2.
  *
@@ -103,8 +103,9 @@ int toi_bio_mark_resume_attempted(int flag)
 
 int toi_bio_mark_have_image(void)
 {
-	int result;
+	int result = 0;
 	char buf[32];
+	struct fs_info *fs_info;
 
 	toi_message(TOI_IO, TOI_VERBOSE, 0, "Recording that an image exists.");
 	memcpy(toi_sig_data->sig, tuxonice_signature,
@@ -114,8 +115,13 @@ int toi_bio_mark_have_image(void)
 	toi_sig_data->header_dev_t = get_header_dev_t();
 	toi_sig_data->have_uuid = 0;
 
-	result = uuid_from_block_dev(get_header_bdev(),
-			toi_sig_data->header_uuid);
+	fs_info = fs_info_from_block_dev(get_header_bdev());
+	if (fs_info && !IS_ERR(fs_info)) {
+		memcpy(toi_sig_data->header_uuid, &fs_info->uuid, 16);
+		free_fs_info(fs_info);
+	} else
+		result = (int) PTR_ERR(fs_info);
+
 	if (!result) {
 		toi_message(TOI_IO, TOI_VERBOSE, 0, "Got uuid for dev_t %s.",
 				format_dev_t(buf, get_header_dev_t()));
@@ -251,17 +257,8 @@ int toi_bio_image_exists(int quiet)
 		return -1;
 	}
 
-	if (!resume_block_device) {
-		toi_message(TOI_IO, TOI_VERBOSE, 0, "Opening resume_dev_t %lx.",
-				resume_dev_t);
-		resume_block_device = toi_open_bdev(NULL, resume_dev_t, 1);
-		if (IS_ERR(resume_block_device)) {
-			if (!quiet)
-				printk(KERN_INFO "Failed to open resume dev_t"
-						" (%x).\n", resume_dev_t);
-			return -1;
-		}
-	}
+	if (open_resume_dev_t(0, quiet))
+		return -1;
 
 	result = toi_check_for_signature();
 
@@ -288,6 +285,7 @@ out:
 	if (!orig_sig_page)
 		forget_signature_page();
 
+	close_resume_dev_t(0);
 	return result;
 }
 

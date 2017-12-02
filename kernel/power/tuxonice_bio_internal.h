@@ -1,3 +1,14 @@
+/*
+ * kernel/power/tuxonice_bio_internal.h
+ *
+ * Copyright (C) 2009-2010 Nigel Cunningham (nigel at tuxonice net)
+ *
+ * Distributed under GPLv2.
+ *
+ * This file contains declarations for functions exported from
+ * tuxonice_bio.c, which contains low level io functions.
+ */
+
 /* Extent chains */
 void toi_extent_state_goto_start(void);
 void toi_extent_state_save(int slot);
@@ -65,3 +76,6 @@ extern unsigned long raw_pages_allocd, header_pages_reserved;
 int toi_bio_chains_debug_info(char *buffer, int size);
 void toi_bio_chains_post_atomic(struct toi_boot_kernel_data *bkd);
 int toi_bio_scan_for_image(int quiet);
+
+void close_resume_dev_t(int force);
+int open_resume_dev_t(int force, int quiet);

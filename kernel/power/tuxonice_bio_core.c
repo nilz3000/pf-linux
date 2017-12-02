@@ -1,7 +1,7 @@
 /*
  * kernel/power/tuxonice_bio.c
  *
- * Copyright (C) 2004-2008 Nigel Cunningham (nigel at tuxonice net)
+ * Copyright (C) 2004-2010 Nigel Cunningham (nigel at tuxonice net)
  *
  * Distributed under GPLv2.
  *
@@ -126,18 +126,6 @@ static atomic_t resume_bdev_open_count;
 struct block_device *header_block_device;
 
 /**
- * toi_close_bdev: Close a swap bdev.
- *
- * int: The swap entry number to close.
- */
-void toi_close_bdev(struct block_device *bdev)
-{
-	toi_message(TOI_IO, TOI_VERBOSE, 0, ">>> TuxOnIce closing bdev %p.",
-			bdev);
-	blkdev_put(bdev, FMODE_READ | FMODE_NDELAY);
-}
-
-/**
  * toi_open_bdev: Open a bdev at resume time.
  *
  * index: The swap index. May be MAX_SWAPFILES for the resume_dev_t
@@ -176,7 +164,7 @@ struct block_device *toi_open_bdev(char *uuid, dev_t default_device,
 		dump_stack();
 		return NULL;
 	}
-	bdev = toi_open_by_devnum(device, FMODE_READ | FMODE_NDELAY);
+	bdev = toi_open_by_devnum(device);
 
 	if (IS_ERR(bdev) || !bdev) {
 		if (display_errs)
@@ -270,7 +258,7 @@ static int throttle_if_needed(int flags)
  * amount of I/O we submit at once, spreading out our waiting through the
  * whole job and letting userui get an opportunity to do its work.
  *
- * We don't start limiting I/O until 1/2s has gone so that we get a
+ * We don't start limiting I/O until 1/4s has gone so that we get a
  * decent sample for our initial limit, and keep updating it because
  * throughput may vary (on rotating media, eg) with our block number.
  *
@@ -279,7 +267,7 @@ static int throttle_if_needed(int flags)
 static void update_throughput_throttle(int jif_index)
 {
 	int done = atomic_read(&toi_io_done);
-	throughput_throttle = done / jif_index / 5;
+	throughput_throttle = done * jif_index * 2 / 5;
 }
 
 /**
@@ -1198,20 +1186,28 @@ static void toi_bio_load_config_info(char *buf, int size)
 	target_outstanding_io  = ints[0];
 }
 
-static void close_resume_dev_t(int force)
+void close_resume_dev_t(int force)
 {
-	if ((force || atomic_dec_and_test(&resume_bdev_open_count)) &&
-			resume_block_device) {
+	if (!resume_block_device)
+		return;
+
+	if (force)
+		atomic_set(&resume_bdev_open_count, 0);
+	else
+		atomic_dec(&resume_bdev_open_count);
+
+	if (!atomic_read(&resume_bdev_open_count)) {
 		toi_close_bdev(resume_block_device);
 		resume_block_device = NULL;
 	}
 }
 
-static int open_resume_dev_t(int force, int quiet)
+int open_resume_dev_t(int force, int quiet)
 {
-	if (force)
+	if (force) {
 		close_resume_dev_t(1);
-	else
+		atomic_set(&resume_bdev_open_count, 1);
+	} else
 		atomic_inc(&resume_bdev_open_count);
 
 	if (resume_block_device)
@@ -1224,6 +1220,8 @@ static int open_resume_dev_t(int force, int quiet)
 				"Failed to open device %x, where"
 				" the header should be found.",
 				resume_dev_t);
+		resume_block_device = NULL;
+		atomic_set(&resume_bdev_open_count, 0);
 		return 1;
 	}
 
@@ -1333,6 +1331,8 @@ static void toi_bio_cleanup(int finishing_cycle)
 		toi_close_bdev(header_block_device);
 
 	header_block_device = NULL;
+
+	close_resume_dev_t(0);
 }
 
 static int toi_bio_write_header_init(void)
@@ -1530,6 +1530,17 @@ char *uuid_from_commandline(char *commandline)
 	return result;
 }
 
+#define retry_if_fails(command) \
+do { \
+	command; \
+	if (!resume_dev_t && !waited_for_device_probe) { \
+		wait_for_device_probe(); \
+		scsi_complete_async_scans(); \
+		command; \
+		waited_for_device_probe = 1; \
+	} \
+} while(0)
+
 /**
  * try_to_open_resume_device: Try to parse and open resume=
  *
@@ -1542,25 +1553,20 @@ static int try_to_open_resume_device(char *commandline, int quiet)
 	struct kstat stat;
 	int error = 0;
 	char *uuid = uuid_from_commandline(commandline);
+	int waited_for_device_probe = 0;
 
 	resume_dev_t = MKDEV(0, 0);
 
 	if (!strlen(commandline))
-		toi_bio_scan_for_image(quiet);
+		retry_if_fails(toi_bio_scan_for_image(quiet));
 
 	if (uuid) {
-		resume_dev_t = blk_lookup_uuid(uuid);
+		retry_if_fails(resume_dev_t = blk_lookup_uuid(uuid));
 		kfree(uuid);
 	}
 
 	if (!resume_dev_t)
-		resume_dev_t = name_to_dev_t(commandline);
-
-	if (!resume_dev_t) {
-		wait_for_device_probe();
-		scsi_complete_async_scans();
-		resume_dev_t = name_to_dev_t(commandline);
-	}
+		retry_if_fails(resume_dev_t = name_to_dev_t(commandline));
 
 	if (!resume_dev_t) {
 		struct file *file = filp_open(commandline,

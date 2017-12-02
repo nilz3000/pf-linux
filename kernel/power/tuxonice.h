@@ -1,7 +1,7 @@
 /*
  * kernel/power/tuxonice.h
  *
- * Copyright (C) 2004-2008 Nigel Cunningham (nigel at tuxonice net)
+ * Copyright (C) 2004-2010 Nigel Cunningham (nigel at tuxonice net)
  *
  * This file is released under the GPLv2.
  *
@@ -21,7 +21,7 @@
 #include "tuxonice_pageflags.h"
 #include "power.h"
 
-#define TOI_CORE_VERSION "3.0.99.44"
+#define TOI_CORE_VERSION "3.0.99.45"
 
 #define MY_BOOT_KERNEL_DATA_VERSION 3
 
