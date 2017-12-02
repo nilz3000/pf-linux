@@ -143,6 +143,7 @@ void clflush_cache_range(void *vaddr, unsigned int size)
 
 	mb();
 }
+EXPORT_SYMBOL_GPL(clflush_cache_range);
 
 static void __cpa_flush_all(void *arg)
 {
@@ -822,6 +823,7 @@ static int change_page_attr_set_clr(unsigned long *addr, int numpages,
 {
 	struct cpa_data cpa;
 	int ret, cache, checkalias;
+	unsigned long baddr = 0;
 
 	/*
 	 * Check, if we are requested to change a not supported
@@ -853,6 +855,11 @@ static int change_page_attr_set_clr(unsigned long *addr, int numpages,
 			 */
 			WARN_ON_ONCE(1);
 		}
+		/*
+		 * Save address for cache flush. *addr is modified in the call
+		 * to __change_page_attr_set_clr() below.
+		 */
+		baddr = *addr;
 	}
 
 	/* Must avoid aliasing mappings in the highmem code */
@@ -900,7 +907,7 @@ static int change_page_attr_set_clr(unsigned long *addr, int numpages,
 			cpa_flush_array(addr, numpages, cache,
 					cpa.flags, pages);
 		} else
-			cpa_flush_range(*addr, numpages, cache);
+			cpa_flush_range(baddr, numpages, cache);
 	} else
 		cpa_flush_all(cache);
 
@@ -1284,6 +1291,7 @@ void kernel_map_pages(struct page *page, int numpages, int enable)
 	 */
 	__flush_tlb_all();
 }
+EXPORT_SYMBOL_GPL(kernel_map_pages);
 
 #ifdef CONFIG_HIBERNATION
 
@@ -1298,7 +1306,7 @@ bool kernel_page_present(struct page *page)
 	pte = lookup_address((unsigned long)page_address(page), &level);
 	return (pte_val(*pte) & _PAGE_PRESENT);
 }
-
+EXPORT_SYMBOL_GPL(kernel_page_present);
 #endif /* CONFIG_HIBERNATION */
 
 #endif /* CONFIG_DEBUG_PAGEALLOC */
