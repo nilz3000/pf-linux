@@ -1,8 +1,8 @@
 VERSION = 2
 PATCHLEVEL = 6
 SUBLEVEL = 31
-EXTRAVERSION = -pf7
-NAME = Crazy World
+EXTRAVERSION = -pf8
+NAME = Hi Again
 
 # *DOCUMENTATION*
 # To see a list of typical targets execute "make help"
