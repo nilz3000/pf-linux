@@ -116,6 +116,7 @@ extern void softirq_init(void);
 char __initdata boot_command_line[COMMAND_LINE_SIZE];
 /* Untouched saved command line (eg. for /proc) */
 char *saved_command_line;
+EXPORT_SYMBOL_GPL(saved_command_line);
 /* Command line for parameter parsing */
 static char *static_command_line;
 
@@ -810,6 +811,12 @@ static noinline int init_post(void)
 	mark_rodata_ro();
 	system_state = SYSTEM_RUNNING;
 	numa_default_policy();
+
+#ifdef CONFIG_CPU_BFS
+        printk(KERN_INFO "ZenSched: Using BFS CPU scheduler \%s by Con Kolivas.\n", BFS_VERSION);
+#else
+        printk(KERN_INFO "ZenSched: Using CFS CPU scheduler.\n");
+#endif
 
 	if (sys_open((const char __user *) "/dev/console", O_RDWR, 0) < 0)
 		printk(KERN_WARNING "Warning: unable to open an initial console.\n");

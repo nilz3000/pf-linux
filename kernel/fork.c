@@ -85,6 +85,7 @@ int max_threads;		/* tunable limit on nr_threads */
 DEFINE_PER_CPU(unsigned long, process_counts) = 0;
 
 __cacheline_aligned DEFINE_RWLOCK(tasklist_lock);  /* outer */
+EXPORT_SYMBOL_GPL(tasklist_lock);
 
 int nr_processes(void)
 {
@@ -1239,7 +1240,9 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 	 * parent's CPU). This avoids alot of nasty races.
 	 */
 	p->cpus_allowed = current->cpus_allowed;
+#ifndef CONFIG_CPU_BFS
 	p->rt.nr_cpus_allowed = current->rt.nr_cpus_allowed;
+#endif
 	if (unlikely(!cpu_isset(task_cpu(p), p->cpus_allowed) ||
 			!cpu_online(task_cpu(p))))
 		set_task_cpu(p, smp_processor_id());
