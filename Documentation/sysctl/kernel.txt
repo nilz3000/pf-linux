@@ -29,7 +29,7 @@ show up in /proc/sys/kernel:
 - domainname
 - hostname
 - hotplug
-- iso_cpu		      [ BFS only ]
+- iso_cpu
 - java-appletviewer           [ binfmt_java, obsolete ]
 - java-interpreter            [ binfmt_java, obsolete ]
 - kstack_depth_to_print       [ X86 only ]
@@ -52,7 +52,7 @@ show up in /proc/sys/kernel:
 - randomize_va_space
 - real-root-dev               ==> Documentation/initrd.txt
 - reboot-cmd                  [ SPARC only ]
-- rr_interval		      [ BFS only ]
+- rr_interval
 - rtsig-max
 - rtsig-nr
 - sem
@@ -211,7 +211,7 @@ Default value is "/sbin/hotplug".
 
 ==============================================================
 
-iso_cpu: (BFS only)
+iso_cpu: (BFS CPU scheduler only).
 
 This sets the percentage cpu that the unprivileged SCHED_ISO tasks can
 run effectively at realtime priority, averaged over a rolling five
@@ -395,7 +395,7 @@ rebooting. ???
 
 ==============================================================
 
-rr_interval: (BFS only)
+rr_interval: (BFS CPU scheduler only)
 
 This is the smallest duration that any cpu process scheduling unit
 will run for. Increasing this value can increase throughput of cpu

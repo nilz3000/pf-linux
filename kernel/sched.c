@@ -1,3 +1,6 @@
+#ifdef CONFIG_SCHED_BFS
+#include "sched_bfs.c"
+#else
 /*
  *  kernel/sched.c
  *
@@ -869,6 +872,26 @@ static inline u64 global_rt_runtime(void)
 static inline int task_current(struct rq *rq, struct task_struct *p)
 {
 	return rq->curr == p;
+}
+
+/*
+ * Look for any tasks *anywhere* that are running nice 0 or better. We do
+ * this lockless for overhead reasons since the occasional wrong result
+ * is harmless.
+ */
+int above_background_load(void)
+{
+        struct task_struct *cpu_curr;
+        unsigned long cpu;
+
+        for_each_online_cpu(cpu) {
+                cpu_curr = cpu_rq(cpu)->curr;
+                if (unlikely(!cpu_curr))
+                        continue;
+                if (PRIO_TO_NICE(cpu_curr->static_prio) < 1)
+                        return 1;
+        }
+        return 0;
 }
 
 #ifndef __ARCH_WANT_UNLOCKED_CTXSW
@@ -6082,12 +6105,12 @@ out_unlock:
 }
 EXPORT_SYMBOL(set_user_nice);
 
-#ifdef CONFIG_CFS_BOOST
+#ifdef CONFIG_SCHED_CFS_BOOST
 /*
  * Nice level for privileged tasks. (can be set to 0 for this
  * to be turned off)
  */
-int sysctl_sched_privileged_nice_level __read_mostly = CONFIG_CFS_BOOST_NICE;
+int sysctl_sched_privileged_nice_level __read_mostly = CONFIG_SCHED_CFS_BOOST_VALUE;
 
 static int __init privileged_nice_level_setup(char *str)
 {
@@ -6112,11 +6135,6 @@ void sched_privileged_task(struct task_struct *p)
 	 */
 	if (unlikely(!new_nice))
 		return;
-
-	if (new_nice < -20)
-		new_nice = -20;
-	else if (new_nice > 19)
-		new_nice = 19;
 
 	set_user_nice(p, new_nice);
 }
@@ -10972,3 +10990,4 @@ void synchronize_sched_expedited(void)
 EXPORT_SYMBOL_GPL(synchronize_sched_expedited);
 
 #endif /* #else #ifndef CONFIG_SMP */
+#endif /* CONFIG_SCHED_BFS */

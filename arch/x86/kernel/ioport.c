@@ -41,7 +41,7 @@ asmlinkage long sys_ioperm(unsigned long from, unsigned long num, int turn_on)
 
 	if ((from + num <= from) || (from + num > IO_BITMAP_BITS))
 		return -EINVAL;
-#if defined(CONFIG_CPU_BFS_AUTOISO)
+#if defined(CONFIG_SCHED_BFS_AUTOISO)
 	if (turn_on) {
 		struct sched_param param = { .sched_priority = 0 };
 		if (!capable(CAP_SYS_RAWIO))
@@ -49,7 +49,7 @@ asmlinkage long sys_ioperm(unsigned long from, unsigned long num, int turn_on)
 		/* Start X as SCHED_ISO */
 		sched_setscheduler_nocheck(current, SCHED_ISO, &param);
 	}
-#elif defined(CONFIG_CFS_BOOST)
+#elif defined(CONFIG_SCHED_CFS_BOOST)
 	if (turn_on) {
 		if (!capable(CAP_SYS_RAWIO))
 		return -EPERM;
@@ -57,12 +57,13 @@ asmlinkage long sys_ioperm(unsigned long from, unsigned long num, int turn_on)
 		 * Task will be accessing hardware IO ports,
 		 * mark it as special with the scheduler too:
 		 */
-	sched_privileged_task(current);
-}
+		sched_privileged_task(current);
+	}
 #else
 	if (turn_on && !capable(CAP_SYS_RAWIO))
 		return -EPERM;
 #endif
+
 	/*
 	 * If it's the first ioperm() call in this thread's lifetime, set the
 	 * IO bitmap up. ioperm() is much less timing critical than clone(),
@@ -130,13 +131,13 @@ static int do_iopl(unsigned int level, struct pt_regs *regs)
 		return -EINVAL;
 	/* Trying to gain more privileges? */
 	if (level > old) {
-#if defined(CONFIG_CPU_BFS_AUTOISO)
+#if defined(CONFIG_SCHED_BFS_AUTOISO)
 		struct sched_param param = { .sched_priority = 0 };
 		if (!capable(CAP_SYS_RAWIO))
 			return -EPERM;
 		/* Start X as SCHED_ISO */
 		sched_setscheduler_nocheck(current, SCHED_ISO, &param);
-#elif defined(CONFIG_CFS_BOOST)
+#elif defined(CONFIG_SCHED_CFS_BOOST)
 		if (!capable(CAP_SYS_RAWIO))
 			return -EPERM;
 			sched_privileged_task(current);

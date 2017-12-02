@@ -22,6 +22,7 @@
 #include <linux/mm.h>
 #include <linux/swap.h>
 #include <linux/slab.h>
+#include <linux/swap-prefetch.h>
 #include <linux/sysctl.h>
 #include <linux/proc_fs.h>
 #include <linux/security.h>
@@ -85,10 +86,6 @@ extern int percpu_pagelist_fraction;
 extern int compat_log;
 extern int latencytop_enabled;
 extern int sysctl_nr_open_min, sysctl_nr_open_max;
-#ifdef CONFIG_CPU_BFS
-extern int rr_interval;
-extern int sched_iso_cpu;
-#endif
 #ifndef CONFIG_MMU
 extern int sysctl_nr_trim_pages;
 #endif
@@ -109,11 +106,11 @@ static int zero;
 static int __maybe_unused one = 1;
 static int __maybe_unused two = 2;
 static unsigned long one_ul = 1;
-#ifdef CONFIG_CPU_BFS
 static int __maybe_unused one_hundred = 100;
+#ifdef CONFIG_SCHED_BFS
+extern int rr_interval;
+extern int sched_iso_cpu;
 static int __read_mostly five_thousand = 5000;
-#else
-static int one_hundred = 100;
 #endif
 #ifdef CONFIG_PRINTK
 static int ten_thousand = 10000;
@@ -252,7 +249,7 @@ static struct ctl_table root_table[] = {
 	{ .ctl_name = 0 }
 };
 
-#if defined(CONFIG_SCHED_DEBUG) && !defined(CONFIG_CPU_BFS)
+#if defined(CONFIG_SCHED_DEBUG) && !defined(CONFIG_SCHED_BFS)
 static int min_sched_granularity_ns = 100000;		/* 100 usecs */
 static int max_sched_granularity_ns = NSEC_PER_SEC;	/* 1 second */
 static int min_wakeup_granularity_ns;			/* 0 usecs */
@@ -260,7 +257,7 @@ static int max_wakeup_granularity_ns = NSEC_PER_SEC;	/* 1 second */
 #endif
 
 static struct ctl_table kern_table[] = {
-#ifndef CONFIG_CPU_BFS
+#ifndef CONFIG_SCHED_BFS
 	{
 		.ctl_name	= CTL_UNNUMBERED,
 		.procname	= "sched_child_runs_first",
@@ -389,7 +386,7 @@ static struct ctl_table kern_table[] = {
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec,
 	},
-#endif
+#endif /* !CONFIG_SCHED_BFS */
 #ifdef CONFIG_PROVE_LOCKING
 	{
 		.ctl_name	= CTL_UNNUMBERED,
@@ -841,7 +838,7 @@ static struct ctl_table kern_table[] = {
 		.proc_handler	= &proc_dointvec,
 	},
 #endif
-#ifdef CONFIG_CPU_BFS
+#ifdef CONFIG_SCHED_BFS
 	{
 		.ctl_name	= CTL_UNNUMBERED,
 		.procname	= "rr_interval",
@@ -1641,6 +1638,32 @@ static struct ctl_table debug_table[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec
+	},
+#endif
+#ifdef CONFIG_SWAP_PREFETCH
+	{
+		.ctl_name	= CTL_UNNUMBERED,
+		.procname	= "swap_prefetch",
+		.data		= &swap_prefetch,
+		.maxlen		= sizeof(swap_prefetch),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= CTL_UNNUMBERED,
+		.procname	= "swap_prefetch_delay",
+		.data		= &swap_prefetch_delay,
+		.maxlen		= sizeof(swap_prefetch_delay),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= CTL_UNNUMBERED,
+		.procname	= "swap_prefetch_sleep",
+		.data		= &swap_prefetch_sleep,
+		.maxlen		= sizeof(swap_prefetch_sleep),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
 	},
 #endif
 	{ .ctl_name = 0 }

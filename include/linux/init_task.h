@@ -119,7 +119,7 @@ extern struct cred init_cred;
  *  INIT_TASK is used to set up the first task table, touch at
  * your own risk!. Base=0, limit=0x1fffff (=2MB)
  */
-#ifdef CONFIG_CPU_BFS
+#ifdef CONFIG_SCHED_BFS
 #define INIT_TASK(tsk)	\
 {									\
 	.state		= 0,						\
@@ -136,7 +136,7 @@ extern struct cred init_cred;
 	.mm		= NULL,						\
 	.active_mm	= &init_mm,					\
 	.run_list	= LIST_HEAD_INIT(tsk.run_list),			\
-	.time_slice	= HZ,						\
+	.time_slice	= HZ,					\
 	.tasks		= LIST_HEAD_INIT(tsk.tasks),			\
 	.pushable_tasks = PLIST_NODE_INIT(tsk.pushable_tasks, MAX_PRIO), \
 	.ptraced	= LIST_HEAD_INIT(tsk.ptraced),			\
@@ -181,7 +181,7 @@ extern struct cred init_cred;
 	INIT_TRACE_RECURSION						\
 	INIT_TASK_RCU_PREEMPT(tsk)					\
 }
-#else
+#else /* CONFIG_SCHED_BFS */
 #define INIT_TASK(tsk)	\
 {									\
 	.state		= 0,						\
@@ -248,7 +248,7 @@ extern struct cred init_cred;
 	INIT_TRACE_RECURSION						\
 	INIT_TASK_RCU_PREEMPT(tsk)					\
 }
-#endif
+#endif /* CONFIG_SCHED_BFS */
 
 #define INIT_CPU_TIMERS(cpu_timers)					\
 {									\

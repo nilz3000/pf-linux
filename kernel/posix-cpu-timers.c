@@ -250,11 +250,7 @@ void thread_group_cputime(struct task_struct *tsk, struct task_cputime *times)
 	do {
 		times->utime = cputime_add(times->utime, t->utime);
 		times->stime = cputime_add(times->stime, t->stime);
-#ifdef CONFIG_CPU_BFS
-		times->sum_exec_runtime += t->sched_time;
-#else
-		times->sum_exec_runtime += t->se.sum_exec_runtime;
-#endif
+		times->sum_exec_runtime += tsk_seruntime(t);
 
 		t = next_thread(t);
 	} while (t != tsk);
@@ -521,11 +517,8 @@ static void cleanup_timers(struct list_head *head,
 void posix_cpu_timers_exit(struct task_struct *tsk)
 {
 	cleanup_timers(tsk->cpu_timers,
-#ifdef CONFIG_CPU_BFS
-		       tsk->utime, tsk->stime, tsk->sched_time);
-#else
-		       tsk->utime, tsk->stime, tsk->se.sum_exec_runtime);
-#endif
+		       tsk->utime, tsk->stime, tsk_seruntime(tsk));
+
 }
 void posix_cpu_timers_exit_group(struct task_struct *tsk)
 {
@@ -534,11 +527,7 @@ void posix_cpu_timers_exit_group(struct task_struct *tsk)
 	cleanup_timers(tsk->signal->cpu_timers,
 		       cputime_add(tsk->utime, sig->utime),
 		       cputime_add(tsk->stime, sig->stime),
-#ifdef CONFIG_CPU_BFS
-		       tsk->sched_time + sig->sum_sched_runtime);
-#else
-		       tsk->se.sum_exec_runtime + sig->sum_sched_runtime);
-#endif
+		       tsk_seruntime(tsk) + sig->sum_sched_runtime);
 }
 
 static void clear_dead_task(struct k_itimer *timer, union cpu_time_count now)
@@ -1031,11 +1020,7 @@ static void check_thread_timers(struct task_struct *tsk,
 		struct cpu_timer_list *t = list_first_entry(timers,
 						      struct cpu_timer_list,
 						      entry);
-#ifdef CONFIG_CPU_BFS
-		if (!--maxfire || tsk->sched_time < t->expires.sched) {
-#else
-		if (!--maxfire || tsk->se.sum_exec_runtime < t->expires.sched) {
-#endif
+		if (!--maxfire || tsk_seruntime(tsk) < t->expires.sched) {
 			tsk->cputime_expires.sched_exp = t->expires.sched;
 			break;
 		}
@@ -1051,11 +1036,7 @@ static void check_thread_timers(struct task_struct *tsk,
 		unsigned long *soft = &sig->rlim[RLIMIT_RTTIME].rlim_cur;
 
 		if (hard != RLIM_INFINITY &&
-#ifdef CONFIG_CPU_BFS
-		    tsk->rt_timeout > DIV_ROUND_UP(hard, USEC_PER_SEC/HZ)) {
-#else
-		    tsk->rt.timeout > DIV_ROUND_UP(hard, USEC_PER_SEC/HZ)) {
-#endif
+		    tsk_rttimeout(tsk) > DIV_ROUND_UP(hard, USEC_PER_SEC/HZ)) {
 			/*
 			 * At the hard limit, we just die.
 			 * No need to calculate anything else now.
@@ -1063,11 +1044,7 @@ static void check_thread_timers(struct task_struct *tsk,
 			__group_send_sig_info(SIGKILL, SEND_SIG_PRIV, tsk);
 			return;
 		}
-#ifdef CONFIG_CPU_BFS
-		if (tsk->rt_timeout > DIV_ROUND_UP(*soft, USEC_PER_SEC/HZ)) {
-#else
-		if (tsk->rt.timeout > DIV_ROUND_UP(*soft, USEC_PER_SEC/HZ)) {
-#endif
+		if (tsk_rttimeout(tsk) > DIV_ROUND_UP(*soft, USEC_PER_SEC/HZ)) {
 			/*
 			 * At the soft limit, send a SIGXCPU every second.
 			 */
@@ -1390,11 +1367,7 @@ static inline int fastpath_timer_check(struct task_struct *tsk)
 		struct task_cputime task_sample = {
 			.utime = tsk->utime,
 			.stime = tsk->stime,
-#ifdef CONFIG_CPU_BFS
-			.sum_exec_runtime = tsk->sched_time
-#else
-			.sum_exec_runtime = tsk->se.sum_exec_runtime
-#endif
+			.sum_exec_runtime = tsk_seruntime(tsk)
 		};
 
 		if (task_cputime_expired(&task_sample, &tsk->cputime_expires))

@@ -23,6 +23,71 @@ config CONSTRUCTORS
 
 menu "General setup"
 
+config SCHED_BFS
+	bool "BFS cpu scheduler"
+	---help---
+	  The Brain Fuck CPU Scheduler for excellent interactivity and
+	  responsiveness on the desktop and solid scalability on normal
+          hardware. Not recommended for 4096 CPUs.
+
+	  Currently incompatible with the Group CPU scheduler, RCU TORTURE
+          TEST so these options are disabled. Problems have also been reported
+          with the preemptible tree based hierarchical RCU, so if you run into
+          problems with this, try the non preemptible option or classical
+          option.
+
+          Say Y here.
+	default y
+
+config SCHED_BFS_RR
+	int "BFS rr_interval (in ms)"
+	depends on SCHED_BFS
+	range 1 5000
+	default 6
+	---help---
+	  This is the default rr_interval value that bfs will use. Set to 6ms 
+	  by default because that is approximately the amount of time the human
+	  eye can register changes. Acceptable values are 1-5000. In addition,
+	  this value scales with the number of CPUs and is also adjustable via
+	  the /proc interface.
+
+	  Choose 3ms for an interactive/responsive desktop
+	  If unsure, choose 6ms
+
+config SCHED_BFS_AUTOISO
+	bool "Automatically use SCHED_ISO policy for X"
+	depends on SCHED_BFS
+	default n
+	---help---
+	  Selecting this option will automatically use the SCHED_ISO scheduling
+	  policy for X, resulting in an interactivity boost. This *may* cause 
+	  things like skipping sound on audio applications that are not run
+	  as SCHED_ISO.
+
+	  Tasks (including X) can be run as sched_iso manually using schedtool.
+
+config SCHED_CFS_BOOST
+	bool "Boost for Privileged tasks (CFS Boost)"
+	depends on !SCHED_BFS
+	default n
+	---help---
+	  This option instructs the kernel to guarantee more CPU time to
+	  X than to other tasks, which is useful if you want to have a
+	  faster desktop even under high system load.
+
+	  This option works by automatically boosting X's priority via
+	  renicing it to -10. NOTE: CFS does not suffer from "overscheduling"
+	  problems when X is reniced to -10, so this option is safe.           
+
+	  Say Y here if you are building a kernel for a desktop system.
+	  Say N here if you want X to be treated as a normal task.
+
+config SCHED_CFS_BOOST_VALUE
+	int "Nice value for privileged tasks"
+	depends on SCHED_CFS_BOOST
+	range -20 19
+	default -10
+
 config EXPERIMENTAL
 	bool "Prompt for development and/or incomplete code/drivers"
 	---help---
@@ -106,8 +171,6 @@ config LOCALVERSION_AUTO
 
 	  which is done within the script "scripts/setlocalversion".)
 
-source "init/Kconfig.cpu"
-
 config HAVE_KERNEL_GZIP
 	bool
 
@@ -177,6 +240,28 @@ config SWAP
 	  for so called swap devices or swap files in your kernel that are
 	  used to provide more virtual memory than the actual RAM present
 	  in your computer.  If unsure say Y.
+
+config SWAP_PREFETCH
+	bool "Support for prefetching swapped memory"
+	depends on SWAP && BROKEN
+	default y
+	---help---
+	  This option will allow the kernel to prefetch swapped memory pages
+	  when idle. The pages will be kept on both swap and in swap_cache
+	  thus avoiding the need for further I/O if either ram or swap space
+	  is required.
+
+	  What this will do on workstations is slowly bring back applications
+	  that have swapped out after memory intensive workloads back into
+	  physical ram if you have free ram at a later stage and the machine
+	  is relatively idle. This means that when you come back to your
+	  computer after leaving it idle for a while, applications will come
+	  to life faster. Note that your swap usage will appear to increase
+	  but these are cached pages, can be dropped freely by the vm, and it
+	  should stabilise around 50% swap usage maximum.
+
+	  Workstations and multiuser workstation servers will most likely want
+	  to say Y.
 
 config SYSVIPC
 	bool "System V IPC"
@@ -430,7 +515,7 @@ config HAVE_UNSTABLE_SCHED_CLOCK
 
 config GROUP_SCHED
 	bool "Group CPU scheduler"
-	depends on EXPERIMENTAL && !CPU_BFS
+	depends on EXPERIMENTAL && !SCHED_BFS
 	default n
 	help
 	  This feature lets CPU scheduler recognize task groups and control CPU
@@ -463,14 +548,13 @@ choice
 
 config USER_SCHED
 	bool "user id"
-	depends on !CPU_BFS
 	help
 	  This option will choose userid as the basis for grouping
 	  tasks, thus providing equal CPU bandwidth to each user.
 
 config CGROUP_SCHED
 	bool "Control groups"
-	depends on CGROUPS && !CPU_BFS
+ 	depends on CGROUPS
  	help
 	  This option allows you to create arbitrary task groups
 	  using the "cgroup" pseudo filesystem and control
@@ -547,7 +631,7 @@ config PROC_PID_CPUSET
 
 config CGROUP_CPUACCT
 	bool "Simple CPU accounting cgroup subsystem"
-	depends on CGROUPS && !CPU_BFS
+	depends on CGROUPS && !SCHED_BFS
 	help
 	  Provides a simple Resource Controller for monitoring the
 	  total CPU consumed by the tasks in a cgroup.

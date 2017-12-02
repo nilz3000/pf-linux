@@ -1,11 +1,6 @@
 #ifndef _LINUX_SCHED_H
 #define _LINUX_SCHED_H
 
-#ifdef CONFIG_CPU_BFS
-/* define the version of BFS here, will show as a kernel message if using BFS from init/main.c */
-#define BFS_VERSION "v311"
-#endif
-
 /*
  * cloning flags:
  */
@@ -41,14 +36,13 @@
 #define SCHED_FIFO		1
 #define SCHED_RR		2
 #define SCHED_BATCH		3
-
-#ifdef CONFIG_CPU_BFS
+/* SCHED_ISO: Implemented on BFS only */
+#define SCHED_IDLE		5
+#ifdef CONFIG_SCHED_BFS
 #define SCHED_ISO		4
-#define SCHED_IDLEPRIO		5
+#define SCHED_IDLEPRIO		SCHED_IDLE
 #define SCHED_MAX		(SCHED_IDLEPRIO)
 #define SCHED_RANGE(policy)	((policy) <= SCHED_MAX)
-#else
-#define SCHED_IDLE		5
 #endif
 
 /* Can be ORed in to make sure the process is reverted back to SCHED_NORMAL on fork */
@@ -155,7 +149,7 @@ extern unsigned long nr_uninterruptible(void);
 extern unsigned long nr_iowait(void);
 extern unsigned long nr_iowait_cpu(void);
 extern unsigned long this_cpu_load(void);
-
+extern int above_background_load(void);
 
 extern void calc_global_load(void);
 extern u64 cpu_nr_migrations(int cpu);
@@ -163,17 +157,13 @@ extern u64 cpu_nr_migrations(int cpu);
 extern unsigned long get_parent_ip(unsigned long addr);
 
 struct seq_file;
-#ifndef CONFIG_CPU_BFS
 struct cfs_rq;
-#endif
 struct task_group;
 #ifdef CONFIG_SCHED_DEBUG
 extern void proc_sched_show_task(struct task_struct *p, struct seq_file *m);
 extern void proc_sched_set_task(struct task_struct *p);
-#ifndef CONFIG_CPU_BFS
 extern void
 print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq);
-#endif
 #else
 static inline void
 proc_sched_show_task(struct task_struct *p, struct seq_file *m)
@@ -182,12 +172,10 @@ proc_sched_show_task(struct task_struct *p, struct seq_file *m)
 static inline void proc_sched_set_task(struct task_struct *p)
 {
 }
-#ifndef CONFIG_CPU_BFS
 static inline void
 print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
 {
 }
-#endif
 #endif
 
 extern unsigned long long time_sync_thresh;
@@ -279,14 +267,6 @@ extern void sched_init_smp(void);
 extern asmlinkage void schedule_tail(struct task_struct *prev);
 extern void init_idle(struct task_struct *idle, int cpu);
 extern void init_idle_bootup_task(struct task_struct *idle);
-
-#ifdef CONFIG_CPU_BFS
-extern int grunqueue_is_locked(void);
-extern void grq_unlock_wait(void);
-#else
-extern int runqueue_is_locked(int cpu);
-extern void task_rq_unlock_wait(struct task_struct *p);
-#endif
 
 extern cpumask_var_t nohz_cpu_mask;
 #if defined(CONFIG_SMP) && defined(CONFIG_NO_HZ)
@@ -493,9 +473,9 @@ extern int get_dumpable(struct mm_struct *mm);
 	 (1 << MMF_DUMP_HUGETLB_PRIVATE) | MMF_DUMP_MASK_DEFAULT_ELF)
 
 #ifdef CONFIG_CORE_DUMP_DEFAULT_ELF_HEADERS
-#define MMF_DUMP_MASK_DEFAULT_ELF	(1 << MMF_DUMP_ELF_HEADERS)
+# define MMF_DUMP_MASK_DEFAULT_ELF	(1 << MMF_DUMP_ELF_HEADERS)
 #else
-#define MMF_DUMP_MASK_DEFAULT_ELF	0
+# define MMF_DUMP_MASK_DEFAULT_ELF	0
 #endif
 					/* leave room for more dump flags */
 #define MMF_VM_MERGEABLE	16	/* KSM may merge identical pages */
@@ -693,7 +673,7 @@ struct signal_struct {
 
 /* Context switch must be unlocked if interrupts are to be enabled */
 #ifdef __ARCH_WANT_INTERRUPTS_ON_CTXSW
-#define __ARCH_WANT_UNLOCKED_CTXSW
+# define __ARCH_WANT_UNLOCKED_CTXSW
 #endif
 
 /*
@@ -1245,13 +1225,19 @@ struct task_struct {
 
 	int lock_depth;		/* BKL lock depth */
 
-#if defined(CONFIG_SMP) && defined(__ARCH_WANT_UNLOCKED_CTXSW) && !defined(CONFIG_CPU_BFS)
+#ifndef CONFIG_SCHED_BFS
+#ifdef CONFIG_SMP
+#ifdef __ARCH_WANT_UNLOCKED_CTXSW
+	int oncpu;
+#endif
+#endif
+#else /* CONFIG_SCHED_BFS */
 	int oncpu;
 #endif
 
 	int prio, static_prio, normal_prio;
-#ifdef CONFIG_CPU_BFS
-	int oncpu;
+	unsigned int rt_priority;
+#ifdef CONFIG_SCHED_BFS
 	int time_slice, first_time_slice;
 	unsigned long deadline;
 	struct list_head run_list;
@@ -1259,9 +1245,7 @@ struct task_struct {
 	u64 sched_time; /* sched_clock time spent running */
 
 	unsigned long rt_timeout;
-#endif
-	unsigned int rt_priority;
-#ifndef CONFIG_CPU_BFS
+#else /* CONFIG_SCHED_BFS */
 	const struct sched_class *sched_class;
 	struct sched_entity se;
 	struct sched_rt_entity rt;
@@ -1287,7 +1271,7 @@ struct task_struct {
 
 	unsigned int policy;
 	cpumask_t cpus_allowed;
-#ifdef CONFIG_HOTPLUG_CPU
+#if defined(CONFIG_HOTPLUG_CPU) && defined(CONFIG_SCHED_BFS)
 	cpumask_t unplugged_mask;
 #endif
 
@@ -1367,7 +1351,7 @@ struct task_struct {
 	int __user *clear_child_tid;		/* CLONE_CHILD_CLEARTID */
 
 	cputime_t utime, stime, utimescaled, stimescaled;
-#ifdef CONFIG_CPU_BFS
+#ifdef CONFIG_SCHED_BFS
 	unsigned long utime_pc, stime_pc;
 #endif
 	cputime_t gtime;
@@ -1475,7 +1459,7 @@ struct task_struct {
 	int softirq_context;
 #endif
 #ifdef CONFIG_LOCKDEP
-#define MAX_LOCK_DEPTH 48UL
+# define MAX_LOCK_DEPTH 48UL
 	u64 curr_chain_key;
 	int lockdep_depth;
 	unsigned int lockdep_recursion;
@@ -1581,6 +1565,69 @@ struct task_struct {
 	unsigned long stack_start;
 };
 
+#ifdef CONFIG_SCHED_BFS
+extern int grunqueue_is_locked(void);
+extern void grq_unlock_wait(void);
+#define tsk_seruntime(t)		((t)->sched_time)
+#define tsk_rttimeout(t)		((t)->rt_timeout)
+#define task_rq_unlock_wait(tsk)	grq_unlock_wait()
+
+static inline void set_oom_timeslice(struct task_struct *p)
+{
+	p->time_slice = HZ;
+}
+
+static inline void tsk_cpus_current(struct task_struct *p)
+{
+}
+
+#define runqueue_is_locked(cpu)	grunqueue_is_locked()
+
+static inline void print_scheduler_version(void)
+{
+	printk(KERN_INFO"BFS CPU scheduler v0.312 by Con Kolivas.\n");
+}
+
+static inline int iso_task(struct task_struct *p)
+{
+	return (p->policy == SCHED_ISO);
+}
+#else
+extern int runqueue_is_locked(int cpu);
+extern void task_rq_unlock_wait(struct task_struct *p);
+#define tsk_seruntime(t)	((t)->se.sum_exec_runtime)
+#define tsk_rttimeout(t)	((t)->rt.timeout)
+
+static inline void sched_exit(struct task_struct *p)
+{
+}
+
+static inline void set_oom_timeslice(struct task_struct *p)
+{
+#ifdef CONFIG_SCHED_CFS_BOOST
+	if (p->policy == SCHED_NORMAL || p->policy == SCHED_BATCH)
+		sched_privileged_task(p);
+#else
+	p->rt.time_slice = HZ;
+#endif
+}
+
+static inline void tsk_cpus_current(struct task_struct *p)
+{
+	p->rt.nr_cpus_allowed = current->rt.nr_cpus_allowed;
+}
+
+static inline void print_scheduler_version(void)
+{
+	printk(KERN_INFO"CFS CPU scheduler.\n");
+}
+
+static inline int iso_task(struct task_struct *p)
+{
+	return 0;
+}
+#endif
+
 /* Future-safe accessor for struct task_struct's cpus_allowed. */
 #define tsk_cpumask(tsk) (&(tsk)->cpus_allowed)
 
@@ -1599,19 +1646,19 @@ struct task_struct {
 
 #define MAX_USER_RT_PRIO	100
 #define MAX_RT_PRIO		MAX_USER_RT_PRIO
+#define DEFAULT_PRIO		(MAX_RT_PRIO + 20)
 
-#ifdef CONFIG_CPU_BFS
+#ifdef CONFIG_SCHED_BFS
 #define PRIO_RANGE		(40)
 #define MAX_PRIO		(MAX_RT_PRIO + PRIO_RANGE)
 #define ISO_PRIO		(MAX_RT_PRIO)
 #define NORMAL_PRIO		(MAX_RT_PRIO + 1)
 #define IDLE_PRIO		(MAX_RT_PRIO + 2)
 #define PRIO_LIMIT		((IDLE_PRIO) + 1)
-#else
+#else /* CONFIG_SCHED_BFS */
 #define MAX_PRIO		(MAX_RT_PRIO + 40)
-#endif
-
-#define DEFAULT_PRIO		(MAX_RT_PRIO + 20)
+#define NORMAL_PRIO		DEFAULT_PRIO
+#endif /* CONFIG_SCHED_BFS */
 
 static inline int rt_prio(int prio)
 {
@@ -1920,7 +1967,7 @@ task_sched_runtime(struct task_struct *task);
 extern unsigned long long thread_group_sched_runtime(struct task_struct *task);
 
 /* sched_exec is called by processes performing an exec */
-#if defined(CONFIG_SMP) && !defined(CONFIG_CPU_BFS)
+#if defined(CONFIG_SMP) && !defined(CONFIG_SCHED_BFS)
 extern void sched_exec(void);
 #else
 #define sched_exec()   {}
@@ -1989,11 +2036,11 @@ static inline int rt_mutex_getprio(struct task_struct *p)
 {
 	return p->normal_prio;
 }
-#define rt_mutex_adjust_pi(p)		do { } while (0)
+# define rt_mutex_adjust_pi(p)		do { } while (0)
 #endif
 
 extern void set_user_nice(struct task_struct *p, long nice);
-#ifdef CONFIG_CFS_BOOST
+#ifdef CONFIG_SCHED_CFS_BOOST
 extern void sched_privileged_task(struct task_struct *p);
 extern int sysctl_sched_privileged_nice_level;
 #endif
@@ -2079,7 +2126,7 @@ extern void wake_up_new_task(struct task_struct *tsk,
  static inline void kick_process(struct task_struct *tsk) { }
 #endif
 extern void sched_fork(struct task_struct *p, int clone_flags);
-#ifdef CONFIG_CPU_BFS
+#ifdef CONFIG_SCHED_BFS
 extern void sched_exit(struct task_struct *p);
 #endif
 extern void sched_dead(struct task_struct *p);
