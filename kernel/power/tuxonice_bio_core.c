@@ -216,10 +216,8 @@ static void do_bio_wait(int reason)
 
 	/* On SMP, waiting_on can be reset, so we make a copy */
 	if (was_waiting_on) {
-		if (PageLocked(was_waiting_on)) {
-			wait_on_page_bit(was_waiting_on, PG_locked);
-			atomic_inc(&reasons[reason]);
-		}
+		wait_on_page_locked(was_waiting_on);
+		atomic_inc(&reasons[reason]);
 	} else {
 		atomic_inc(&reasons[reason]);
 
@@ -725,9 +723,11 @@ static int toi_start_one_readahead(int dedicated_thread)
 	mutex_unlock(&toi_bio_readahead_mutex);
 	if (result) {
 		if (result == -ENODATA)
-			toi_message(TOI_IO, TOI_VERBOSE, 0, "Last readahead page submitted.");
+			toi_message(TOI_IO, TOI_VERBOSE, 0,
+					"Last readahead page submitted.");
 		else
-			printk(KERN_DEBUG "toi_bio_rw_page returned %d.\n", result);
+			printk(KERN_DEBUG "toi_bio_rw_page returned %d.\n",
+					result);
 	}
 	return result;
 }
@@ -1662,7 +1662,7 @@ static int toi_bio_parse_sig_location(char *commandline,
 
 	/* No error if we only scanned */
 	if (temp_result)
-		return strlen(commandline) ? -EINVAL: 1;
+		return strlen(commandline) ? -EINVAL : 1;
 
 	signature_found = toi_bio_image_exists(quiet);
 
