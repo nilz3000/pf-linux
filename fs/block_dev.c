@@ -335,6 +335,93 @@ out_unlock:
 }
 EXPORT_SYMBOL(thaw_bdev);
 
+#ifdef CONFIG_FS_FREEZER_DEBUG
+#define FS_PRINTK(fmt, args...) printk(fmt, ## args)
+#else
+#define FS_PRINTK(fmt, args...)
+#endif
+
+/* #define DEBUG_FS_FREEZING */
+
+/**
+ * freeze_filesystems - lock all filesystems and force them into a consistent
+ * state
+ * @which:	What combination of fuse & non-fuse to freeze.
+ */
+void freeze_filesystems(int which)
+{
+	struct super_block *sb;
+
+	lockdep_off();
+
+	/*
+	 * Freeze in reverse order so filesystems dependant upon others are
+	 * frozen in the right order (eg. loopback on ext3).
+	 */
+	list_for_each_entry_reverse(sb, &super_blocks, s_list) {
+		FS_PRINTK(KERN_INFO "Considering %s.%s: (root %p, bdev %x)",
+			sb->s_type->name ? sb->s_type->name : "?",
+			sb->s_subtype ? sb->s_subtype : "", sb->s_root,
+			sb->s_bdev ? sb->s_bdev->bd_dev : 0);
+
+		if (sb->s_type->fs_flags & FS_IS_FUSE &&
+		    sb->s_frozen == SB_UNFROZEN &&
+		    which & FS_FREEZER_FUSE) {
+			sb->s_frozen = SB_FREEZE_TRANS;
+			sb->s_flags |= MS_FROZEN;
+			FS_PRINTK("Fuse filesystem done.\n");
+			continue;
+		}
+
+		if (!sb->s_root || !sb->s_bdev ||
+		    (sb->s_frozen == SB_FREEZE_TRANS) ||
+		    (sb->s_flags & MS_RDONLY) ||
+		    (sb->s_flags & MS_FROZEN) ||
+		    !(which & FS_FREEZER_NORMAL)) {
+			FS_PRINTK(KERN_INFO "Nope.\n");
+			continue;
+		}
+
+		FS_PRINTK(KERN_INFO "Freezing %x... ", sb->s_bdev->bd_dev);
+		freeze_bdev(sb->s_bdev);
+		sb->s_flags |= MS_FROZEN;
+		FS_PRINTK(KERN_INFO "Done.\n");
+	}
+
+	lockdep_on();
+}
+
+/**
+ * thaw_filesystems - unlock all filesystems
+ * @which:	What combination of fuse & non-fuse to thaw.
+ */
+void thaw_filesystems(int which)
+{
+	struct super_block *sb;
+
+	lockdep_off();
+
+	list_for_each_entry(sb, &super_blocks, s_list) {
+		if (!(sb->s_flags & MS_FROZEN))
+			continue;
+
+		if (sb->s_type->fs_flags & FS_IS_FUSE) {
+			if (!(which & FS_FREEZER_FUSE))
+				continue;
+
+			sb->s_frozen = SB_UNFROZEN;
+		} else {
+			if (!(which & FS_FREEZER_NORMAL))
+				continue;
+
+			thaw_bdev(sb->s_bdev, sb);
+		}
+		sb->s_flags &= ~MS_FROZEN;
+	}
+
+	lockdep_on();
+}
+
 static int blkdev_writepage(struct page *page, struct writeback_control *wbc)
 {
 	return block_write_full_page(page, blkdev_get_block, wbc);
@@ -404,20 +491,28 @@ static loff_t block_llseek(struct file *file, loff_t offset, int origin)
  *	NULL first argument is nfsd_sync_dir() and that's not a directory.
  */
  
-static int block_fsync(struct file *filp, struct dentry *dentry, int datasync)
+int block_fsync(struct file *filp, struct dentry *dentry, int datasync)
 {
-	struct block_device *bdev = I_BDEV(filp->f_mapping->host);
+	struct inode *bd_inode = filp->f_mapping->host;
+	struct block_device *bdev = I_BDEV(bd_inode);
 	int error;
 
-	error = sync_blockdev(bdev);
-	if (error)
-		return error;
-	
+	/*
+	 * There is no need to serialise calls to blkdev_issue_flush with
+	 * i_mutex and doing so causes performance issues with concurrent
+	 * O_SYNC writers to a block device.
+	 */
+	mutex_unlock(&bd_inode->i_mutex);
+
 	error = blkdev_issue_flush(bdev, NULL);
 	if (error == -EOPNOTSUPP)
 		error = 0;
+
+	mutex_lock(&bd_inode->i_mutex);
+
 	return error;
 }
+EXPORT_SYMBOL(block_fsync);
 
 /*
  * pseudo-fs

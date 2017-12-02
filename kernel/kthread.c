@@ -167,7 +167,9 @@ void kthread_bind(struct task_struct *p, unsigned int cpu)
 	}
 
 	p->cpus_allowed = cpumask_of_cpu(cpu);
+#ifndef CONFIG_SCHED_BFS
 	p->rt.nr_cpus_allowed = 1;
+#endif
 	p->flags |= PF_THREAD_BOUND;
 }
 EXPORT_SYMBOL(kthread_bind);
@@ -219,7 +221,7 @@ int kthreadd(void *unused)
 	set_task_comm(tsk, "kthreadd");
 	ignore_signals(tsk);
 	set_cpus_allowed_ptr(tsk, cpu_all_mask);
-	set_mems_allowed(node_possible_map);
+	set_mems_allowed(node_states[N_HIGH_MEMORY]);
 
 	current->flags |= PF_NOFREEZE | PF_FREEZER_NOSIG;
 

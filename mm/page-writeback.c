@@ -34,6 +34,7 @@
 #include <linux/syscalls.h>
 #include <linux/buffer_head.h>
 #include <linux/pagevec.h>
+#include <linux/zentune.h>
 
 /*
  * After a CPU has dirtied this many pages, balance_dirty_pages_ratelimited
@@ -60,7 +61,15 @@ static inline long sync_writeback_pages(unsigned long dirtied)
 /*
  * Start background writeback (via writeback threads) at this percentage
  */
-int dirty_background_ratio = 10;
+#if defined(CONFIG_ZEN_DEFAULT)
+int dirty_background_ratio = dirty_background_ratio_default;
+#elif defined(CONFIG_ZEN_SERVER)
+int dirty_background_ratio = dirty_background_ratio_server;
+#elif defined(CONFIG_ZEN_DESKTOP)
+int dirty_background_ratio = dirty_background_ratio_desktop;
+#elif defined(CONFIG_ZEN_CUSTOM)
+int dirty_background_ratio = dirty_background_ratio_custom;
+#endif
 
 /*
  * dirty_background_bytes starts at 0 (disabled) so that it is a function of
@@ -77,7 +86,15 @@ int vm_highmem_is_dirtyable;
 /*
  * The generator of dirty data starts writeback at this percentage
  */
-int vm_dirty_ratio = 20;
+#if defined(CONFIG_ZEN_DEFAULT)
+int vm_dirty_ratio = vm_dirty_ratio_default;
+#elif defined(CONFIG_ZEN_SERVER)
+int vm_dirty_ratio = vm_dirty_ratio_server;
+#elif defined(CONFIG_ZEN_DESKTOP)
+int vm_dirty_ratio = vm_dirty_ratio_desktop;
+#elif defined(CONFIG_ZEN_CUSTOM)
+int vm_dirty_ratio = vm_dirty_ratio_custom;
+#endif
 
 /*
  * vm_dirty_bytes starts at 0 (disabled) so that it is a function of
@@ -99,6 +116,7 @@ unsigned int dirty_expire_interval = 30 * 100; /* centiseconds */
  * Flag that makes the machine dump writes/reads and block dirtyings.
  */
 int block_dump;
+EXPORT_SYMBOL_GPL(block_dump);
 
 /*
  * Flag that puts the machine in "laptop mode". Doubles as a timeout in jiffies:
@@ -848,7 +866,22 @@ int write_cache_pages(struct address_space *mapping,
 		if (wbc->range_start == 0 && wbc->range_end == LLONG_MAX)
 			range_whole = 1;
 		cycled = 1; /* ignore range_cyclic tests */
+
+		/*
+		 * If this is a data integrity sync, cap the writeback to the
+		 * current end of file. Any extension to the file that occurs
+		 * after this is a new write and we don't need to write those
+		 * pages out to fulfil our data integrity requirements. If we
+		 * try to write them out, we can get stuck in this scan until
+		 * the concurrent writer stops adding dirty pages and extending
+		 * EOF.
+		 */
+		if (wbc->sync_mode == WB_SYNC_ALL &&
+		    wbc->range_end == LLONG_MAX) {
+			end = i_size_read(mapping->host) >> PAGE_CACHE_SHIFT;
+		}
 	}
+
 retry:
 	done_index = index;
 	while (!done && (index <= end)) {

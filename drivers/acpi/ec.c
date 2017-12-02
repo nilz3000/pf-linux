@@ -589,12 +589,12 @@ static u32 acpi_ec_gpe_handler(void *data)
 
 static acpi_status
 acpi_ec_space_handler(u32 function, acpi_physical_address address,
-		      u32 bits, acpi_integer *value,
+		      u32 bits, acpi_integer *value64,
 		      void *handler_context, void *region_context)
 {
 	struct acpi_ec *ec = handler_context;
-	int result = 0, i;
-	u8 temp = 0;
+	int result = 0, i, bytes = bits / 8;
+	u8 *value = (u8 *)value64;
 
 	if ((address > 0xFF) || !value || !handler_context)
 		return AE_BAD_PARAMETER;
@@ -602,32 +602,15 @@ acpi_ec_space_handler(u32 function, acpi_physical_address address,
 	if (function != ACPI_READ && function != ACPI_WRITE)
 		return AE_BAD_PARAMETER;
 
-	if (bits != 8 && acpi_strict)
-		return AE_BAD_PARAMETER;
-
-	if (EC_FLAGS_MSI)
+	if (EC_FLAGS_MSI || bits > 8)
 		acpi_ec_burst_enable(ec);
 
-	if (function == ACPI_READ) {
-		result = acpi_ec_read(ec, address, &temp);
-		*value = temp;
-	} else {
-		temp = 0xff & (*value);
-		result = acpi_ec_write(ec, address, temp);
-	}
+	for (i = 0; i < bytes; ++i, ++address, ++value)
+		result = (function == ACPI_READ) ?
+			acpi_ec_read(ec, address, value) :
+			acpi_ec_write(ec, address, *value);
 
-	for (i = 8; unlikely(bits - i > 0); i += 8) {
-		++address;
-		if (function == ACPI_READ) {
-			result = acpi_ec_read(ec, address, &temp);
-			(*value) |= ((acpi_integer)temp) << i;
-		} else {
-			temp = 0xff & ((*value) >> i);
-			result = acpi_ec_write(ec, address, temp);
-		}
-	}
-
-	if (EC_FLAGS_MSI)
+	if (EC_FLAGS_MSI || bits > 8)
 		acpi_ec_burst_disable(ec);
 
 	switch (result) {
@@ -1082,9 +1065,12 @@ static struct acpi_driver acpi_ec_driver = {
 		},
 };
 
-int __init acpi_ec_init(void)
+static int __init acpi_ec_init(void)
 {
 	int result = 0;
+
+	if (acpi_disabled)
+		return 0;
 
 	acpi_ec_dir = proc_mkdir(ACPI_EC_CLASS, acpi_root_dir);
 	if (!acpi_ec_dir)
@@ -1099,6 +1085,8 @@ int __init acpi_ec_init(void)
 
 	return result;
 }
+
+subsys_initcall(acpi_ec_init);
 
 /* EC driver currently not unloadable */
 #if 0
