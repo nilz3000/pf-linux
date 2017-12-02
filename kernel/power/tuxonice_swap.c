@@ -444,28 +444,6 @@ static int write_modified_signature(int modification)
 	return result;
 }
 
-/*
- * apply_header_reservation
- */
-static int apply_header_reservation(void)
-{
-	unsigned long i;
-
-	toi_extent_state_goto_start(&toi_writer_posn);
-
-	if (!header_pages_reserved)
-		return 0;
-
-	for (i = 0; i < header_pages_reserved; i++)
-		if (toi_bio_ops.forward_one_page(1, 0))
-			return -ENOSPC;
-
-	/* The end of header pages will be the start of pageset 2;
-	 * we are now sitting on the first pageset2 page. */
-	toi_extent_state_save(&toi_writer_posn, &toi_writer_posn_save[2]);
-	return 0;
-}
-
 static void toi_swap_reserve_header_space(unsigned long request)
 {
 	header_pages_reserved = request;
@@ -539,7 +517,7 @@ static int get_main_pool_phys_params(void)
 		return -ENOMEM;
 	}
 
-	return apply_header_reservation();
+	return toi_bio_ops.reserve_header(header_pages_reserved);
 }
 
 static unsigned long raw_to_real(unsigned long raw)
@@ -574,8 +552,7 @@ void si_swapinfo_no_compcache(struct sysinfo *val)
 
 	for (i = 0; i < MAX_SWAPFILES; i++) {
 		struct swap_info_struct *si = get_swap_info_struct(i);
-		if ((si->flags & SWP_USED) && si->swap_map &&
-		    (si->flags & SWP_WRITEOK) &&
+		if ((si->flags & SWP_WRITEOK) &&
 		    (strncmp(si->bdev->bd_disk->disk_name, "ram", 3))) {
 			val->totalswap += si->inuse_pages;
 			val->freeswap += si->pages - si->inuse_pages;
@@ -671,15 +648,13 @@ static int toi_swap_allocate_storage(unsigned long request)
 		needed - swapextents.size : 0;
 
 	if (pages_to_get < 1)
-		return apply_header_reservation();
+		return toi_bio_ops.reserve_header(header_pages_reserved);
 
 	for (i = 0; i < MAX_SWAPFILES; i++) {
 		struct swap_info_struct *si = get_swap_info_struct(i);
 		devinfo[i].ignored = 1;
-		if (!(si->flags & SWP_USED) || !si->swap_map ||
-		    !(si->flags & SWP_WRITEOK))
-			continue;
-		if (!strncmp(si->bdev->bd_disk->disk_name, "ram", 3)) {
+		if (!(si->flags & SWP_WRITEOK) ||
+		    !strncmp(si->bdev->bd_disk->disk_name, "ram", 3)) {
 			continue;
 		}
 		devinfo[i].ignored = 0;
@@ -687,12 +662,13 @@ static int toi_swap_allocate_storage(unsigned long request)
 		devinfo[i].dev_t = si->bdev->bd_dev;
 		devinfo[i].bmap_shift = 3;
 		devinfo[i].blocks_per_page = 1;
+		block_chain[i].prio = si->prio;
 		if (swapfilenum == MAX_SWAPFILES)
 			swapfilenum = i;
 	}
 
 	if (swapfilenum == MAX_SWAPFILES)
-		return apply_header_reservation();
+		return toi_bio_ops.reserve_header(header_pages_reserved);
 
 	while (gotten < pages_to_get) {
 		swp_entry_t entry;
@@ -803,8 +779,7 @@ static int toi_swap_write_header_init(void)
 	/* Forward one page will be done prior to the read */
 	for (i = 0; i < MAX_SWAPFILES; i++) {
 		si = get_swap_info_struct(i);
-		if (si->flags & SWP_USED && si->swap_map &&
-		    si->flags & SWP_WRITEOK)
+		if (si->flags & SWP_WRITEOK)
 			devinfo[i].dev_t = si->bdev->bd_dev;
 		else
 			devinfo[i].dev_t = (dev_t) 0;
@@ -939,8 +914,11 @@ static int toi_swap_read_header_init(void)
 	toi_extent_state_goto_start(&toi_writer_posn);
 	toi_bio_ops.set_extra_page_forward();
 
-	for (i = 0; i < MAX_SWAPFILES && !result; i++)
-		result = toi_load_extent_chain(&block_chain[i]);
+	for (i = 0; i < MAX_SWAPFILES && !result; i++) {
+		result = toi_load_extent_chain(&toi_writer_posn, i);
+		if (result)
+			break;
+	}
 
 	return result;
 }
@@ -1014,8 +992,8 @@ static int toi_swap_storage_needed(void)
 		sizeof(devinfo);
 
 	for (i = 0; i < MAX_SWAPFILES; i++) {
-		result += sizeof(block_chain[i].size) +
-			  sizeof(block_chain[i].num_extents);
+		result += sizeof(unsigned long) +
+			  2 * sizeof(int);
 		result += (2 * sizeof(unsigned long) *
 			block_chain[i].num_extents);
 	}
@@ -1228,8 +1206,7 @@ static int header_locations_read_sysfs(const char *page, int count)
 	for (i = 0; i < MAX_SWAPFILES; i++) {
 		struct swap_info_struct *si =  get_swap_info_struct(i);
 
-		if ((!si->flags & SWP_USED) || si->swap_map ||
-		    !(si->flags & SWP_WRITEOK))
+		if (!(si->flags & SWP_WRITEOK))
 			continue;
 
 		if (S_ISBLK(si->swap_file->f_mapping->host->i_mode)) {

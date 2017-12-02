@@ -234,23 +234,6 @@ static int __populate_block_list(int min, int max)
 	return toi_add_to_extent_chain(&block_chain, min, max);
 }
 
-static int apply_header_reservation(void)
-{
-	int i;
-
-	/* Apply header space reservation */
-	toi_extent_state_goto_start(&toi_writer_posn);
-
-	for (i = 0; i < header_pages_reserved; i++)
-		if (toi_bio_ops.forward_one_page(1, 0))
-			return -ENOSPC;
-
-	/* The end of header pages will be the start of pageset 2 */
-	toi_extent_state_save(&toi_writer_posn, &toi_writer_posn_save[2]);
-
-	return 0;
-}
-
 static int populate_block_list(void)
 {
 	int i, extent_min = -1, extent_max = -1, got_header = 0, result = 0;
@@ -313,7 +296,7 @@ static int populate_block_list(void)
 	}
 
 out:
-	return apply_header_reservation();
+	return toi_bio_ops.reserve_header(header_pages_reserved);
 }
 
 static void toi_file_cleanup(int finishing_cycle)
@@ -545,7 +528,7 @@ static int toi_file_allocate_storage(unsigned long main_space_requested)
 
 	/* Only release_storage reduces the size */
 	if (!blocks_to_get)
-		return apply_header_reservation();
+		return toi_bio_ops.reserve_header(header_pages_reserved);
 
 	result = populate_block_list();
 
@@ -715,10 +698,11 @@ static int toi_file_read_header_init(void)
 	/* Jump to the next page */
 	toi_bio_ops.set_extra_page_forward();
 
-	/* Bring back the chain from disk: this will read
+	/* 
+	 * Bring back the chain from disk: this will read
 	 * all extents.
 	 */
-	return toi_load_extent_chain(&block_chain);
+	return toi_load_extent_chain(&toi_writer_posn, 0);
 }
 
 static int toi_file_read_header_cleanup(void)
@@ -841,7 +825,7 @@ static int toi_file_storage_needed(void)
 	return strlen(toi_file_target) + 1 +
 		sizeof(toi_writer_posn_save) +
 		sizeof(devinfo) +
-		sizeof(block_chain.size) + sizeof(block_chain.num_extents) +
+		sizeof(unsigned long) + 2 * sizeof(int) +
 		(2 * sizeof(unsigned long) * block_chain.num_extents);
 }
 

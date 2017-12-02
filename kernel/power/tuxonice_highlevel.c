@@ -98,7 +98,7 @@ static DEFINE_MUTEX(tuxonice_in_use);
 static int block_dump_save;
 
 /* Binary signature if an image is present */
-char *tuxonice_signature = "\xed\xc3\x02\xe9\x98\x56\xe5\x0c";
+char tuxonice_signature[9] = "\xed\xc3\x02\xe9\x98\x56\xe5\x0c";
 EXPORT_SYMBOL_GPL(tuxonice_signature);
 
 unsigned long boot_kernel_data_buffer;
@@ -152,7 +152,7 @@ void toi_finish_anything(int hibernate_or_resume)
 	toi_put_modules();
 	if (hibernate_or_resume) {
 		block_dump = block_dump_save;
-		set_cpus_allowed(current, CPU_MASK_ALL);
+		set_cpus_allowed_ptr(current, CPU_MASK_ALL_PTR);
 		toi_alloc_print_debug_stats();
 		atomic_inc(&snapshot_device_available);
 		mutex_unlock(&pm_mutex);
@@ -195,8 +195,8 @@ int toi_start_anything(int hibernate_or_resume)
 	if (hibernate_or_resume) {
 		block_dump_save = block_dump;
 		block_dump = 0;
-		set_cpus_allowed(current,
-				cpumask_of_cpu(first_cpu(cpu_online_map)));
+		set_cpus_allowed_ptr(current,
+				&cpumask_of_cpu(first_cpu(cpu_online_map)));
 	}
 
 	if (toi_initialise_modules_early(hibernate_or_resume))
@@ -212,8 +212,9 @@ int toi_start_anything(int hibernate_or_resume)
 early_init_err:
 	if (hibernate_or_resume) {
 		block_dump_save = block_dump;
-		set_cpus_allowed(current, CPU_MASK_ALL);
+		set_cpus_allowed_ptr(current, CPU_MASK_ALL_PTR);
 	}
+	toi_put_modules();
 prehibernate_err:
 	if (hibernate_or_resume)
 		atomic_inc(&snapshot_device_available);
@@ -1224,6 +1225,8 @@ static struct toi_sysfs_data sysfs_params[] = {
 			TOI_NO_PS2_IF_UNNEEDED, 0),
 	SYSFS_BIT("late_cpu_hotplug", SYSFS_RW, &toi_bkd.toi_action,
 			TOI_LATE_CPU_HOTPLUG, 0),
+	SYSFS_STRING("binary_signature", SYSFS_READONLY,
+			tuxonice_signature, 9, 0, NULL),
 #ifdef CONFIG_TOI_KEEP_IMAGE
 	SYSFS_BIT("keep_image", SYSFS_RW , &toi_bkd.toi_action, TOI_KEEP_IMAGE,
 			0),
