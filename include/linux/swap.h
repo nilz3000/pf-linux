@@ -19,6 +19,7 @@ struct bio;
 #define SWAP_FLAG_PREFER	0x8000	/* set if swap priority specified */
 #define SWAP_FLAG_PRIO_MASK	0x7fff
 #define SWAP_FLAG_PRIO_SHIFT	0
+#define SWAP_FLAG_DISCARD	0x10000 /* discard swap cluster after use */
 
 static inline int current_is_kswapd(void)
 {
@@ -142,7 +143,7 @@ struct swap_extent {
 enum {
 	SWP_USED	= (1 << 0),	/* is slot in swap_info[] used? */
 	SWP_WRITEOK	= (1 << 1),	/* ok to write to this swap?	*/
-	SWP_DISCARDABLE = (1 << 2),	/* blkdev supports discard */
+	SWP_DISCARDABLE = (1 << 2),	/* swapon+blkdev support discard */
 	SWP_DISCARDING	= (1 << 3),	/* now discarding a free cluster */
 	SWP_SOLIDSTATE	= (1 << 4),	/* blkdev seeks are cheap */
 	SWP_CONTINUED	= (1 << 5),	/* swap_map has count continuation */
@@ -191,13 +192,14 @@ struct swap_list_t {
 	int next;	/* swapfile to be used next */
 };
 
-/* Swap 50% full? Release swapcache more aggressively.. */
+/* Swap 50% full? */
 #define vm_swap_full() (nr_swap_pages*2 < total_swap_pages)
 
 /* linux/mm/page_alloc.c */
 extern unsigned long totalram_pages;
 extern unsigned long totalreserve_pages;
 extern unsigned int nr_free_buffer_pages(void);
+extern unsigned int nr_unallocated_buffer_pages(void);
 extern unsigned int nr_free_pagecache_pages(void);
 
 /* Definition of global_page_state not available yet */
@@ -205,6 +207,7 @@ extern unsigned int nr_free_pagecache_pages(void);
 
 
 /* linux/mm/swap.c */
+extern void ____lru_cache_add(struct page *, enum lru_list lru, int tail);
 extern void __lru_cache_add(struct page *, enum lru_list lru);
 extern void lru_cache_add_lru(struct page *, enum lru_list lru);
 extern void activate_page(struct page *);
@@ -225,9 +228,14 @@ static inline void lru_cache_add_anon(struct page *page)
 	__lru_cache_add(page, LRU_INACTIVE_ANON);
 }
 
+static inline void lru_cache_add_file_tail(struct page *page, int tail)
+{
+	____lru_cache_add(page, LRU_INACTIVE_FILE, tail);
+}
+
 static inline void lru_cache_add_file(struct page *page)
 {
-	__lru_cache_add(page, LRU_INACTIVE_FILE);
+	____lru_cache_add(page, LRU_INACTIVE_FILE, 0);
 }
 
 /* LRU Isolation modes. */
@@ -248,6 +256,8 @@ extern unsigned long mem_cgroup_shrink_node_zone(struct mem_cgroup *mem,
 						int nid);
 extern int __isolate_lru_page(struct page *page, int mode, int file);
 extern unsigned long shrink_all_memory(unsigned long nr_pages);
+extern unsigned long shrink_memory_mask(unsigned long nr_to_reclaim,
+		gfp_t mask);
 extern int vm_swappiness;
 extern int remove_mapping(struct address_space *mapping, struct page *page);
 extern long vm_total_pages;
@@ -327,8 +337,10 @@ extern void swapcache_free(swp_entry_t, struct page *page);
 extern int free_swap_and_cache(swp_entry_t);
 extern int swap_type_of(dev_t, sector_t, struct block_device **);
 extern unsigned int count_swap_pages(int, int);
+extern sector_t map_swap_entry(swp_entry_t entry, struct block_device **);
 extern sector_t map_swap_page(struct page *, struct block_device **);
 extern sector_t swapdev_block(int, pgoff_t);
+extern struct swap_info_struct *get_swap_info_struct(unsigned);
 extern int reuse_swap_page(struct page *);
 extern int try_to_free_swap(struct page *);
 struct backing_dev_info;
@@ -338,9 +350,10 @@ extern struct mm_struct *swap_token_mm;
 extern void grab_swap_token(struct mm_struct *);
 extern void __put_swap_token(struct mm_struct *);
 
+/* Only allow swap token to have effect if swap is full */
 static inline int has_swap_token(struct mm_struct *mm)
 {
-	return (mm == swap_token_mm);
+	return (mm == swap_token_mm && vm_swap_full());
 }
 
 static inline void put_swap_token(struct mm_struct *mm)

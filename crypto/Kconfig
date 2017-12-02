@@ -96,6 +96,14 @@ config CRYPTO_MANAGER2
 	select CRYPTO_BLKCIPHER2
 	select CRYPTO_PCOMP
 
+config CRYPTO_MANAGER_TESTS
+	bool "Run algolithms' self-tests"
+	default y
+	depends on CRYPTO_MANAGER2
+	help
+	  Run cryptomanager's tests for the new crypto algorithms being
+	  registered.
+
 config CRYPTO_GF128MUL
 	tristate "GF(2^128) multiplication functions (EXPERIMENTAL)"
 	depends on EXPERIMENTAL
@@ -815,6 +823,13 @@ config CRYPTO_LZO
 	select LZO_DECOMPRESS
 	help
 	  This is the LZO algorithm.
+
+config CRYPTO_LZF
+	tristate "LZF compression algorithm"
+	select CRYPTO_ALGAPI
+	help
+	  This is the LZF algorithm. It is especially useful for TuxOnIce,
+	  because it achieves good compression quickly.
 
 comment "Random Number Generation"
 

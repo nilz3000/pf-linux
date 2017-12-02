@@ -182,6 +182,12 @@ next_hook:
 		if (!nf_queue(skb, elem, pf, hook, indev, outdev, okfn,
 			      verdict >> NF_VERDICT_BITS))
 			goto next_hook;
+#if defined(CONFIG_IMQ) || defined(CONFIG_IMQ_MODULE)
+	} else if ((verdict & NF_VERDICT_MASK) == NF_IMQ_QUEUE) {
+		if (!nf_imq_queue(skb, elem, pf, hook, indev, outdev, okfn,
+			      verdict >> NF_VERDICT_BITS))
+			goto next_hook;
+#endif
 	}
 	rcu_read_unlock();
 	return ret;

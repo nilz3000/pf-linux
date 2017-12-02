@@ -117,6 +117,7 @@ extern void softirq_init(void);
 char __initdata boot_command_line[COMMAND_LINE_SIZE];
 /* Untouched saved command line (eg. for /proc) */
 char *saved_command_line;
+EXPORT_SYMBOL_GPL(saved_command_line);
 /* Command line for parameter parsing */
 static char *static_command_line;
 
@@ -834,6 +835,7 @@ static noinline int init_post(void)
 	system_state = SYSTEM_RUNNING;
 	numa_default_policy();
 
+	print_scheduler_version();
 
 	current->signal->flags |= SIGNAL_UNKILLABLE;
 

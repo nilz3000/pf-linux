@@ -7,6 +7,7 @@
 */
 
 #include "fuse_i.h"
+#include "fuse.h"
 
 #include <linux/init.h>
 #include <linux/module.h>
@@ -16,6 +17,7 @@
 #include <linux/pagemap.h>
 #include <linux/file.h>
 #include <linux/slab.h>
+#include <linux/freezer.h>
 #include <linux/pipe_fs_i.h>
 #include <linux/swap.h>
 #include <linux/splice.h>
@@ -961,6 +963,8 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	struct fuse_in *in;
 	unsigned reqsize;
 
+	FUSE_MIGHT_FREEZE(file->f_mapping->host->i_sb, "fuse_dev_read");
+
  restart:
 	spin_lock(&fc->lock);
 	err = -EAGAIN;
@@ -1395,6 +1399,9 @@ static ssize_t fuse_dev_write(struct kiocb *iocb, const struct iovec *iov,
 	if (!fc)
 		return -EPERM;
 
+	FUSE_MIGHT_FREEZE(iocb->ki_filp->f_mapping->host->i_sb,
+			"fuse_dev_write");
+
 	fuse_copy_init(&cs, fc, 0, iov, nr_segs);
 
 	return fuse_dev_do_write(fc, &cs, iov_length(iov, nr_segs));
@@ -1552,6 +1559,14 @@ __acquires(&fc->lock)
 	}
 }
 
+static void end_queued_requests(struct fuse_conn *fc)
+{
+	fc->max_background = UINT_MAX;
+	flush_bg_queue(fc);
+	end_requests(fc, &fc->pending);
+	end_requests(fc, &fc->processing);
+}
+
 /*
  * Abort all requests.
  *
@@ -1578,8 +1593,7 @@ void fuse_abort_conn(struct fuse_conn *fc)
 		fc->connected = 0;
 		fc->blocked = 0;
 		end_io_requests(fc);
-		end_requests(fc, &fc->pending);
-		end_requests(fc, &fc->processing);
+		end_queued_requests(fc);
 		wake_up_all(&fc->waitq);
 		wake_up_all(&fc->blocked_waitq);
 		kill_fasync(&fc->fasync, SIGIO, POLL_IN);
@@ -1594,8 +1608,9 @@ int fuse_dev_release(struct inode *inode, struct file *file)
 	if (fc) {
 		spin_lock(&fc->lock);
 		fc->connected = 0;
-		end_requests(fc, &fc->pending);
-		end_requests(fc, &fc->processing);
+		fc->blocked = 0;
+		end_queued_requests(fc);
+		wake_up_all(&fc->blocked_waitq);
 		spin_unlock(&fc->lock);
 		fuse_conn_put(fc);
 	}

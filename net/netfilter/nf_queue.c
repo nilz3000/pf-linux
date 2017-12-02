@@ -22,6 +22,27 @@ static const struct nf_queue_handler *queue_handler[NFPROTO_NUMPROTO] __read_mos
 
 static DEFINE_MUTEX(queue_handler_mutex);
 
+#if defined(CONFIG_IMQ) || defined(CONFIG_IMQ_MODULE)
+static const struct nf_queue_handler *queue_imq_handler;
+
+void nf_register_queue_imq_handler(const struct nf_queue_handler *qh)
+{
+	mutex_lock(&queue_handler_mutex);
+	rcu_assign_pointer(queue_imq_handler, qh);
+	mutex_unlock(&queue_handler_mutex);
+}
+EXPORT_SYMBOL_GPL(nf_register_queue_imq_handler);
+
+void nf_unregister_queue_imq_handler(void)
+{
+	mutex_lock(&queue_handler_mutex);
+	rcu_assign_pointer(queue_imq_handler, NULL);
+	mutex_unlock(&queue_handler_mutex);
+}
+EXPORT_SYMBOL_GPL(nf_unregister_queue_imq_handler);
+
+#endif
+
 /* return EBUSY when somebody else is registered, return EEXIST if the
  * same handler is registered, return 0 in case of success. */
 int nf_register_queue_handler(u_int8_t pf, const struct nf_queue_handler *qh)
@@ -82,7 +103,7 @@ void nf_unregister_queue_handlers(const struct nf_queue_handler *qh)
 }
 EXPORT_SYMBOL_GPL(nf_unregister_queue_handlers);
 
-static void nf_queue_entry_release_refs(struct nf_queue_entry *entry)
+void nf_queue_entry_release_refs(struct nf_queue_entry *entry)
 {
 	/* Release those devices we held, or Alexey will kill me. */
 	if (entry->indev)
@@ -102,6 +123,7 @@ static void nf_queue_entry_release_refs(struct nf_queue_entry *entry)
 	/* Drop reference to owner of hook which queued us. */
 	module_put(entry->elem->owner);
 }
+EXPORT_SYMBOL_GPL(nf_queue_entry_release_refs);
 
 /*
  * Any packet that leaves via this function must come back
@@ -113,7 +135,8 @@ static int __nf_queue(struct sk_buff *skb,
 		      struct net_device *indev,
 		      struct net_device *outdev,
 		      int (*okfn)(struct sk_buff *),
-		      unsigned int queuenum)
+		      unsigned int queuenum,
+		      bool imq_queue)
 {
 	int status;
 	struct nf_queue_entry *entry = NULL;
@@ -127,6 +150,11 @@ static int __nf_queue(struct sk_buff *skb,
 	/* QUEUE == DROP if noone is waiting, to be safe. */
 	rcu_read_lock();
 
+#if defined(CONFIG_IMQ) || defined(CONFIG_IMQ_MODULE)
+	if (imq_queue)
+		qh = rcu_dereference(queue_imq_handler);
+	else
+#endif
 	qh = rcu_dereference(queue_handler[pf]);
 	if (!qh)
 		goto err_unlock;
@@ -192,19 +220,20 @@ err:
 	return 1;
 }
 
-int nf_queue(struct sk_buff *skb,
+static int _nf_queue(struct sk_buff *skb,
 	     struct list_head *elem,
 	     u_int8_t pf, unsigned int hook,
 	     struct net_device *indev,
 	     struct net_device *outdev,
 	     int (*okfn)(struct sk_buff *),
-	     unsigned int queuenum)
+	     unsigned int queuenum,
+	     bool imq_queue)
 {
 	struct sk_buff *segs;
 
 	if (!skb_is_gso(skb))
 		return __nf_queue(skb, elem, pf, hook, indev, outdev, okfn,
-				  queuenum);
+				  queuenum, imq_queue);
 
 	switch (pf) {
 	case NFPROTO_IPV4:
@@ -225,12 +254,38 @@ int nf_queue(struct sk_buff *skb,
 
 		segs->next = NULL;
 		if (!__nf_queue(segs, elem, pf, hook, indev, outdev, okfn,
-				queuenum))
+				queuenum, imq_queue))
 			kfree_skb(segs);
 		segs = nskb;
 	} while (segs);
 	return 1;
 }
+
+int nf_queue(struct sk_buff *skb,
+	     struct list_head *elem,
+	     u_int8_t pf, unsigned int hook,
+	     struct net_device *indev,
+	     struct net_device *outdev,
+	     int (*okfn)(struct sk_buff *),
+	     unsigned int queuenum)
+{
+	return _nf_queue(skb, elem, pf, hook, indev, outdev, okfn, queuenum,
+			 false);
+}
+
+#if defined(CONFIG_IMQ) || defined(CONFIG_IMQ_MODULE)
+int nf_imq_queue(struct sk_buff *skb,
+	     struct list_head *elem,
+	     u_int8_t pf, unsigned int hook,
+	     struct net_device *indev,
+	     struct net_device *outdev,
+	     int (*okfn)(struct sk_buff *),
+	     unsigned int queuenum)
+{
+	return _nf_queue(skb, elem, pf, hook, indev, outdev, okfn, queuenum,
+			 true);
+}
+#endif
 
 void nf_reinject(struct nf_queue_entry *entry, unsigned int verdict)
 {
@@ -272,7 +327,13 @@ void nf_reinject(struct nf_queue_entry *entry, unsigned int verdict)
 	case NF_QUEUE:
 		if (!__nf_queue(skb, elem, entry->pf, entry->hook,
 				entry->indev, entry->outdev, entry->okfn,
-				verdict >> NF_VERDICT_BITS))
+				verdict >> NF_VERDICT_BITS, false))
+			goto next_hook;
+		break;
+	case NF_IMQ_QUEUE:
+		if (!__nf_queue(skb, elem, entry->pf, entry->hook,
+				entry->indev, entry->outdev, entry->okfn,
+				verdict >> NF_VERDICT_BITS, true))
 			goto next_hook;
 		break;
 	case NF_STOLEN:

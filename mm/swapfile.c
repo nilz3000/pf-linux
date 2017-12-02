@@ -39,7 +39,6 @@
 static bool swap_count_continued(struct swap_info_struct *, pgoff_t,
 				 unsigned char);
 static void free_swap_count_continuations(struct swap_info_struct *);
-static sector_t map_swap_entry(swp_entry_t, struct block_device**);
 
 static DEFINE_SPINLOCK(swap_lock);
 static unsigned int nr_swapfiles;
@@ -139,8 +138,7 @@ static int discard_swap(struct swap_info_struct *si)
 	nr_blocks = ((sector_t)se->nr_pages - 1) << (PAGE_SHIFT - 9);
 	if (nr_blocks) {
 		err = blkdev_issue_discard(si->bdev, start_block,
-				nr_blocks, GFP_KERNEL,
-				BLKDEV_IFL_WAIT | BLKDEV_IFL_BARRIER);
+				nr_blocks, GFP_KERNEL, BLKDEV_IFL_WAIT);
 		if (err)
 			return err;
 		cond_resched();
@@ -151,8 +149,7 @@ static int discard_swap(struct swap_info_struct *si)
 		nr_blocks = (sector_t)se->nr_pages << (PAGE_SHIFT - 9);
 
 		err = blkdev_issue_discard(si->bdev, start_block,
-				nr_blocks, GFP_KERNEL,
-				BLKDEV_IFL_WAIT | BLKDEV_IFL_BARRIER);
+				nr_blocks, GFP_KERNEL, BLKDEV_IFL_WAIT);
 		if (err)
 			break;
 
@@ -191,8 +188,7 @@ static void discard_swap_cluster(struct swap_info_struct *si,
 			start_block <<= PAGE_SHIFT - 9;
 			nr_blocks <<= PAGE_SHIFT - 9;
 			if (blkdev_issue_discard(si->bdev, start_block,
-				    nr_blocks, GFP_NOIO, BLKDEV_IFL_WAIT |
-							BLKDEV_IFL_BARRIER))
+				    nr_blocks, GFP_NOIO, BLKDEV_IFL_WAIT))
 				break;
 		}
 
@@ -408,7 +404,7 @@ scan:
 			spin_lock(&swap_lock);
 			goto checks;
 		}
-		if (vm_swap_full() && si->swap_map[offset] == SWAP_HAS_CACHE) {
+		if (si->swap_map[offset] == SWAP_HAS_CACHE) {
 			spin_lock(&swap_lock);
 			goto checks;
 		}
@@ -423,7 +419,7 @@ scan:
 			spin_lock(&swap_lock);
 			goto checks;
 		}
-		if (vm_swap_full() && si->swap_map[offset] == SWAP_HAS_CACHE) {
+		if (si->swap_map[offset] == SWAP_HAS_CACHE) {
 			spin_lock(&swap_lock);
 			goto checks;
 		}
@@ -480,6 +476,7 @@ noswap:
 	spin_unlock(&swap_lock);
 	return (swp_entry_t) {0};
 }
+EXPORT_SYMBOL_GPL(get_swap_page);
 
 /* The only caller of this function is now susupend routine */
 swp_entry_t get_swap_page_of_type(int type)
@@ -502,6 +499,7 @@ swp_entry_t get_swap_page_of_type(int type)
 	spin_unlock(&swap_lock);
 	return (swp_entry_t) {0};
 }
+EXPORT_SYMBOL_GPL(get_swap_page_of_type);
 
 static struct swap_info_struct *swap_info_get(swp_entry_t entry)
 {
@@ -626,6 +624,7 @@ void swapcache_free(swp_entry_t entry, struct page *page)
 		spin_unlock(&swap_lock);
 	}
 }
+EXPORT_SYMBOL_GPL(swap_free);
 
 /*
  * How many references to page are currently swapped out?
@@ -686,6 +685,24 @@ int try_to_free_swap(struct page *page)
 	if (page_swapcount(page))
 		return 0;
 
+	/*
+	 * Once hibernation has begun to create its image of memory,
+	 * there's a danger that one of the calls to try_to_free_swap()
+	 * - most probably a call from __try_to_reclaim_swap() while
+	 * hibernation is allocating its own swap pages for the image,
+	 * but conceivably even a call from memory reclaim - will free
+	 * the swap from a page which has already been recorded in the
+	 * image as a clean swapcache page, and then reuse its swap for
+	 * another page of the image.  On waking from hibernation, the
+	 * original page might be freed under memory pressure, then
+	 * later read back in from swap, now with the wrong data.
+	 *
+	 * Hibernation clears bits from gfp_allowed_mask to prevent
+	 * memory reclaim from writing to disk, so check that here.
+	 */
+	if (!(gfp_allowed_mask & __GFP_IO))
+		return 0;
+
 	delete_from_swap_cache(page);
 	SetPageDirty(page);
 	return 1;
@@ -719,8 +736,7 @@ int free_swap_and_cache(swp_entry_t entry)
 		 * Not mapped elsewhere, or swap space full? Free it!
 		 * Also recheck PageSwapCache now page is locked (above).
 		 */
-		if (PageSwapCache(page) && !PageWriteback(page) &&
-				(!page_mapped(page) || vm_swap_full())) {
+		if (PageSwapCache(page) && !PageWriteback(page)) {
 			delete_from_swap_cache(page);
 			SetPageDirty(page);
 		}
@@ -1302,7 +1318,7 @@ static void drain_mmlist(void)
  * Note that the type of this function is sector_t, but it returns page offset
  * into the bdev, not sector offset.
  */
-static sector_t map_swap_entry(swp_entry_t entry, struct block_device **bdev)
+sector_t map_swap_entry(swp_entry_t entry, struct block_device **bdev)
 {
 	struct swap_info_struct *sis;
 	struct swap_extent *start_se;
@@ -1329,6 +1345,7 @@ static sector_t map_swap_entry(swp_entry_t entry, struct block_device **bdev)
 		BUG_ON(se == start_se);		/* It *must* be present */
 	}
 }
+EXPORT_SYMBOL_GPL(map_swap_entry);
 
 /*
  * Returns the page offset into bdev for the specified page's swap entry.
@@ -1671,6 +1688,7 @@ out_dput:
 out:
 	return err;
 }
+EXPORT_SYMBOL_GPL(sys_swapoff);
 
 #ifdef CONFIG_PROC_FS
 /* iterator */
@@ -2032,7 +2050,7 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 			p->flags |= SWP_SOLIDSTATE;
 			p->cluster_next = 1 + (random32() % p->highest_bit);
 		}
-		if (discard_swap(p) == 0)
+		if (discard_swap(p) == 0 && (swap_flags & SWAP_FLAG_DISCARD))
 			p->flags |= SWP_DISCARDABLE;
 	}
 
@@ -2100,6 +2118,7 @@ out:
 	}
 	return error;
 }
+EXPORT_SYMBOL_GPL(sys_swapon);
 
 void si_swapinfo(struct sysinfo *val)
 {
@@ -2117,6 +2136,7 @@ void si_swapinfo(struct sysinfo *val)
 	val->totalswap = total_swap_pages + nr_to_be_unused;
 	spin_unlock(&swap_lock);
 }
+EXPORT_SYMBOL_GPL(si_swapinfo);
 
 /*
  * Verify that a swap entry is valid and increment its swap map count.
@@ -2227,6 +2247,13 @@ int swapcache_prepare(swp_entry_t entry)
 {
 	return __swap_duplicate(entry, SWAP_HAS_CACHE);
 }
+
+
+struct swap_info_struct *get_swap_info_struct(unsigned type)
+{
+	return swap_info[type];
+}
+EXPORT_SYMBOL_GPL(get_swap_info_struct);
 
 /*
  * swap_lock prevents swap_map being freed. Don't grab an extra
