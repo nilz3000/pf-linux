@@ -81,10 +81,21 @@ void forget_signature_page(void)
 	}
 }
 
+/* 
+ * We need to ensure we use the signature page that's currently on disk,
+ * so as to not remove the image header. Post-atomic-restore, the orig sig
+ * page will be empty, so we can use that as our method of knowing that we
+ * need to load the on-disk signature and not use the non-image sig in
+ * memory. (We're going to powerdown after writing the change, so it's safe.
+ */
 int toi_bio_mark_resume_attempted(int flag)
 {
 	toi_message(TOI_IO, TOI_VERBOSE, 0, "Make resume attempted = %d.",
 			flag);
+	if (!toi_orig_sig_page) {
+		forget_signature_page();
+		get_signature_page();
+	}
 	toi_sig_data->resumed_before = flag;
 	return toi_bio_ops.bdev_page_io(WRITE, resume_block_device,
 		resume_firstblock, virt_to_page(toi_cur_sig_page));
@@ -278,4 +289,47 @@ out:
 		forget_signature_page();
 
 	return result;
+}
+
+int toi_bio_scan_for_image(int quiet)
+{
+	struct block_device *bdev;
+	char default_name[255] = "/dev/";
+
+	if (!quiet)
+		printk("Scanning swap devices for TuxOnIce signature...\n");
+	for (bdev = next_bdev_of_type(NULL, "swap"); bdev;
+				bdev = next_bdev_of_type(bdev, "swap")) {
+		int result;
+		char name[255] = "/dev/";
+		bdevname(bdev, name + 5);
+		if (!quiet)
+			printk("- Trying %s.\n", name);
+		resume_block_device = bdev;
+		resume_dev_t = bdev->bd_dev;
+
+		result = toi_check_for_signature();
+
+		resume_block_device = NULL;
+		resume_dev_t = MKDEV(0,0);
+
+		if (!default_name[6])
+			strcpy(default_name, name);
+
+		if (result == 1) {
+			/* Got one! */
+			strcpy(resume_file, name);
+			next_bdev_of_type(bdev, NULL);
+			if (!quiet)
+				printk(" ==> Image found on %s.\n",
+						resume_file);
+			return 1;
+		}
+		forget_signature_page();
+	}
+
+	if (!quiet)
+		printk("No image found.\n");
+	strcpy(resume_file, default_name);
+	return 0;
 }

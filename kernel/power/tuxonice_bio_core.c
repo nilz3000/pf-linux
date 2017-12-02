@@ -509,6 +509,8 @@ static int toi_bio_print_debug_stats(char *buffer, int size)
 
 	len = scnprintf(buffer, size, "- Block I/O active.\n");
 
+	len += toi_bio_chains_debug_info(buffer + len, size - len);
+
 	len += scnprintf(buffer + len, size - len,
 			"- Max outstanding reads %d. Max writes %d.\n",
 			max_outstanding_reads, max_outstanding_writes);
@@ -554,7 +556,7 @@ void debug_broken_header(void)
 	printk(KERN_DEBUG "Image header too big for size allocated!\n");
 	print_toi_header_storage_for_modules();
 	printk(KERN_DEBUG "Page flags : %d.\n", toi_pageflags_space_needed());
-	printk(KERN_DEBUG "toi_header : %ld.\n", sizeof(struct toi_header));
+	printk(KERN_DEBUG "toi_header : %zu.\n", sizeof(struct toi_header));
 	printk(KERN_DEBUG "Total unowned : %d.\n", unowned);
 	printk(KERN_DEBUG "Total used : %d (%ld pages).\n", total_header_bytes,
 			DIV_ROUND_UP(total_header_bytes, PAGE_SIZE));
@@ -697,10 +699,8 @@ static int toi_start_one_readahead(int dedicated_thread)
 	int oom = 0, result;
 
 	result = throttle_if_needed(dedicated_thread ? THROTTLE_WAIT : 0);
-	if (result) {
-		printk(KERN_ERR "throttle_if_needed returned %d.\n", result);
+	if (result)
 		return result;
-	}
 
 	mutex_lock(&toi_bio_readahead_mutex);
 
@@ -710,8 +710,6 @@ static int toi_start_one_readahead(int dedicated_thread)
 		if (!buffer) {
 			if (oom && !dedicated_thread) {
 				mutex_unlock(&toi_bio_readahead_mutex);
-				printk(KERN_ERR
-					"oom and not dedicated thread.\n");
 				return -ENOMEM;
 			}
 
@@ -725,8 +723,12 @@ static int toi_start_one_readahead(int dedicated_thread)
 	if (result == -ENODATA)
 		toi__free_page(12, virt_to_page(buffer));
 	mutex_unlock(&toi_bio_readahead_mutex);
-	if (result)
-		printk(KERN_DEBUG "toi_bio_rw_page returned %d.\n", result);
+	if (result) {
+		if (result == -ENODATA)
+			toi_message(TOI_IO, TOI_VERBOSE, 0, "Last readahead page submitted.");
+		else
+			printk(KERN_DEBUG "toi_bio_rw_page returned %d.\n", result);
+	}
 	return result;
 }
 
@@ -1543,6 +1545,9 @@ static int try_to_open_resume_device(char *commandline, int quiet)
 
 	resume_dev_t = MKDEV(0, 0);
 
+	if (!strlen(commandline))
+		toi_bio_scan_for_image(quiet);
+
 	if (uuid) {
 		resume_dev_t = blk_lookup_uuid(uuid);
 		kfree(uuid);
@@ -1612,12 +1617,13 @@ static int toi_bio_parse_sig_location(char *commandline,
 	if (strncmp(commandline, "swap:", 5) &&
 	    strncmp(commandline, "file:", 5)) {
 		/*
-		 * Failing swap:, we'll take a simple
-		 * resume=/dev/hda2, but fall through to
-		 * other allocators if /dev/ or UUID= isn't matched.
+		 * Failing swap:, we'll take a simple resume=/dev/hda2, or a
+		 * blank value (scan) but fall through to other allocators
+		 * if /dev/ or UUID= isn't matched.
 		 */
 		if (strncmp(commandline, "/dev/", 5) &&
-		    strncmp(commandline, "UUID=", 5))
+		    strncmp(commandline, "UUID=", 5) &&
+		    strlen(commandline))
 			return 1;
 	} else
 		commandline += 5;
@@ -1654,8 +1660,9 @@ static int toi_bio_parse_sig_location(char *commandline,
 	if (colon)
 		*colon = ':';
 
+	/* No error if we only scanned */
 	if (temp_result)
-		return -EINVAL;
+		return strlen(commandline) ? -EINVAL: 1;
 
 	signature_found = toi_bio_image_exists(quiet);
 
@@ -1735,6 +1742,7 @@ struct toi_module_ops toi_blockwriter_ops = {
 	.load_config_info		= toi_bio_load_config_info,
 	.initialise			= toi_bio_initialise,
 	.cleanup			= toi_bio_cleanup,
+	.post_atomic_restore		= toi_bio_chains_post_atomic,
 
 	.rw_init			= toi_rw_init,
 	.rw_cleanup			= toi_rw_cleanup,

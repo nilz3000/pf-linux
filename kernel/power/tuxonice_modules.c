@@ -77,10 +77,10 @@ void print_toi_header_storage_for_modules(void)
 		}
 	}
 
-	printk(KERN_DEBUG "+ empty terminator : %ld.\n",
+	printk(KERN_DEBUG "+ empty terminator : %zu.\n",
 			sizeof(struct toi_module_header));
 	printk(KERN_DEBUG "                     ====\n");
-	printk(KERN_DEBUG "                     %ld\n",
+	printk(KERN_DEBUG "                     %zu\n",
 			bytes + sizeof(struct toi_module_header));
 }
 EXPORT_SYMBOL_GPL(print_toi_header_storage_for_modules);
@@ -405,6 +405,21 @@ void toi_cleanup_modules(int finishing_cycle)
 		if (this_module->cleanup)
 			this_module->cleanup(finishing_cycle);
 		this_module->initialised = 0;
+	}
+}
+
+/*
+ * toi_post_atomic_restore_modules
+ *
+ * Get ready to do some work!
+ */
+void toi_post_atomic_restore_modules(struct toi_boot_kernel_data *bkd)
+{
+	struct toi_module_ops *this_module;
+
+	list_for_each_entry(this_module, &toi_modules, module_list) {
+		if (this_module->enabled && this_module->post_atomic_restore)
+			this_module->post_atomic_restore(bkd);
 	}
 }
 

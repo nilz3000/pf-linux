@@ -176,6 +176,11 @@ static int toi_file_register_storage(void)
 				target_claim = 1;
 		} else
 			toi_file_target_bdev = target_inode->i_sb->s_bdev;
+		if (!toi_file_target_bdev) {
+			printk(KERN_INFO "%s is not a valid file allocator "
+					"target.\n", toi_file_target);
+			return 0;
+		}
 		toi_file_dev_t = toi_file_target_bdev->bd_dev;
 	}
 
@@ -198,6 +203,7 @@ static int toi_file_register_storage(void)
 	devinfo->bmap_shift = target_inode->i_blkbits - 9;
 	devinfo->blocks_per_page =
 		(1 << (PAGE_SHIFT - target_inode->i_blkbits));
+	sprintf(devinfo->name, "file %s", toi_file_target);
 	file_chain = devinfo;
 	toi_message(TOI_IO, TOI_VERBOSE, 0, "Dev_t is %lx. Prio is %d. Bmap "
 			"shift is %d. Blocks per page %d.",
@@ -384,7 +390,7 @@ static void test_toi_file_target(void)
 	sector_t sector;
 	char uuid[17], buf[50];
 
-	if (result)
+	if (result || !file_chain)
 		return;
 
 	/* This doesn't mean we're in business. Is any storage available? */

@@ -51,6 +51,7 @@ void dump_block_chains(void)
 
 		printk("\n");
 		cur_chain = cur_chain->next;
+		i++;
 	}
 
 	printk(KERN_DEBUG "Saved states:\n");
@@ -376,6 +377,30 @@ int toi_bio_devinfo_storage_needed(void)
 	return result;
 }
 
+static unsigned long chain_pages_used(struct toi_bdev_info *chain)
+{
+	struct hibernate_extent *this = chain->blocks.first;
+	struct hibernate_extent_saved_state *state = &chain->saved_state[3];
+	unsigned long size = 0;
+	int extent_idx = 1;
+
+	if (!state->extent_num) {
+		if (!this)
+			return 0;
+		else
+			return chain->blocks.size;
+	}
+
+	while (extent_idx < state->extent_num) {
+		size += (this->end - this->start + 1);
+		this = this->next;
+		extent_idx++;
+	}
+
+	/* We didn't use the one we're sitting on, so don't count it */
+	return size + state->offset - this->start;
+}
+
 /**
  * toi_serialise_extent_chain - write a chain in the image
  * @chain:	Chain to write.
@@ -385,6 +410,8 @@ static int toi_serialise_extent_chain(struct toi_bdev_info *chain)
 	struct hibernate_extent *this;
 	int ret;
 	int i = 1;
+
+	chain->pages_used = chain_pages_used(chain);
 
 	if (test_action_state(TOI_LOGALL))
 		dump_block_chains();
@@ -472,10 +499,11 @@ static void free_bdev_info(struct toi_bdev_info *chain)
 
 	/*
 	 * The allocator may need to do more than just free the chains
-	 * (swap_free, for example).
+	 * (swap_free, for example). Don't call from boot kernel.
 	 */
 	toi_message(TOI_IO, TOI_VERBOSE, 0, " - Allocator extents.");
-	chain->allocator->bio_allocator_ops->free_storage(chain);
+	if (chain->allocator)
+		chain->allocator->bio_allocator_ops->free_storage(chain);
 
 	/*
 	 * Dropping out of reading atomic copy? Need to undo
@@ -512,6 +540,12 @@ void free_all_bdev_info(void)
 	prio_chain_head = NULL;
 }
 
+static void set_up_start_position(void)
+{
+	toi_writer_posn.current_chain = prio_chain_head;
+	go_next_page(0, 0);
+}
+
 /**
  * toi_load_extent_chain - read back a chain saved in the image
  * @chain:	Chain to load
@@ -519,7 +553,7 @@ void free_all_bdev_info(void)
  * The linked list of extents is reconstructed from the disk. chain will point
  * to the first entry.
  **/
-int toi_load_extent_chain(int index)
+int toi_load_extent_chain(int index, int *num_loaded)
 {
 	struct toi_bdev_info *chain = toi_kzalloc(39,
 			sizeof(struct toi_bdev_info), GFP_ATOMIC);
@@ -536,6 +570,8 @@ int toi_load_extent_chain(int index)
 		toi_kfree(39, chain, sizeof(*chain));
 		return 1;
 	}
+
+	toi_bkd.pages_used[index] = chain->pages_used;
 
 	ret = toiActiveAllocator->rw_header_chunk_noreadahead(READ, NULL,
 			(char *) &chain->blocks.num_extents, sizeof(int));
@@ -617,11 +653,16 @@ int toi_load_extent_chain(int index)
 			 * this chain to read the next page in the header
 			 */
 			toi_insert_chain_in_prio_list(chain);
-			if (!index) {
-				toi_writer_posn.current_chain = prio_chain_head;
-				go_next_page(0, 0);
-			}
 		}
+
+		/*
+		 * We have to wait until 2 extents are loaded before setting up properly
+		 * because if the first extent has only one page, we will need to put the
+		 * position on the second extent. Sounds obvious, but it wasn't!
+		 */
+		(*num_loaded)++;
+		if ((*num_loaded) == 2)
+			set_up_start_position();
 		last = this;
 	}
 
@@ -646,6 +687,7 @@ int toi_load_extent_chains(void)
 	int result;
 	int to_load;
 	int i;
+	int extents_loaded = 0;
 
 	result = toiActiveAllocator->rw_header_chunk_noreadahead(READ, NULL,
 			(char *) &to_load,
@@ -657,10 +699,14 @@ int toi_load_extent_chains(void)
 	for (i = 0; i < to_load; i++) {
 		toi_message(TOI_IO, TOI_VERBOSE, 0, " >> Loading chain %d/%d.",
 				i, to_load);
-		result = toi_load_extent_chain(i);
+		result = toi_load_extent_chain(i, &extents_loaded);
 		if (result)
 			return result;
 	}
+
+	/* If we never got to a second extent, we still need to do this. */
+	if (extents_loaded == 1)
+		set_up_start_position();
 
 	toi_message(TOI_IO, TOI_VERBOSE, 0, "Save chain numbers.");
 	result = toiActiveAllocator->rw_header_chunk_noreadahead(READ,
@@ -958,4 +1004,32 @@ int toi_bio_allocate_storage(unsigned long request)
 
 	toi_message(TOI_IO, TOI_VERBOSE, 0, "Done. Reserving header.");
 	return apply_header_reservation();
+}
+
+void toi_bio_chains_post_atomic(struct toi_boot_kernel_data *bkd)
+{
+	int i = 0;
+	struct toi_bdev_info *cur_chain = prio_chain_head;
+
+	while (cur_chain) {
+		cur_chain->pages_used = bkd->pages_used[i];
+		cur_chain = cur_chain->next;
+		i++;
+	}
+}
+
+int toi_bio_chains_debug_info(char *buffer, int size)
+{
+	/* Show what we actually used */
+	struct toi_bdev_info *cur_chain = prio_chain_head;
+	int len = 0;
+
+	while (cur_chain) {
+		len += scnprintf(buffer + len, size - len, "  Used %lu pages "
+				"from %s.\n", cur_chain->pages_used,
+				cur_chain->name);
+		cur_chain = cur_chain->next;
+	}
+
+	return len;
 }
