@@ -3690,10 +3690,10 @@ exit:
 }
 
 #if defined(CONFIG_BFQ_GROUP_IOSCHED) && defined(CONFIG_DEBUG_BLK_CGROUP)
-static inline void bfq_update_dispatch_stats(struct request *rq,
-					     spinlock_t *queue_lock,
-					     struct bfq_queue *in_serv_queue,
-					     bool idle_timer_disabled)
+static void bfq_update_dispatch_stats(struct request_queue *q,
+				      struct request *rq,
+				      struct bfq_queue *in_serv_queue,
+				      bool idle_timer_disabled)
 {
 	struct bfq_queue *bfqq = rq ? RQ_BFQQ(rq) : NULL;
 
@@ -3713,7 +3713,7 @@ static inline void bfq_update_dispatch_stats(struct request *rq,
 	 * In addition, the following queue lock guarantees that
 	 * bfqq_group(bfqq) exists as well.
 	 */
-	spin_lock_irq(queue_lock);
+	spin_lock_irq(q->queue_lock);
 	if (idle_timer_disabled)
 		/*
 		 * Since the idle timer has been disabled,
@@ -3732,11 +3732,11 @@ static inline void bfq_update_dispatch_stats(struct request *rq,
 		bfqg_stats_set_start_empty_time(bfqg);
 		bfqg_stats_update_io_remove(bfqg, rq->cmd_flags);
 	}
-	spin_unlock_irq(queue_lock);
+	spin_unlock_irq(q->queue_lock);
 }
 #else
-static inline void bfq_update_dispatch_stats(struct request *rq,
-					     spinlock_t *queue_lock,
+static inline void bfq_update_dispatch_stats(struct request_queue *q,
+					     struct request *rq,
 					     struct bfq_queue *in_serv_queue,
 					     bool idle_timer_disabled) {}
 #endif
@@ -3760,7 +3760,7 @@ static struct request *bfq_dispatch_request(struct blk_mq_hw_ctx *hctx)
 
 	spin_unlock_irq(&bfqd->lock);
 
-	bfq_update_dispatch_stats(rq, hctx->queue->queue_lock, in_serv_queue,
+	bfq_update_dispatch_stats(hctx->queue, rq, in_serv_queue,
 				  idle_timer_disabled);
 
 	return rq;
@@ -4286,10 +4286,10 @@ static bool __bfq_insert_request(struct bfq_data *bfqd, struct request *rq)
 }
 
 #if defined(CONFIG_BFQ_GROUP_IOSCHED) && defined(CONFIG_DEBUG_BLK_CGROUP)
-static inline void bfq_update_insert_stats(struct bfq_queue *bfqq,
-					   spinlock_t *queue_lock,
-					   bool idle_timer_disabled,
-					   unsigned int cmd_flags)
+static void bfq_update_insert_stats(struct request_queue *q,
+				    struct bfq_queue *bfqq,
+				    bool idle_timer_disabled,
+				    unsigned int cmd_flags)
 {
 	if (!bfqq)
 		return;
@@ -4304,15 +4304,15 @@ static inline void bfq_update_insert_stats(struct bfq_queue *bfqq,
 	 * In addition, the following queue lock guarantees that
 	 * bfqq_group(bfqq) exists as well.
 	 */
-	spin_lock_irq(queue_lock);
+	spin_lock_irq(q->queue_lock);
 	bfqg_stats_update_io_add(bfqq_group(bfqq), bfqq, cmd_flags);
 	if (idle_timer_disabled)
 		bfqg_stats_update_idle_time(bfqq_group(bfqq));
-	spin_unlock_irq(queue_lock);
+	spin_unlock_irq(q->queue_lock);
 }
 #else
-static inline void bfq_update_insert_stats(struct bfq_queue *bfqq,
-					   spinlock_t *queue_lock,
+static inline void bfq_update_insert_stats(struct request_queue *q,
+					   struct bfq_queue *bfqq,
 					   bool idle_timer_disabled,
 					   unsigned int cmd_flags) {}
 #endif
@@ -4367,7 +4367,7 @@ static void bfq_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
 
 	spin_unlock_irq(&bfqd->lock);
 
-	bfq_update_insert_stats(bfqq, q->queue_lock, idle_timer_disabled,
+	bfq_update_insert_stats(q, bfqq, idle_timer_disabled,
 				cmd_flags);
 }
 
