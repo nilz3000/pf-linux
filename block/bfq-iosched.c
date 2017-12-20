@@ -166,6 +166,20 @@ static const int bfq_async_charge_factor = 10;
 /* Default timeout values, in jiffies, approximating CFQ defaults. */
 const int bfq_timeout = HZ / 8;
 
+/*
+ * Time limit for merging (see comments in bfq_setup_cooperator). Set
+ * to the slowest value that, in our tests, proved to be effective in
+ * removing false positives, while not causing true positives to miss
+ * queue merging.
+ *
+ * As can be deduced from the low time limit below, queue merging, if
+ * successful, happens at the very beggining of the I/O of the involved
+ * cooperating processes, as a consequence of the arrival of the very
+ * first requests from each cooperator.  After that, there is very
+ * little chance to find cooperators.
+ */
+static const unsigned long bfq_merge_time_limit = HZ/10;
+
 static struct kmem_cache *bfq_pool;
 
 /* Below this threshold (in ns), we consider thinktime immediate. */
@@ -444,6 +458,13 @@ bfq_rq_pos_tree_lookup(struct bfq_data *bfqd, struct rb_root *root,
 	return bfqq;
 }
 
+static bool bfq_too_late_for_merging(struct bfq_queue *bfqq)
+{
+	return bfqq->service_from_backlogged > 0 &&
+		time_is_before_jiffies(bfqq->first_IO_time +
+				       bfq_merge_time_limit);
+}
+
 void bfq_pos_tree_add_move(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 {
 	struct rb_node **p, *parent;
@@ -453,6 +474,14 @@ void bfq_pos_tree_add_move(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 		rb_erase(&bfqq->pos_node, bfqq->pos_root);
 		bfqq->pos_root = NULL;
 	}
+
+	/*
+	 * bfqq cannot be merged any longer (see comments in
+	 * bfq_setup_cooperator): no point in adding bfqq into the
+	 * position tree.
+	 */
+	if (bfq_too_late_for_merging(bfqq))
+		return;
 
 	if (bfq_class_idle(bfqq))
 		return;
@@ -1627,6 +1656,8 @@ static void bfq_remove_request(struct request_queue *q,
 			rb_erase(&bfqq->pos_node, bfqq->pos_root);
 			bfqq->pos_root = NULL;
 		}
+	} else {
+		bfq_pos_tree_add_move(bfqd, bfqq);
 	}
 
 	if (rq->cmd_flags & REQ_META)
@@ -1933,6 +1964,9 @@ bfq_setup_merge(struct bfq_queue *bfqq, struct bfq_queue *new_bfqq)
 static bool bfq_may_be_close_cooperator(struct bfq_queue *bfqq,
 					struct bfq_queue *new_bfqq)
 {
+	if (bfq_too_late_for_merging(new_bfqq))
+		return false;
+
 	if (bfq_class_idle(bfqq) || bfq_class_idle(new_bfqq) ||
 	    (bfqq->ioprio_class != new_bfqq->ioprio_class))
 		return false;
@@ -1957,20 +1991,6 @@ static bool bfq_may_be_close_cooperator(struct bfq_queue *bfqq,
 }
 
 /*
- * If this function returns true, then bfqq cannot be merged. The idea
- * is that true cooperation happens very early after processes start
- * to do I/O. Usually, late cooperations are just accidental false
- * positives. In case bfqq is weight-raised, such false positives
- * would evidently degrade latency guarantees for bfqq.
- */
-static bool wr_from_too_long(struct bfq_queue *bfqq)
-{
-	return bfqq->wr_coeff > 1 &&
-		time_is_before_jiffies(bfqq->last_wr_start_finish +
-				       msecs_to_jiffies(100));
-}
-
-/*
  * Attempt to schedule a merge of bfqq with the currently in-service
  * queue or with a close queue among the scheduled queues.  Return
  * NULL if no merge was scheduled, a pointer to the shared bfq_queue
@@ -1982,11 +2002,6 @@ static bool wr_from_too_long(struct bfq_queue *bfqq)
  * handle merging with the OOM queue would be quite complex and expensive
  * to maintain. Besides, in such a critical condition as an out of memory,
  * the benefits of queue merging may be little relevant, or even negligible.
- *
- * Weight-raised queues can be merged only if their weight-raising
- * period has just started. In fact cooperating processes are usually
- * started together. Thus, with this filter we avoid false positives
- * that would jeopardize low-latency guarantees.
  *
  * WARNING: queue merging may impair fairness among non-weight raised
  * queues, for at least two reasons: 1) the original weight of a
@@ -2001,12 +2016,24 @@ bfq_setup_cooperator(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 {
 	struct bfq_queue *in_service_bfqq, *new_bfqq;
 
+	/*
+	 * Prevent bfqq from being merged if it has been created too
+	 * long ago. The idea is that true cooperating processes, and
+	 * thus their associated bfq_queues, are supposed to be
+	 * created shortly after each other. This is the case, e.g.,
+	 * for KVM/QEMU and dump I/O threads. Basing on this
+	 * assumption, the following filtering greatly reduces the
+	 * probability that two non-cooperating processes, which just
+	 * happen to do close I/O for some short time interval, have
+	 * their queues merged by mistake.
+	 */
+	if (bfq_too_late_for_merging(bfqq))
+		return NULL;
+
 	if (bfqq->new_bfqq)
 		return bfqq->new_bfqq;
 
-	if (!io_struct ||
-	    wr_from_too_long(bfqq) ||
-	    unlikely(bfqq == &bfqd->oom_bfqq))
+	if (!io_struct || unlikely(bfqq == &bfqd->oom_bfqq))
 		return NULL;
 
 	/* If there is only one backlogged queue, don't search. */
@@ -2015,12 +2042,9 @@ bfq_setup_cooperator(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 
 	in_service_bfqq = bfqd->in_service_queue;
 
-	if (!in_service_bfqq || in_service_bfqq == bfqq
-	    || wr_from_too_long(in_service_bfqq) ||
-	    unlikely(in_service_bfqq == &bfqd->oom_bfqq))
-		goto check_scheduled;
-
-	if (bfq_rq_close_to_sector(io_struct, request, bfqd->last_position) &&
+	if (in_service_bfqq && in_service_bfqq != bfqq &&
+	    likely(in_service_bfqq != &bfqd->oom_bfqq) &&
+	    bfq_rq_close_to_sector(io_struct, request, bfqd->last_position) &&
 	    bfqq->entity.parent == in_service_bfqq->entity.parent &&
 	    bfq_may_be_close_cooperator(bfqq, in_service_bfqq)) {
 		new_bfqq = bfq_setup_merge(bfqq, in_service_bfqq);
@@ -2032,12 +2056,10 @@ bfq_setup_cooperator(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 	 * queues. The only thing we need is that the bio/request is not
 	 * NULL, as we need it to establish whether a cooperator exists.
 	 */
-check_scheduled:
 	new_bfqq = bfq_find_close_cooperator(bfqd, bfqq,
 			bfq_io_struct_pos(io_struct, request));
 
-	if (new_bfqq && !wr_from_too_long(new_bfqq) &&
-	    likely(new_bfqq != &bfqd->oom_bfqq) &&
+	if (new_bfqq && likely(new_bfqq != &bfqd->oom_bfqq) &&
 	    bfq_may_be_close_cooperator(bfqq, new_bfqq))
 		return bfq_setup_merge(bfqq, new_bfqq);
 
@@ -2062,7 +2084,8 @@ static void bfq_bfqq_save_state(struct bfq_queue *bfqq)
 	bic->saved_in_large_burst = bfq_bfqq_in_large_burst(bfqq);
 	bic->was_in_burst_list = !hlist_unhashed(&bfqq->burst_list_node);
 	if (unlikely(bfq_bfqq_just_created(bfqq) &&
-		     !bfq_bfqq_in_large_burst(bfqq))) {
+		     !bfq_bfqq_in_large_burst(bfqq) &&
+		     bfqq->bfqd->low_latency)) {
 		/*
 		 * bfqq being merged right after being created: bfqq
 		 * would have deserved interactive weight raising, but
@@ -3040,17 +3063,6 @@ void bfq_bfqq_expire(struct bfq_data *bfqd,
 	 * Check whether the process is slow (see bfq_bfqq_is_slow).
 	 */
 	slow = bfq_bfqq_is_slow(bfqd, bfqq, compensate, reason, &delta);
-
-	/*
-	 * Increase service_from_backlogged before next statement,
-	 * because the possible next invocation of
-	 * bfq_bfqq_charge_time would likely inflate
-	 * entity->service. In contrast, service_from_backlogged must
-	 * contain real service, to enable the soft real-time
-	 * heuristic to correctly compute the bandwidth consumed by
-	 * bfqq.
-	 */
-	bfqq->service_from_backlogged += entity->service;
 
 	/*
 	 * As above explained, charge slow (typically seeky) and
