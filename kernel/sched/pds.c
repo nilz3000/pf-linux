@@ -96,7 +96,7 @@ enum {
 
 static inline void print_scheduler_version(void)
 {
-	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.98g by Alfred Chen.\n");
+	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.98h by Alfred Chen.\n");
 }
 
 /* task_struct::on_rq states: */
@@ -2302,7 +2302,9 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 		if (idleprio_task(p) || batch_task(p)) {
 			rq->curr->time_slice /= 2;
 			p->time_slice = rq->curr->time_slice;
+#ifdef CONFIG_SCHED_HRTICK
 			hrtick_start(rq, rq->curr->time_slice);
+#endif
 		} else
 			p->time_slice = rq->curr->time_slice / 2;
 
@@ -5833,18 +5835,18 @@ static void migrate_tasks(struct rq *dead_rq)
 
 	rq->stop = stop;
 }
+
+static void set_rq_offline(struct rq *rq)
+{
+	if (rq->online)
+		rq->online = false;
+}
 #endif /* CONFIG_HOTPLUG_CPU */
 
 static void set_rq_online(struct rq *rq)
 {
 	if (!rq->online)
 		rq->online = true;
-}
-
-static void set_rq_offline(struct rq *rq)
-{
-	if (rq->online)
-		rq->online = false;
 }
 
 #ifdef CONFIG_SCHED_DEBUG
@@ -6157,11 +6159,13 @@ static void sched_init_topology_cpumask(void)
 
 #ifdef CONFIG_SCHED_MC
 		cpumask_complement(&tmp, cpu_coregroup_mask(cpu));
-#elif CONFIG_SCHED_SMT
+#else
+#ifdef CONFIG_SCHED_SMT
 		cpumask_complement(&tmp, topology_sibling_cpumask(cpu));
 #else
 		cpumask_setall(&tmp);
 		cpumask_clear_cpu(cpu, &tmp);
+#endif
 #endif
 		if (cpumask_and(&tmp, &tmp, topology_core_cpumask(cpu))) {
 			printk(KERN_INFO "pds: sched_cpu_affinity_chk_masks[%d] core 0x%08lx",
