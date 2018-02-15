@@ -104,7 +104,7 @@ enum {
 
 static inline void print_scheduler_version(void)
 {
-	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.98j by Alfred Chen.\n");
+	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.98k by Alfred Chen.\n");
 }
 
 /* task_struct::on_rq states: */
@@ -148,7 +148,7 @@ static int __init rr_interval_set(char *str)
 __setup("rr_interval=", rr_interval_set);
 
 
-static const u64 sched_prio_to_deadline[NICE_WIDTH] = {
+static const u64 sched_prio2deadline[NICE_WIDTH] = {
 /* -20 */	  6291456,   6920601,   7612661,   8373927,   9211319,
 /* -15 */	 10132450,  11145695,  12260264,  13486290,  14834919,
 /* -10 */	 16318410,  17950251,  19745276,  21719803,  23891783,
@@ -451,24 +451,14 @@ static inline void update_task_priodl(struct task_struct *p)
  * proportion works out to the square of the virtual deadline difference, so
  * this equation will give nice 19 3% CPU compared to nice 0.
  */
-static inline u64 prio_deadline_diff(int user_prio)
-{
-	return sched_prio_to_deadline[user_prio];
-}
-
 static inline u64 task_deadline_diff(const struct task_struct *p)
 {
-	return prio_deadline_diff(TASK_USER_PRIO(p));
+	return sched_prio2deadline[TASK_USER_PRIO(p)];
 }
 
 static inline u64 static_deadline_diff(int static_prio)
 {
-	return prio_deadline_diff(USER_PRIO(static_prio));
-}
-
-static inline u64 longest_deadline_diff(void)
-{
-	return prio_deadline_diff(39);
+	return sched_prio2deadline[USER_PRIO(static_prio)];
 }
 
 static inline struct task_struct *rq_first_queued_task(struct rq *rq)
@@ -491,7 +481,7 @@ static const int task_dl_hash_tbl[] = {
 static inline int
 task_deadline_level(const struct task_struct *p, const struct rq *rq)
 {
-	u64 delta = (rq->clock + prio_deadline_diff(39) - p->deadline) >> 23;
+	u64 delta = (rq->clock + sched_prio2deadline[39] - p->deadline) >> 23;
 
 	delta = min((size_t)delta, ARRAY_SIZE(task_dl_hash_tbl) - 1);
 	return task_dl_hash_tbl[delta];
@@ -912,7 +902,7 @@ void resched_curr(struct rq *rq)
 		trace_sched_wake_idle_without_ipi(cpu);
 }
 
-void check_preempt_curr(struct rq *rq, struct task_struct *p)
+static inline void check_preempt_curr(struct rq *rq, struct task_struct *p)
 {
 	if (p->priodl < rq->curr->priodl)
 		resched_curr(rq);
@@ -1731,7 +1721,7 @@ out:
  * @p: task wants to preempt CPU
  * @only_preempt_low_policy: indicate only preempt rq running low policy than @p
  */
-static inline struct rq*
+static inline int
 task_preemptible_rq(struct task_struct *p, cpumask_t *chk_mask,
 		    int only_preempt_low_policy)
 {
@@ -1749,10 +1739,10 @@ task_preemptible_rq(struct task_struct *p, cpumask_t *chk_mask,
 
 			if (cpumask_and(&smt_tmp, &tmp, &sched_cpu_sg_idle_mask)) {
 				cpu = best_mask_cpu(task_cpu(p), &smt_tmp);
-				return cpu_rq(cpu);
+				return cpu;
 			}
 			cpu = best_mask_cpu(task_cpu(p), &tmp);
-			return cpu_rq(cpu);
+			return cpu;
 		}
 		level = find_next_bit(sched_rq_queued_masks_bitmap,
 				      NR_SCHED_RQ_QUEUED_LEVEL,
@@ -1763,7 +1753,7 @@ task_preemptible_rq(struct task_struct *p, cpumask_t *chk_mask,
 	while (level < preempt_level) {
 		if(cpumask_and(&tmp, chk_mask, &sched_rq_queued_masks[level])) {
 			cpu = best_mask_cpu(task_cpu(p), &tmp);
-			return cpu_rq(cpu);
+			return cpu;
 		}
 		level = find_next_bit(sched_rq_queued_masks_bitmap,
 				      NR_SCHED_RQ_QUEUED_LEVEL,
@@ -1772,28 +1762,28 @@ task_preemptible_rq(struct task_struct *p, cpumask_t *chk_mask,
 
 #ifdef	CONFIG_64BIT
 	if (likely(level != preempt_level))
-		return NULL;
+		return nr_cpu_ids;
 
 	/*
 	 * only_preempt_low_policy indicate just preempt rq running lower
 	 * policy task than p
 	 */
 	if (unlikely(only_preempt_low_policy))
-		return NULL;
+		return nr_cpu_ids;
 
 	/* IDLEPRIO tasks never preempt anything but idle */
 	if (unlikely(idleprio_task(p)))
-		return NULL;
+		return nr_cpu_ids;
 
 	if (!cpumask_and(&tmp, chk_mask, &sched_rq_queued_masks[preempt_level]))
-		return NULL;
+		return nr_cpu_ids;
 
 	for_each_cpu (cpu, &tmp)
 		if (likely(p->priodl < sched_rq_priodls[cpu]))
-			return cpu_rq(cpu);
+			return cpu;
 #endif
 
-	return NULL;
+	return nr_cpu_ids;
 }
 
 /*
@@ -1819,14 +1809,13 @@ static inline unsigned int cpumask_random(unsigned int rand,
 #define WF_FORK		0x02		/* child wakeup after fork */
 #define WF_MIGRATED	0x04		/* internal use, task got migrated */
 
-static inline struct rq *
-select_task_rq(struct task_struct *p, int wake_flags)
+static inline int select_task_rq(struct task_struct *p, int wake_flags)
 {
 	cpumask_t chk_mask;
-	struct rq *rq;
+	int cpu;
 
 	if (unlikely(!cpumask_and(&chk_mask, &p->cpus_allowed, cpu_online_mask)))
-		return cpu_rq(select_fallback_rq(task_cpu(p), p));
+		return select_fallback_rq(task_cpu(p), p);
 
 	/*
 	 * Sync wakeups (i.e. those types of wakeups where the waker
@@ -1834,17 +1823,16 @@ select_task_rq(struct task_struct *p, int wake_flags)
 	 * don't trigger a preemption if there are no idle cpus,
 	 * instead waiting for current to deschedule.
 	 */
-	rq = task_preemptible_rq(p, &chk_mask, wake_flags & WF_SYNC);
-	if (NULL == rq)
-		rq = cpu_rq(cpumask_random(task_cpu(p), &chk_mask));
+	cpu = task_preemptible_rq(p, &chk_mask, wake_flags & WF_SYNC);
+	if (nr_cpu_ids == cpu)
+		return cpumask_random(task_cpu(p), &chk_mask);
 
-	return rq;
+	return cpu;
 }
 #else /* CONFIG_SMP */
-static inline struct rq *
-select_task_rq(struct task_struct *p, int wake_flags)
+static inline int select_task_rq(struct task_struct *p, int wake_flags)
 {
-	return uprq;
+	return 0;
 }
 #endif /* CONFIG_SMP */
 
@@ -2053,7 +2041,7 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 			  int wake_flags)
 {
 	unsigned long flags;
-	struct rq *prq;
+	struct rq *rq;
 	int cpu, success = 0;
 
 	/*
@@ -2137,28 +2125,25 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 		atomic_dec(&task_rq(p)->nr_iowait);
 	}
 
-	prq = select_task_rq(p, wake_flags);
+	cpu = select_task_rq(p, wake_flags);
 
-	cpu = cpu_of(prq);
 	if (cpu != task_cpu(p)) {
 		wake_flags |= WF_MIGRATED;
 		set_task_cpu(p, cpu);
 	}
 #else /* CONFIG_SMP */
-
 	if (p->in_iowait) {
 		delayacct_blkio_end(p);
 		atomic_dec(&task_rq(p)->nr_iowait);
 	}
-	prq = cpu_rq(cpu);
-
 #endif
 
-	raw_spin_lock(&prq->lock);
-	ttwu_do_activate(prq, p, wake_flags);
+	rq = cpu_rq(cpu);
+	raw_spin_lock(&rq->lock);
+	ttwu_do_activate(rq, p, wake_flags);
 
-	check_preempt_curr(prq, p);
-	raw_spin_unlock(&prq->lock);
+	check_preempt_curr(rq, p);
+	raw_spin_unlock(&rq->lock);
 
 stat:
 	ttwu_stat(p, cpu, wake_flags);
@@ -2455,7 +2440,7 @@ void wake_up_new_task(struct task_struct *p)
 
 	p->state = TASK_RUNNING;
 
-	rq = select_task_rq(p, 0);
+	rq = cpu_rq(select_task_rq(p, 0));
 #ifdef CONFIG_SMP
 	/*
 	 * Fork balancing, do it here and not earlier because:
@@ -3677,7 +3662,6 @@ static void __sched notrace __schedule(bool preempt)
 		rq->curr = next;
 		++*switch_count;
 		rq->nr_switches++;
-		rq->last_switch = rq->clock;
 
 		trace_sched_switch(preempt, prev, next);
 
@@ -6296,7 +6280,6 @@ void __init sched_init(void)
 		rq = cpu_rq(i);
 		FULL_INIT_SKIPLIST_NODE(&rq->sl_header);
 		raw_spin_lock_init(&rq->lock);
-		rq->last_switch = 0UL;
 		rq->dither = 0;
 		rq->nr_running = rq->nr_uninterruptible = 0;
 		rq->calc_load_active = 0;
