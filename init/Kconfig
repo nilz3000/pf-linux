@@ -1345,7 +1345,7 @@ config MEMBARRIER
 	  If unsure, say Y.
 
 config CHECKPOINT_RESTORE
-	bool "Checkpoint/restore support" if EXPERT
+	bool "Checkpoint/restore support"
 	select PROC_CHILDREN
 	default n
 	help
