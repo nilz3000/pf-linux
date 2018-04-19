@@ -101,6 +101,8 @@ static inline bool bio_integrity_endio(struct bio *bio)
 void blk_timeout_work(struct work_struct *work);
 unsigned long blk_rq_timeout(unsigned long timeout);
 void blk_add_timer(struct request *req);
+void blk_mq_add_timer(struct request *req, enum mq_rq_state old,
+		      enum mq_rq_state new);
 void blk_delete_timer(struct request *);
 
 
@@ -239,18 +241,19 @@ static inline void req_set_nomerge(struct request_queue *q, struct request *req)
 }
 
 /*
- * Steal a bit from this field for legacy IO path atomic IO marking. Note that
- * setting the deadline clears the bottom bit, potentially clearing the
- * completed bit. The user has to be OK with this (current ones are fine).
+ * Steal two bits from this field. The legacy IO path uses the lowest bit for
+ * atomic IO marking. Note that setting the deadline clears the bottom bit,
+ * potentially clearing the completed bit. The current legacy block layer is
+ * fine with that. Must be called with the request queue lock held.
  */
 static inline void blk_rq_set_deadline(struct request *rq, unsigned long time)
 {
-	rq->__deadline = time & ~0x1UL;
+	rq->__deadline = time & RQ_STATE_MASK;
 }
 
 static inline unsigned long blk_rq_deadline(struct request *rq)
 {
-	return rq->__deadline & ~0x1UL;
+	return rq->__deadline & ~RQ_STATE_MASK;
 }
 
 /*
