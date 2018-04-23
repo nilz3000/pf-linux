@@ -27,11 +27,18 @@ struct blk_mq_ctx {
 	struct kobject		kobj;
 } ____cacheline_aligned_in_smp;
 
-/* Lowest two bits of request->__deadline. */
+/*
+ * Bits for request->gstate.  The lower two bits carry MQ_RQ_* state value
+ * and the upper bits the generation number.
+ */
 enum mq_rq_state {
 	MQ_RQ_IDLE		= 0,
 	MQ_RQ_IN_FLIGHT		= 1,
 	MQ_RQ_COMPLETE		= 2,
+
+	MQ_RQ_STATE_BITS	= 2,
+	MQ_RQ_STATE_MASK	= (1 << MQ_RQ_STATE_BITS) - 1,
+	MQ_RQ_GEN_INC		= 1 << MQ_RQ_STATE_BITS,
 };
 
 void blk_mq_freeze_queue(struct request_queue *q);
@@ -93,73 +100,37 @@ extern void blk_mq_hctx_kobj_init(struct blk_mq_hw_ctx *hctx);
 
 void blk_mq_release(struct request_queue *q);
 
-/*
- * If the state of request @rq equals @old_state, update deadline and request
- * state atomically to @time and @new_state. blk-mq only. cmpxchg() is only
- * used if there could be a concurrent update attempt from another context.
- */
-static inline bool blk_mq_rq_set_deadline(struct request *rq,
-					  unsigned long new_time,
-					  enum mq_rq_state old_state,
-					  enum mq_rq_state new_state)
-{
-	unsigned long old_val, new_val;
-
-	if (old_state != MQ_RQ_IN_FLIGHT) {
-		old_val = READ_ONCE(rq->__deadline);
-		if ((old_val & RQ_STATE_MASK) != old_state)
-			return false;
-		new_val = (new_time & ~RQ_STATE_MASK) |
-			  (new_state & RQ_STATE_MASK);
-		WRITE_ONCE(rq->__deadline, new_val);
-		return true;
-	}
-
-	do {
-		old_val = READ_ONCE(rq->__deadline);
-		if ((old_val & RQ_STATE_MASK) != old_state)
-			return false;
-		new_val = (new_time & ~RQ_STATE_MASK) |
-			  (new_state & RQ_STATE_MASK);
-	} while (cmpxchg(&rq->__deadline, old_val, new_val) != old_val);
-
-	return true;
-}
-
 /**
  * blk_mq_rq_state() - read the current MQ_RQ_* state of a request
  * @rq: target request.
  */
-static inline enum mq_rq_state blk_mq_rq_state(struct request *rq)
+static inline int blk_mq_rq_state(struct request *rq)
 {
-	return READ_ONCE(rq->__deadline) & RQ_STATE_MASK;
+	return READ_ONCE(rq->gstate) & MQ_RQ_STATE_MASK;
 }
 
 /**
- * blk_mq_change_rq_state - atomically test and set request state
- * @rq: Request pointer.
- * @old_state: Old request state.
- * @new_state: New request state.
+ * blk_mq_rq_update_state() - set the current MQ_RQ_* state of a request
+ * @rq: target request.
+ * @state: new state to set.
  *
- * Returns %true if and only if the old state was @old and if the state has
- * been changed into @new.
+ * Set @rq's state to @state.  The caller is responsible for ensuring that
+ * there are no other updaters.  A request can transition into IN_FLIGHT
+ * only from IDLE and doing so increments the generation number.
  */
-static inline bool blk_mq_change_rq_state(struct request *rq,
-					  enum mq_rq_state old_state,
-					  enum mq_rq_state new_state)
+static inline void blk_mq_rq_update_state(struct request *rq,
+					  enum mq_rq_state state)
 {
-	unsigned long old_val = (READ_ONCE(rq->__deadline) & ~RQ_STATE_MASK) |
-				old_state;
-	unsigned long new_val = (old_val & ~RQ_STATE_MASK) | new_state;
+	u64 old_val = READ_ONCE(rq->gstate);
+	u64 new_val = (old_val & ~MQ_RQ_STATE_MASK) | state;
 
-	/*
-	 * For transitions from state in-flight to another state cmpxchg() must
-	 * be used. For other state transitions it is safe to use WRITE_ONCE().
-	 */
-	if (old_state == MQ_RQ_IN_FLIGHT)
-		return cmpxchg(&rq->__deadline, old_val, new_val) == old_val;
-	WRITE_ONCE(rq->__deadline, new_val);
-	return true;
+	if (state == MQ_RQ_IN_FLIGHT) {
+		WARN_ON_ONCE((old_val & MQ_RQ_STATE_MASK) != MQ_RQ_IDLE);
+		new_val += MQ_RQ_GEN_INC;
+	}
+
+	/* avoid exposing interim values */
+	WRITE_ONCE(rq->gstate, new_val);
 }
 
 static inline struct blk_mq_ctx *__blk_mq_get_ctx(struct request_queue *q,

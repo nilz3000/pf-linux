@@ -27,6 +27,8 @@
 #include <linux/percpu-refcount.h>
 #include <linux/scatterlist.h>
 #include <linux/blkzoned.h>
+#include <linux/seqlock.h>
+#include <linux/u64_stats_sync.h>
 
 struct module;
 struct scsi_ioctl_command;
@@ -123,8 +125,10 @@ typedef __u32 __bitwise req_flags_t;
 #define RQF_SPECIAL_PAYLOAD	((__force req_flags_t)(1 << 18))
 /* The per-zone write lock is held for this request */
 #define RQF_ZONE_WRITE_LOCKED	((__force req_flags_t)(1 << 19))
+/* timeout is expired */
+#define RQF_MQ_TIMEOUT_EXPIRED	((__force req_flags_t)(1 << 20))
 /* already slept for hybrid poll */
-#define RQF_MQ_POLL_SLEPT	((__force req_flags_t)(1 << 20))
+#define RQF_MQ_POLL_SLEPT	((__force req_flags_t)(1 << 21))
 
 /* flags that prevent us from merging requests: */
 #define RQF_NOMERGE_FLAGS \
@@ -222,18 +226,27 @@ struct request {
 	unsigned int extra_len;	/* length of alignment and padding */
 
 	/*
+	 * On blk-mq, the lower bits of ->gstate (generation number and
+	 * state) carry the MQ_RQ_* state value and the upper bits the
+	 * generation number which is monotonically incremented and used to
+	 * distinguish the reuse instances.
+	 *
+	 * ->gstate_seq allows updates to ->gstate and other fields
+	 * (currently ->deadline) during request start to be read
+	 * atomically from the timeout path, so that it can operate on a
+	 * coherent set of information.
+	 */
+	seqcount_t gstate_seq;
+	u64 gstate;
+
+	/*
 	 * ->aborted_gstate is used by the timeout to claim a specific
 	 * recycle instance of this request.  See blk_mq_timeout_work().
 	 */
+	struct u64_stats_sync aborted_gstate_sync;
 	u64 aborted_gstate;
 
-	/*
-	 * Access through blk_rq_deadline() and blk_rq_set_deadline(),
-	 * blk_mark_rq_complete(), blk_clear_rq_complete() and
-	 * blk_rq_is_complete() for legacy queues or blk_mq_rq_state() for
-	 * blk-mq queues.
-	 */
-#define RQ_STATE_MASK 0x3UL
+	/* access through blk_rq_set_deadline, blk_rq_deadline */
 	unsigned long __deadline;
 
 	struct list_head timeout_list;
