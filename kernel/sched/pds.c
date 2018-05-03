@@ -102,7 +102,7 @@ enum {
 
 static inline void print_scheduler_version(void)
 {
-	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.98n by Alfred Chen.\n");
+	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.98o by Alfred Chen.\n");
 }
 
 /* task_struct::on_rq states: */
@@ -209,9 +209,6 @@ static unsigned int sched_nr_rq_pending ____cacheline_aligned_in_smp;
 static cpumask_t
 sched_cpu_affinity_chk_masks[NR_CPUS][NR_CPU_AFFINITY_CHK_LEVEL]
 ____cacheline_aligned_in_smp;
-
-static cpumask_t *
-sched_cpu_affinity_llc_end_masks[NR_CPUS] ____cacheline_aligned_in_smp;
 
 static cpumask_t *
 sched_cpu_affinity_chk_end_masks[NR_CPUS] ____cacheline_aligned_in_smp;
@@ -489,19 +486,17 @@ static inline void update_sched_rq_queued_masks_normal(struct rq *rq)
 
 static inline void update_sched_rq_queued_masks(struct rq *rq)
 {
-	int prio;
 	int cpu = cpu_of(rq);
 	struct task_struct *p;
 	int level, last_level = rq->queued_level;
 
 	if ((p = rq_first_queued_task(rq)) == NULL) {
 		level = SCHED_RQ_EMPTY;
-		prio = PRIO_LIMIT;
+		sched_rq_prio[cpu] = PRIO_LIMIT;
 	} else {
 		level = task_running_policy_level(p, rq);
-		prio = p->prio;
+		sched_rq_prio[cpu] = p->prio;
 	}
-	sched_rq_prio[cpu] = prio;
 
 	if (last_level == level)
 		return;
@@ -593,27 +588,25 @@ static inline void sched_update_tick_dependency(struct rq *rq) { }
  *
  * Context: rq->lock
  */
-static void dequeue_task(struct task_struct *p, struct rq *rq)
+static inline void dequeue_task(struct task_struct *p, struct rq *rq)
 {
-	int cpu = cpu_of(rq);
-
 	lockdep_assert_held(&rq->lock);
 
 	WARN_ONCE(task_rq(p) != rq, "pds: dequeue task reside on cpu%d from cpu%d\n",
-		  task_cpu(p), cpu);
+		  task_cpu(p), cpu_of(rq));
 	if (skiplist_del_init(&rq->sl_header, &p->sl_node))
 		update_sched_rq_queued_masks(rq);
 	rq->nr_running--;
 #ifdef CONFIG_SMP
 	if (1 == rq->nr_running) {
-		cpumask_clear_cpu(cpu, &sched_rq_pending_mask);
+		cpumask_clear_cpu(cpu_of(rq), &sched_rq_pending_mask);
 		sched_nr_rq_pending = cpumask_weight(&sched_rq_pending_mask);
 	}
 #endif
 
 	sched_update_tick_dependency(rq);
 
-	sched_info_dequeued(task_rq(p), p);
+	sched_info_dequeued(rq, p);
 }
 
 /*
@@ -692,24 +685,21 @@ DEFINE_SKIPLIST_INSERT_FUNC(pds_skiplist_insert, pds_skiplist_task_search);
  *
  * Context: rq->lock
  */
-static void enqueue_task(struct task_struct *p, struct rq *rq)
+static inline void enqueue_task(struct task_struct *p, struct rq *rq)
 {
-	int cpu = cpu_of(rq);
-
 	lockdep_assert_held(&rq->lock);
 
-	if (!rt_task(p)) {
-		/* Check it hasn't gotten rt from PI */
-		if ((idleprio_task(p) && idleprio_suitable(p)) ||
-		   (iso_task(p) && isoprio_suitable(rq)))
-			p->prio = p->normal_prio;
-		else
-			p->prio = NORMAL_PRIO;
+	/* Check IDLE&ISO tasks suitable to run normal priority */
+	if (idleprio_task(p)) {
+		p->prio = idleprio_suitable(p)? p->normal_prio:NORMAL_PRIO;
+		update_task_priodl(p);
+	} else if (iso_task(p)) {
+		p->prio = isoprio_suitable(rq)? p->normal_prio:NORMAL_PRIO;
 		update_task_priodl(p);
 	}
 
 	WARN_ONCE(task_rq(p) != rq, "pds: enqueue task reside on cpu%d to cpu%d\n",
-		  task_cpu(p), cpu);
+		  task_cpu(p), cpu_of(rq));
 
 	p->sl_node.level = p->sl_level;
 	if (pds_skiplist_insert(&rq->sl_header, &p->sl_node))
@@ -717,7 +707,7 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 	rq->nr_running++;
 #ifdef CONFIG_SMP
 	if (2 == rq->nr_running) {
-		cpumask_set_cpu(cpu, &sched_rq_pending_mask);
+		cpumask_set_cpu(cpu_of(rq), &sched_rq_pending_mask);
 		sched_nr_rq_pending = cpumask_weight(&sched_rq_pending_mask);
 	}
 #endif
@@ -1053,19 +1043,6 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 {
 	update_rq_clock(rq);
 
-	/*
-	 * Sleep time is in units of nanosecs, so shift by 20 to get a
-	 * milliseconds-range estimation of the amount of time that the task
-	 * spent sleeping:
-	 */
-	if (unlikely(prof_on == SLEEP_PROFILING)) {
-		if (p->state == TASK_UNINTERRUPTIBLE)
-			profile_hits(SLEEP_PROFILING, (void *)get_wchan(p),
-				     (rq->clock_task - p->last_ran) >> 20);
-	}
-
-	p->prio = effective_prio(p);
-	update_task_priodl(p);
 	if (task_contributes_to_load(p))
 		rq->nr_uninterruptible--;
 	enqueue_task(p, rq);
@@ -1537,8 +1514,8 @@ static inline int best_mask_cpu(const int cpu, cpumask_t *cpumask)
 	if (cpumask_test_cpu(cpu, cpumask))
 		return cpu;
 
-	mask = &sched_cpu_affinity_chk_masks[cpu][0];
-	for (; mask < sched_cpu_affinity_chk_end_masks[cpu]; mask++)
+	for (mask = &sched_cpu_affinity_chk_masks[cpu][0];
+	     mask < sched_cpu_affinity_chk_end_masks[cpu]; mask++)
 		if (cpumask_and(&tmp, cpumask, mask))
 			return cpumask_any(&tmp);
 
@@ -2897,8 +2874,7 @@ static int active_load_balance_cpu_stop(void *data)
 	 */
 	if (task_queued(p) &&
 	    task_rq(p) == rq &&
-	    cpumask_and(&tmp, &p->cpus_allowed, &sched_cpu_sg_idle_mask) &&
-	    cpumask_and(&tmp, &tmp, cpu_active_mask))
+	    cpumask_and(&tmp, &p->cpus_allowed, &sched_cpu_sg_idle_mask))
 		rq = __migrate_task(rq, p, cpumask_any(&tmp));
 
 	origin_rq->active_balance = 0;
@@ -2920,8 +2896,7 @@ static __latent_entropy void pds_run_rebalance(struct softirq_action *h)
 
 	raw_spin_lock_irqsave(&this_rq->lock, flags);
 	curr = this_rq->curr;
-	if (cpumask_and(&tmp, &curr->cpus_allowed, &sched_cpu_sg_idle_mask) &&
-	    cpumask_and(&tmp, &tmp, cpu_active_mask)) {
+	if (cpumask_and(&tmp, &curr->cpus_allowed, &sched_cpu_sg_idle_mask)) {
 		int active_balance = 0;
 
 		if (likely(!this_rq->active_balance)) {
@@ -5592,19 +5567,16 @@ void set_cpu_sd_state_idle(void) {}
 int get_nohz_timer_target(void)
 {
 	int i, cpu = smp_processor_id();
-	struct cpumask *affinity_mask, *end;
+	struct cpumask *mask;
 
 	if (!idle_cpu(cpu) && housekeeping_cpu(cpu, HK_FLAG_TIMER))
 		return cpu;
 
-	affinity_mask = &sched_cpu_affinity_chk_masks[cpu][0];
-	end = sched_cpu_affinity_chk_end_masks[cpu];
-	for (;affinity_mask < end; affinity_mask++) {
-		for_each_cpu(i, affinity_mask) {
+	for (mask = &sched_cpu_affinity_chk_masks[cpu][0];
+	     mask < sched_cpu_affinity_chk_end_masks[cpu]; mask++)
+		for_each_cpu(i, mask)
 			if (!idle_cpu(i) && housekeeping_cpu(i, HK_FLAG_TIMER))
-				return cpu;
-		}
-	}
+				return i;
 
 	if (!housekeeping_cpu(cpu, HK_FLAG_TIMER))
 		cpu = housekeeping_any_cpu(HK_FLAG_TIMER);
@@ -6039,7 +6011,6 @@ static void sched_init_topology_cpumask_early(void)
 			cpumask_clear_cpu(cpu, tmp);
 		}
 		sched_cpu_affinity_chk_end_masks[cpu] =
-		sched_cpu_affinity_llc_end_masks[cpu] =
 			&sched_cpu_affinity_chk_masks[cpu][1];
 	}
 }
@@ -6047,7 +6018,6 @@ static void sched_init_topology_cpumask_early(void)
 static void sched_init_topology_cpumask(void)
 {
 	int cpu;
-	cpumask_t tmp;
 	cpumask_t *chk;
 
 	for_each_online_cpu(cpu) {
@@ -6056,27 +6026,20 @@ static void sched_init_topology_cpumask(void)
 
 		chk = &sched_cpu_affinity_chk_masks[cpu][0];
 
-		cpumask_setall(&tmp);
-		cpumask_clear_cpu(cpu, &tmp);
+		cpumask_setall(chk);
+		cpumask_clear_cpu(cpu, chk);
 #ifdef CONFIG_SCHED_SMT
-		if (cpumask_and(&tmp, &tmp, topology_sibling_cpumask(cpu))) {
-			printk(KERN_INFO "pds: sched_cpu_affinity_chk_masks[%d] smt 0x%08lx",
-			       cpu, tmp.bits[0]);
-			cpumask_copy(chk, &tmp);
-			chk++;
-		}
-		cpumask_complement(&tmp, topology_sibling_cpumask(cpu));
+		if (cpumask_and(chk, chk, topology_sibling_cpumask(cpu)))
+			printk(KERN_INFO "pds: cpu #%d affinity check mask - smt 0x%08lx",
+			       cpu, (chk++)->bits[0]);
+		cpumask_complement(chk, topology_sibling_cpumask(cpu));
 #endif
 #ifdef CONFIG_SCHED_MC
-		if (cpumask_and(&tmp, &tmp, cpu_coregroup_mask(cpu))) {
-			printk(KERN_INFO "pds: sched_cpu_affinity_chk_masks[%d] coregroup 0x%08lx",
-			       cpu, tmp.bits[0]);
-			cpumask_copy(chk, &tmp);
-			chk++;
-		}
-		cpumask_complement(&tmp, cpu_coregroup_mask(cpu));
+		if (cpumask_and(chk, chk, cpu_coregroup_mask(cpu)))
+			printk(KERN_INFO "pds: cpu #%d affinity check mask - coregroup 0x%08lx",
+			       cpu, (chk++)->bits[0]);
+		cpumask_complement(chk, cpu_coregroup_mask(cpu));
 #endif
-		sched_cpu_affinity_llc_end_masks[cpu] = chk;
 
 		/**
 		 * Set up sd_llc_id per CPU
@@ -6084,20 +6047,14 @@ static void sched_init_topology_cpumask(void)
 		per_cpu(sd_llc_id, cpu) =
 			cpumask_first(cpu_coregroup_mask(cpu));
 
-		if (cpumask_and(&tmp, &tmp, topology_core_cpumask(cpu))) {
-			printk(KERN_INFO "pds: sched_cpu_affinity_chk_masks[%d] core 0x%08lx",
-			       cpu, tmp.bits[0]);
-			cpumask_copy(chk, &tmp);
-			chk++;
-		}
-		cpumask_complement(&tmp, topology_core_cpumask(cpu));
+		if (cpumask_and(chk, chk, topology_core_cpumask(cpu)))
+			printk(KERN_INFO "pds: cpu #%d affinity check mask - core 0x%08lx",
+			       cpu, (chk++)->bits[0]);
+		cpumask_complement(chk, topology_core_cpumask(cpu));
 
-		if (cpumask_and(&tmp, &tmp, cpu_online_mask)) {
-			printk(KERN_INFO "pds: sched_cpu_affinity_chk_masks[%d] others 0x%08lx",
-			       cpu, tmp.bits[0]);
-			cpumask_copy(chk, &tmp);
-			chk++;
-		}
+		if (cpumask_and(chk, chk, cpu_online_mask))
+			printk(KERN_INFO "pds: cpu #%d affinity check mask - others 0x%08lx",
+			       cpu, (chk++)->bits[0]);
 
 		sched_cpu_affinity_chk_end_masks[cpu] = chk;
 	}
