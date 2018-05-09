@@ -47,6 +47,8 @@ struct mod_arch_specific {
 #define MODULE_PROC_FAMILY "SKYLAKEX "
 #elif defined CONFIG_MCANNONLAKE
 #define MODULE_PROC_FAMILY "CANNONLAKE "
+#elif defined CONFIG_MICELAKE
+#define MODULE_PROC_FAMILY "ICELAKE "
 #elif defined CONFIG_MATOM
 #define MODULE_PROC_FAMILY "ATOM "
 #elif defined CONFIG_M686
