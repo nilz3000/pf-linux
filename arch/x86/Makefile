@@ -158,6 +158,8 @@ else
                 $(call cc-option,-march=skylake,$(call cc-option,-mtune=skylake))
         cflags-$(CONFIG_MSKYLAKEX) += \
                 $(call cc-option,-march=skylake-avx512,$(call cc-option,-mtune=skylake-avx512))
+        cflags-$(CONFIG_MCANNONLAKE) += \
+                $(call cc-option,-march=cannonlake,$(call cc-option,-mtune=cannonlake))
         cflags-$(CONFIG_MATOM) += $(call cc-option,-march=bonnell) \
                 $(call cc-option,-mtune=bonnell,$(call cc-option,-mtune=generic))
         cflags-$(CONFIG_GENERIC_CPU) += $(call cc-option,-mtune=generic)
