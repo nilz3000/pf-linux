@@ -2928,15 +2928,6 @@ static inline bool pds_sg_balance(struct rq *rq)
 		return false;
 
 	/*
-	 * Sibling balance only happens when only one task is running
-	 * When no task is running, there will be no need to balance
-	 * When there are queued tasks in this rq, they will be handled
-	 * in policy fair balance
-	 */
-	if (1 != rq->nr_running)
-		return false;
-
-	/*
 	 * Exit if any idle cpu in this smt group
 	 */
 	cpu = cpu_of(rq);
@@ -2983,9 +2974,6 @@ static inline bool pds_load_balance(struct rq *rq)
 		return false;
 
 	rq->next_balance = (rq->clock & BALANCE_INTERVAL_MASK) + rq->balance_inc;
-
-	if (rq->nr_running < 2UL)
-		return false;
 
 	if (unlikely(rq->curr == rq->idle))
 		return false;
@@ -3039,6 +3027,27 @@ static inline bool pds_load_balance(struct rq *rq)
 
 	return false;
 }
+
+static inline bool pds_trigger_balance(struct rq *rq)
+{
+	if (0 == rq->nr_running)
+		return false;
+
+	/*
+	 * Sibling balance only happens when only one task is running
+	 * When no task is running, there will be no need to balance
+	 * When there are queued tasks in this rq, they will be handled
+	 * in policy fair balance
+	 */
+	if (1 == rq->nr_running) {
+#ifdef CONFIG_SCHED_SMT
+		pds_sg_balance(rq);
+		return false;
+#endif /* CONFIG_SCHED_SMT */
+	} else {
+		return pds_load_balance(rq);
+	}
+}
 #endif /* CONFIG_SMP */
 
 /*
@@ -3061,15 +3070,9 @@ void scheduler_tick(void)
 	rq->last_tick = rq->clock;
 
 #ifdef CONFIG_SMP
-	if (!pds_load_balance(rq)) {
-#ifdef CONFIG_SCHED_SMT
-		pds_sg_balance(rq);
+	if (!pds_trigger_balance(rq))
 #endif
-		raw_spin_unlock(&rq->lock);
-	}
-#else
 	raw_spin_unlock(&rq->lock);
-#endif
 
 	perf_event_task_tick();
 }
