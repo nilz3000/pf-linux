@@ -505,6 +505,13 @@ static inline struct sbq_wait_state *sbq_wait_ptr(struct sbitmap_queue *sbq,
 void sbitmap_queue_wake_all(struct sbitmap_queue *sbq);
 
 /**
+ * sbitmap_wake_up() - Do a regular wake up compensation if the queue
+ * allocated from is changed after scheduling back.
+ * @sbq: Bitmap queue to wake up.
+ */
+void sbitmap_queue_wake_up(struct sbitmap_queue *sbq);
+
+/**
  * sbitmap_queue_show() - Dump &struct sbitmap_queue information to a &struct
  * seq_file.
  * @sbq: Bitmap queue to show.
