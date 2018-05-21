@@ -498,6 +498,12 @@ static void sbq_wake_up(struct sbitmap_queue *sbq)
 	}
 }
 
+void sbitmap_queue_wake_up(struct sbitmap_queue *sbq)
+{
+	sbq_wake_up(sbq);
+}
+EXPORT_SYMBOL_GPL(sbitmap_queue_wake_up);
+
 void sbitmap_queue_clear(struct sbitmap_queue *sbq, unsigned int nr,
 			 unsigned int cpu)
 {

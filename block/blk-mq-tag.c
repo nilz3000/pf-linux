@@ -134,6 +134,8 @@ unsigned int blk_mq_get_tag(struct blk_mq_alloc_data *data)
 	ws = bt_wait_ptr(bt, data->hctx);
 	drop_ctx = data->ctx == NULL;
 	do {
+		struct sbitmap_queue *bt_orig;
+
 		/*
 		 * We're out of tags on this hardware queue, kick any
 		 * pending IO submits before going to sleep waiting for
@@ -159,6 +161,7 @@ unsigned int blk_mq_get_tag(struct blk_mq_alloc_data *data)
 		if (data->ctx)
 			blk_mq_put_ctx(data->ctx);
 
+		bt_orig = bt;
 		io_schedule();
 
 		data->ctx = blk_mq_get_ctx(data->q);
@@ -170,6 +173,16 @@ unsigned int blk_mq_get_tag(struct blk_mq_alloc_data *data)
 			bt = &tags->bitmap_tags;
 
 		finish_wait(&ws->wait, &wait);
+
+		/*
+		 * If destination hw queue is changed, wake up original
+		 * queue one extra time for compensating the wake up
+		 * miss, so other allocations on original queue won't
+		 * be starved.
+		 */
+		if (bt != bt_orig)
+			sbitmap_queue_wake_up(bt_orig);
+
 		ws = bt_wait_ptr(bt, data->hctx);
 	} while (1);
 
