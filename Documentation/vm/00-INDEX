@@ -22,6 +22,8 @@ idle_page_tracking.txt
 	- description of the idle page tracking feature.
 ksm.txt
 	- how to use the Kernel Samepage Merging feature.
+uksm.txt
+	- Introduction to Ultra KSM
 mmu_notifier.txt
 	- a note about clearing pte/pmd and mmu notifications
 numa
