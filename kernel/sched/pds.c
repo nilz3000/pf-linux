@@ -94,7 +94,7 @@ enum {
 
 static inline void print_scheduler_version(void)
 {
-	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.98r by Alfred Chen.\n");
+	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.98s by Alfred Chen.\n");
 }
 
 /* task_struct::on_rq states: */
@@ -196,7 +196,6 @@ static DECLARE_BITMAP(sched_rq_queued_masks_bitmap, NR_SCHED_RQ_QUEUED_LEVEL)
 ____cacheline_aligned_in_smp;
 
 static cpumask_t sched_rq_pending_mask ____cacheline_aligned_in_smp;
-static unsigned int sched_nr_rq_pending ____cacheline_aligned_in_smp;
 
 DEFINE_PER_CPU(cpumask_t [NR_CPU_AFFINITY_CHK_LEVEL], sched_cpu_affinity_chk_masks);
 DEFINE_PER_CPU(cpumask_t *, sched_cpu_affinity_chk_end_masks);
@@ -205,7 +204,6 @@ DEFINE_PER_CPU(cpumask_t *, sched_cpu_affinity_chk_end_masks);
 DEFINE_PER_CPU(unsigned int, cpu_has_smt_sibling);
 
 static cpumask_t sched_cpu_sg_idle_mask ____cacheline_aligned_in_smp;
-static cpumask_t sched_cpu_sb_suppress_mask ____cacheline_aligned_in_smp;
 #endif
 
 static int sched_rq_prio[NR_CPUS] ____cacheline_aligned;
@@ -555,10 +553,8 @@ static inline void dequeue_task(struct task_struct *p, struct rq *rq)
 		update_sched_rq_queued_masks(rq);
 	rq->nr_running--;
 #ifdef CONFIG_SMP
-	if (1 == rq->nr_running) {
+	if (1 == rq->nr_running)
 		cpumask_clear_cpu(cpu_of(rq), &sched_rq_pending_mask);
-		sched_nr_rq_pending = cpumask_weight(&sched_rq_pending_mask);
-	}
 #endif
 
 	sched_update_tick_dependency(rq);
@@ -660,10 +656,8 @@ static inline void enqueue_task(struct task_struct *p, struct rq *rq)
 		update_sched_rq_queued_masks(rq);
 	rq->nr_running++;
 #ifdef CONFIG_SMP
-	if (2 == rq->nr_running) {
+	if (2 == rq->nr_running)
 		cpumask_set_cpu(cpu_of(rq), &sched_rq_pending_mask);
-		sched_nr_rq_pending = cpumask_weight(&sched_rq_pending_mask);
-	}
 #endif
 
 	sched_update_tick_dependency(rq);
@@ -2882,32 +2876,25 @@ static inline bool pds_sg_balance(struct rq *rq)
 		return false;
 
 	/*
-	 * Exit if any idle cpu in this smt group
+	 * First cpu in smt group does not do smt balance
 	 */
 	cpu = cpu_of(rq);
+	if (cpu == per_cpu(sd_llc_id, cpu))
+		return false;
+
+	/*
+	 * Exit if any idle cpu in this smt group
+	 */
 	if (cpumask_intersects(cpu_smt_mask(cpu),
 			       &sched_rq_queued_masks[SCHED_RQ_EMPTY]))
 		return false;
 
-	/*
-	 * First cpu in smt group does not do smt balance, unless
-	 * other cpu is smt balance suppressed.
-	 */
-	if (cpu == per_cpu(sd_llc_id, cpu) &&
-	    !cpumask_intersects(cpu_smt_mask(cpu), &sched_cpu_sb_suppress_mask))
-		return false;
-
 	p = rq->curr;
 	if (cpumask_intersects(&p->cpus_allowed, &sched_cpu_sg_idle_mask)) {
-		cpumask_andnot(&sched_cpu_sb_suppress_mask,
-			       &sched_cpu_sb_suppress_mask,
-			       cpu_smt_mask(cpu));
 		raise_softirq(SCHED_SOFTIRQ);
-
 		return true;
 	}
 
-	cpumask_set_cpu(cpu, &sched_cpu_sb_suppress_mask);
 	return false;
 }
 #endif /* CONFIG_SCHED_SMT */
@@ -2932,9 +2919,7 @@ static inline bool pds_load_balance(struct rq *rq)
 	/*
 	 * this function is called when rq is locked and nr_running >= 2
 	 */
-	if (unlikely((node = rq->sl_header.next[0]->next[0]) == &rq->sl_header))
-		return false;
-
+	node = rq->sl_header.next[0]->next[0];
 	p = skiplist_entry(node, struct task_struct, sl_node);
 
 	/*
@@ -3255,7 +3240,7 @@ static inline void check_deadline(struct task_struct *p, struct rq *rq)
 static inline int migrate_pending_tasks(struct rq *rq, int dest_cpu)
 {
 	int nr_migrated = 0;
-	int nr_max_tries = min(rq->nr_running, SCHED_RQ_NR_MIGRATION);
+	int nr_max_tries = min(rq->nr_running / 2, SCHED_RQ_NR_MIGRATION);
 	struct skiplist_node *node = rq->sl_header.next[0];
 
 	while (nr_max_tries && node != &rq->sl_header) {
@@ -3307,11 +3292,8 @@ static inline struct task_struct *take_other_rq_task(int cpu)
 	struct cpumask tmp;
 	struct cpumask *affinity_mask, *end;
 
-	if (0 == sched_nr_rq_pending)
+	if (cpumask_empty(&sched_rq_pending_mask))
 		return NULL;
-
-	if (1 == sched_nr_rq_pending)
-		return take_queued_task_cpumask(cpu, &sched_rq_pending_mask);
 
 	affinity_mask = &(per_cpu(sched_cpu_affinity_chk_masks, cpu)[0]);
 	end = per_cpu(sched_cpu_affinity_chk_end_masks, cpu);
@@ -3524,9 +3506,6 @@ static void __sched notrace __schedule(bool preempt)
 	set_rq_task(rq, next);
 
 	if (prev != next) {
-#ifdef CONFIG_SCHED_SMT
-		cpumask_clear_cpu(cpu, &sched_cpu_sb_suppress_mask);
-#endif
 		if (next->prio == PRIO_LIMIT)
 			schedstat_inc(rq->sched_goidle);
 
@@ -6100,10 +6079,6 @@ void __init sched_init_smp(void)
 	/* Move init over to a non-isolated CPU */
 	if (set_cpus_allowed_ptr(current, housekeeping_cpumask(HK_FLAG_DOMAIN)) < 0)
 		BUG();
-
-#ifdef CONFIG_SCHED_SMT
-	cpumask_clear(&sched_cpu_sb_suppress_mask);
-#endif
 
 	cpumask_copy(&sched_rq_queued_masks[SCHED_RQ_EMPTY], cpu_online_mask);
 
