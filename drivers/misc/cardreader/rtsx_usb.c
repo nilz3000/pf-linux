@@ -671,6 +671,7 @@ static int rtsx_usb_probe(struct usb_interface *intf,
 		goto out_init_fail;
 
 #ifdef CONFIG_PM
+	dev_pm_set_driver_flags(&intf->dev, DPM_FLAG_SMART_SUSPEND | DPM_FLAG_LEAVE_SUSPENDED);
 	intf->needs_remote_wakeup = 1;
 	usb_enable_autosuspend(usb_dev);
 #endif
@@ -723,8 +724,15 @@ static int rtsx_usb_suspend(struct usb_interface *intf, pm_message_t message)
 	return 0;
 }
 
+static int rtsx_usb_resume_child(struct device *dev, void *data)
+{
+	pm_request_resume(dev);
+	return 0;
+}
+
 static int rtsx_usb_resume(struct usb_interface *intf)
 {
+	device_for_each_child(&intf->dev, NULL, rtsx_usb_resume_child);
 	return 0;
 }
 
@@ -734,6 +742,7 @@ static int rtsx_usb_reset_resume(struct usb_interface *intf)
 		(struct rtsx_ucr *)usb_get_intfdata(intf);
 
 	rtsx_usb_reset_chip(ucr);
+	device_for_each_child(&intf->dev, NULL, rtsx_usb_resume_child);
 	return 0;
 }
 
