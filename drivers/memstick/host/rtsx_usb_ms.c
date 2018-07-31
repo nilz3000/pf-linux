@@ -763,6 +763,10 @@ static int rtsx_usb_ms_drv_probe(struct platform_device *pdev)
 	msh->set_param = rtsx_usb_ms_set_param;
 	msh->caps = MEMSTICK_CAP_PAR4;
 
+	/* DPM_FLAG_LEAVE_SUSPENDED is not needed, the parent device will wake
+	 * up memstick host.
+	 */
+	dev_pm_set_driver_flags(ms_dev(host), DPM_FLAG_SMART_SUSPEND);
 	pm_runtime_set_active(ms_dev(host));
 	pm_runtime_enable(ms_dev(host));
 

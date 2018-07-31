@@ -671,6 +671,7 @@ static int rtsx_usb_probe(struct usb_interface *intf,
 		goto out_init_fail;
 
 #ifdef CONFIG_PM
+	dev_pm_set_driver_flags(&intf->dev, DPM_FLAG_SMART_SUSPEND | DPM_FLAG_LEAVE_SUSPENDED);
 	intf->needs_remote_wakeup = 1;
 	usb_enable_autosuspend(usb_dev);
 #endif
