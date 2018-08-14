@@ -3069,12 +3069,6 @@ void exit_mmap(struct mm_struct *mm)
 	/* mm's last user has gone, and its about to be pulled down */
 	mmu_notifier_release(mm);
 
-	/*
-	 * Taking write lock on mmap_sem does not harm others,
-	 * but it's crucial for uksm to avoid races.
-	 */
-	down_write(&mm->mmap_sem);
-
 	if (unlikely(mm_is_oom_victim(mm))) {
 		/*
 		 * Manually reap the mm to free as much memory as possible.
@@ -3101,6 +3095,12 @@ void exit_mmap(struct mm_struct *mm)
 		up_write(&mm->mmap_sem);
 	}
 
+	/*
+	 * Taking write lock on mmap_sem does not harm others,
+	 * but it's crucial for uksm to avoid races.
+	 */
+	down_write(&mm->mmap_sem);
+
 	if (mm->locked_vm) {
 		vma = mm->mmap;
 		while (vma) {
@@ -3113,8 +3113,12 @@ void exit_mmap(struct mm_struct *mm)
 	arch_exit_mmap(mm);
 
 	vma = mm->mmap;
-	if (!vma)	/* Can happen if dup_mmap() received an OOM */
+	/* Can happen if dup_mmap() received an OOM */
+	if (!vma) {
+		/* Release write lock previously taken for UKSM */
+		up_write(&mm->mmap_sem);
 		return;
+	}
 
 	lru_add_drain();
 	flush_cache_mm(mm);
