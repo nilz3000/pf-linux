@@ -90,7 +90,7 @@ enum {
 
 static inline void print_scheduler_version(void)
 {
-	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.98y by Alfred Chen.\n");
+	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.98z by Alfred Chen.\n");
 }
 
 /* task_struct::on_rq states: */
@@ -254,16 +254,6 @@ DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 #ifndef finish_arch_post_lock_switch
 # define finish_arch_post_lock_switch()	do { } while (0)
 #endif
-
-/**
- * A task that is not running or queued will not have a node set.
- * A task that is queued but not running will have a node set.
- * A task that is currently running will have ->on_cpu set but no node set.
- */
-static inline bool task_queued(struct task_struct *p)
-{
-	return !skiplist_empty(&p->sl_node);
-}
 
 /*
  * Context: p->pi_lock
@@ -1613,17 +1603,19 @@ task_preemptible_rq_idle(struct task_struct *p, cpumask_t *chk_mask)
 	if (cpumask_and(&tmp, chk_mask, &sched_cpu_sg_idle_mask))
 		return best_mask_cpu(task_cpu(p), &tmp);
 #endif
-	if (cpumask_and(&tmp, chk_mask, &sched_rq_queued_masks[SCHED_RQ_EMPTY])) {
-#ifdef CONFIG_SMT_NICE
-		/* Only ttwu on cpu which is not smt supressed */
-		cpumask_t t;
-		if (cpumask_andnot(&t, &tmp,  &sched_smt_supressed_mask))
-			best_mask_cpu(task_cpu(p), &t);
-#else
-		return best_mask_cpu(task_cpu(p), &tmp);
-#endif /* !CONFIG_SMT_NICE */
-	}
 
+#ifdef CONFIG_SMT_NICE
+	/* Only ttwu on cpu which is not smt supressed */
+	if (cpumask_andnot(&tmp, chk_mask, &sched_smt_supressed_mask)) {
+		cpumask_t t;
+		if (cpumask_and(&t, &tmp, &sched_rq_queued_masks[SCHED_RQ_EMPTY]))
+			return best_mask_cpu(task_cpu(p), &t);
+		return best_mask_cpu(task_cpu(p), &tmp);
+	}
+#endif
+
+	if (cpumask_and(&tmp, chk_mask, &sched_rq_queued_masks[SCHED_RQ_EMPTY]))
+		return best_mask_cpu(task_cpu(p), &tmp);
 	return best_mask_cpu(task_cpu(p), chk_mask);
 }
 
@@ -1773,9 +1765,6 @@ static int ttwu_remote(struct task_struct *p, int wake_flags)
 	int ret = 0;
 
 	rq = __task_access_lock(p, &lock);
-	/*
-	if (task_running(p) || task_queued(p)) {
-	*/
 	if (task_on_rq_queued(p)) {
 		ttwu_do_wakeup(rq, p, wake_flags);
 		ret = 1;
@@ -2043,7 +2032,7 @@ static void try_to_wake_up_local(struct task_struct *p)
 
 	trace_sched_waking(p);
 
-	if (!task_queued(p)) {
+	if (!task_on_rq_queued(p)) {
 		if (p->in_iowait) {
 			delayacct_blkio_end(p);
 			atomic_dec(&task_rq(p)->nr_iowait);
@@ -2946,7 +2935,7 @@ static int active_load_balance_cpu_stop(void *data)
 	/*
 	 * _something_ may have changed the task, double check again
 	 */
-	if (task_queued(p) && task_rq(p) == rq &&
+	if (task_on_rq_queued(p) && task_rq(p) == rq &&
 	    cpumask_and(&tmp, &p->cpus_allowed, &sched_cpu_sg_idle_mask))
 		rq = __migrate_task(rq, p, cpumask_any(&tmp));
 
@@ -2969,7 +2958,8 @@ static __latent_entropy void pds_run_rebalance(struct softirq_action *h)
 
 	raw_spin_lock_irqsave(&this_rq->lock, flags);
 	curr = this_rq->curr;
-	if (cpumask_and(&tmp, &curr->cpus_allowed, &sched_cpu_sg_idle_mask)) {
+	if (!is_idle_task(curr) &&
+	    cpumask_and(&tmp, &curr->cpus_allowed, &sched_cpu_sg_idle_mask)) {
 		int active_balance = 0;
 
 		if (likely(!this_rq->active_balance)) {
@@ -3350,7 +3340,7 @@ static inline void check_deadline(struct task_struct *p, struct rq *rq)
 
 	if (p->time_slice < RESCHED_US || batch_task(p)) {
 		time_slice_expired(p, rq);
-		if (task_queued(p))
+		if (task_on_rq_queued(p))
 			requeue_task(p, rq);
 	}
 }
@@ -3938,7 +3928,7 @@ check_task_changed(struct rq *rq, struct task_struct *p)
 	/*
 	 * Trigger changes when task priority/deadline modified.
 	 */
-	if (task_queued(p)) {
+	if (task_on_rq_queued(p)) {
 		struct task_struct *first;
 
 		requeue_task(p, rq);
@@ -4243,7 +4233,6 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 {
 	const struct cpumask *cpu_valid_mask = cpu_active_mask;
 	int dest_cpu;
-	bool queued = false;
 	unsigned long flags;
 	struct rq *rq;
 	raw_spinlock_t *lock;
@@ -4276,8 +4265,6 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 		goto out;
 	}
 
-	queued = task_queued(p);
-
 	do_set_cpus_allowed(p, new_mask);
 
 	if (p->flags & PF_KTHREAD) {
@@ -4305,7 +4292,7 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 		tlb_migrate_finish(p->mm);
 		return 0;
 	}
-	if (task_queued(p)) {
+	if (task_on_rq_queued(p)) {
 		/*
 		 * OK, since we're going to drop the lock immediately
 		 * afterwards anyway.
@@ -4445,7 +4432,7 @@ recheck:
 			return -EINVAL;
 	}
 
-	if (attr->sched_flags & ~(SCHED_FLAG_RESET_ON_FORK))
+	if (attr->sched_flags & ~(SCHED_FLAG_ALL | SCHED_FLAG_SUGOV))
 		return -EINVAL;
 
 	/*
@@ -4513,6 +4500,9 @@ recheck:
 	}
 
 	if (user) {
+		if (attr->sched_flags & SCHED_FLAG_SUGOV)
+			return retval;
+
 		retval = security_task_setscheduler(p);
 		if (retval)
 			return retval;
@@ -4659,6 +4649,12 @@ int sched_setattr(struct task_struct *p, const struct sched_attr *attr)
 	return __sched_setscheduler(p, attr, true, true);
 }
 EXPORT_SYMBOL_GPL(sched_setattr);
+
+
+int sched_setattr_nocheck(struct task_struct *p, const struct sched_attr *attr)
+{
+	return __sched_setscheduler(p, attr, false, true);
+}
 
 /**
  * sched_setscheduler_nocheck - change the scheduling policy and/or RT priority of a thread from kernelspace.
@@ -5847,7 +5843,7 @@ static void migrate_tasks(struct rq *dead_rq)
 		 * changed the task, WARN if weird stuff happened, because in
 		 * that case the above rq->lock drop is a fail too.
 		 */
-		if (WARN_ON(task_rq(p) != rq || !task_queued(p))) {
+		if (WARN_ON(task_rq(p) != rq || !task_on_rq_queued(p))) {
 			raw_spin_unlock(&p->pi_lock);
 			continue;
 		}
