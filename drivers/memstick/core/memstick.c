@@ -18,6 +18,7 @@
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/module.h>
+#include <linux/pm_runtime.h>
 
 #define DRIVER_NAME "memstick"
 
@@ -209,6 +210,7 @@ static int memstick_dummy_check(struct memstick_dev *card)
  */
 void memstick_detect_change(struct memstick_host *host)
 {
+	pm_runtime_get_noresume(host->dev.parent);
 	queue_work(workqueue, &host->media_checker);
 }
 EXPORT_SYMBOL(memstick_detect_change);
@@ -479,6 +481,8 @@ out_power_off:
 		host->set_param(host, MEMSTICK_POWER, MEMSTICK_POWER_OFF);
 
 	mutex_unlock(&host->lock);
+
+	pm_runtime_put(host->dev.parent);
 	dev_dbg(&host->dev, "memstick_check finished\n");
 }
 
