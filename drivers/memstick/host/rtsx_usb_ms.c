@@ -47,7 +47,7 @@ struct rtsx_usb_ms {
 	int			power_mode;
 	unsigned char           ifmode;
 	bool			eject;
-	bool			suspend;
+	bool			system_suspending;
 };
 
 static inline struct device *ms_dev(struct rtsx_usb_ms *host)
@@ -523,7 +523,7 @@ static void rtsx_usb_ms_handle_req(struct work_struct *work)
 	int rc;
 
 	if (!host->req) {
-		pm_runtime_get_noresume(ms_dev(host));
+		pm_runtime_get_sync(ms_dev(host));
 		do {
 			rc = memstick_next_req(msh, &host->req);
 			dev_dbg(ms_dev(host), "next req %d\n", rc);
@@ -544,7 +544,7 @@ static void rtsx_usb_ms_handle_req(struct work_struct *work)
 						host->req->error);
 			}
 		} while (!rc);
-		pm_runtime_put_noidle(ms_dev(host));
+		pm_runtime_put_sync(ms_dev(host));
 	}
 
 }
@@ -571,7 +571,7 @@ static int rtsx_usb_ms_set_param(struct memstick_host *msh,
 	dev_dbg(ms_dev(host), "%s: param = %d, value = %d\n",
 			__func__, param, value);
 
-	pm_runtime_get_noresume(ms_dev(host));
+	pm_runtime_get_sync(ms_dev(host));
 	mutex_lock(&ucr->dev_mutex);
 
 	err = rtsx_usb_card_exclusive_check(ucr, RTSX_USB_MS_CARD);
@@ -637,24 +637,67 @@ static int rtsx_usb_ms_set_param(struct memstick_host *msh,
 	}
 out:
 	mutex_unlock(&ucr->dev_mutex);
-	pm_runtime_put_noidle(ms_dev(host));
+	pm_runtime_put_sync(ms_dev(host));
 
 	/* power-on delay */
-	if (param == MEMSTICK_POWER && value == MEMSTICK_POWER_ON)
+	if (param == MEMSTICK_POWER && value == MEMSTICK_POWER_ON) {
 		usleep_range(10000, 12000);
+
+		if (!host->eject)
+			schedule_delayed_work(&host->poll_card, 100);
+	}
 
 	dev_dbg(ms_dev(host), "%s: return = %d\n", __func__, err);
 	return err;
 }
 
 #ifdef CONFIG_PM
-static int rtsx_usb_ms_runtime_suspend(struct device *dev)
+static int rtsx_usb_ms_suspend(struct device *dev)
 {
 	struct rtsx_usb_ms *host = dev_get_drvdata(dev);
 	struct memstick_host *msh = host->msh;
 
-	host->suspend = true;
+	/* Since we use rtsx_usb's resume callback to runtime resume its
+	 * children to implement remote wakeup signaling, this causes
+	 * rtsx_usb_ms' runtime resume callback runs after its suspend
+	 * callback:
+	 * rtsx_usb_ms_suspend()
+	 * rtsx_usb_resume()
+	 *   -> rtsx_usb_ms_runtime_resume()
+	 *     -> memstick_detect_change()
+	 *
+	 * rtsx_usb_suspend()
+	 *
+	 * To avoid this, skip runtime resume/suspend if system suspend is
+	 * underway.
+	 */
+
+	host->system_suspending = true;
 	memstick_suspend_host(msh);
+
+	return 0;
+}
+
+static int rtsx_usb_ms_resume(struct device *dev)
+{
+	struct rtsx_usb_ms *host = dev_get_drvdata(dev);
+	struct memstick_host *msh = host->msh;
+
+	memstick_resume_host(msh);
+	host->system_suspending = false;
+
+	return 0;
+}
+
+static int rtsx_usb_ms_runtime_suspend(struct device *dev)
+{
+	struct rtsx_usb_ms *host = dev_get_drvdata(dev);
+
+	if (host->system_suspending)
+		return 0;
+
+	if (host->msh->card || host->power_mode != MEMSTICK_POWER_OFF)
+		return -EAGAIN;
 
 	return 0;
 }
@@ -662,30 +705,21 @@ static int rtsx_usb_ms_runtime_suspend(struct device *dev)
 static int rtsx_usb_ms_runtime_resume(struct device *dev)
 {
 	struct rtsx_usb_ms *host = dev_get_drvdata(dev);
-	struct memstick_host *msh = host->msh;
 
-	memstick_resume_host(msh);
-	host->suspend = false;
-	schedule_delayed_work(&host->poll_card, 100);
+
+	if (host->system_suspending)
+		return 0;
+
+	memstick_detect_change(host->msh);
 
 	return 0;
 }
 
-static int rtsx_usb_ms_runtime_idle(struct device *dev)
-{
-	struct rtsx_usb_ms *host = dev_get_drvdata(dev);
+static const struct dev_pm_ops rtsx_usb_ms_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(rtsx_usb_ms_suspend, rtsx_usb_ms_resume)
+	SET_RUNTIME_PM_OPS(rtsx_usb_ms_runtime_suspend, rtsx_usb_ms_runtime_resume, NULL)
+};
 
-	if (!host->msh->card && host->power_mode == MEMSTICK_POWER_OFF) {
-		pm_schedule_suspend(dev, 0);
-		return 0;
-	}
-
-	return -EAGAIN;
-}
-
-static UNIVERSAL_DEV_PM_OPS(rtsx_usb_ms_pm_ops,
-		rtsx_usb_ms_runtime_suspend, rtsx_usb_ms_runtime_resume,
-		rtsx_usb_ms_runtime_idle);
 #endif /* CONFIG_PM */
 
 static void rtsx_usb_ms_poll_card(struct work_struct *work)
@@ -696,10 +730,10 @@ static void rtsx_usb_ms_poll_card(struct work_struct *work)
 	int err;
 	u8 val;
 
-	if (host->eject || host->suspend)
+	if (host->eject || host->power_mode != MEMSTICK_POWER_ON)
 		return;
 
-	pm_runtime_get_noresume(ms_dev(host));
+	pm_runtime_get_sync(ms_dev(host));
 	mutex_lock(&ucr->dev_mutex);
 
 	/* Check pending MS card changes */
@@ -715,17 +749,16 @@ static void rtsx_usb_ms_poll_card(struct work_struct *work)
 			XD_INT | MS_INT | SD_INT);
 
 	mutex_unlock(&ucr->dev_mutex);
-	pm_runtime_put_noidle(ms_dev(host));
 
 	if (val & MS_INT) {
 		dev_dbg(ms_dev(host), "MS slot change detected\n");
 		memstick_detect_change(host->msh);
 	}
 
-	pm_runtime_idle(ms_dev(host));
-
 poll_again:
-	if (!host->eject && !host->suspend)
+	pm_runtime_put_sync(ms_dev(host));
+
+	if (!host->eject && host->power_mode == MEMSTICK_POWER_ON)
 		schedule_delayed_work(&host->poll_card, 100);
 }
 
@@ -763,35 +796,31 @@ static int rtsx_usb_ms_drv_probe(struct platform_device *pdev)
 	msh->set_param = rtsx_usb_ms_set_param;
 	msh->caps = MEMSTICK_CAP_PAR4;
 
-	/* DPM_FLAG_LEAVE_SUSPENDED is not needed, the parent device will wake
-	 * up memstick host.
-	 */
-	dev_pm_set_driver_flags(ms_dev(host), DPM_FLAG_SMART_SUSPEND);
 	pm_runtime_set_active(ms_dev(host));
 	pm_runtime_enable(ms_dev(host));
 
+	pm_runtime_get_sync(ms_dev(host));
 	err = memstick_add_host(msh);
 	if (err)
 		goto err_out;
 
-	schedule_delayed_work(&host->poll_card, 100);
+	pm_runtime_put(ms_dev(host));
 
 	return 0;
 err_out:
 	memstick_free_host(msh);
+	pm_runtime_put_noidle(ms_dev(host));
 	return err;
 }
 
 static int rtsx_usb_ms_drv_remove(struct platform_device *pdev)
 {
 	struct rtsx_usb_ms *host = platform_get_drvdata(pdev);
-	struct memstick_host *msh;
+	struct memstick_host *msh = host->msh;
 	int err;
 
-	msh = host->msh;
 	host->eject = true;
 	cancel_work_sync(&host->handle_req);
-	cancel_delayed_work_sync(&host->poll_card);
 
 	mutex_lock(&host->host_mutex);
 	if (host->req) {
