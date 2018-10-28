@@ -442,7 +442,7 @@ config MCANNONLAKE
 	select X86_P6_NOP
 	---help---
 
-	  Select this for 8th Gen Core processors.
+	  Select this for 8th Gen Core processors
 
 	  Enables -march=cannonlake
 
