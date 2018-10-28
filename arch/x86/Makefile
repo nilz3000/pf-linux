@@ -157,7 +157,7 @@ else
         cflags-$(CONFIG_MICELAKE) += \
                 $(call cc-option,-march=icelake,$(call cc-option,-mtune=icelake))
         cflags-$(CONFIG_MATOM) += $(call cc-option,-march=bonnell) \
-                $(call cc-option,-mtune=bonnell,$(call cc-option,-mtune=bonnell))
+                $(call cc-option,-mtune=bonnell,$(call cc-option,-mtune=generic))
         cflags-$(CONFIG_GENERIC_CPU) += $(call cc-option,-mtune=generic)
         KBUILD_CFLAGS += $(cflags-y)
 
