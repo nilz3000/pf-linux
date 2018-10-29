@@ -47,14 +47,20 @@
 #define rt_task(p)		rt_prio((p)->prio)
 #define batch_task(p)		((p)->policy == SCHED_BATCH)
 #define is_rt_policy(policy)	((policy) == SCHED_FIFO || \
-					(policy) == SCHED_RR)
+				 (policy) == SCHED_RR || \
+				 (policy) == SCHED_ISO)
 #define has_rt_policy(p)	(is_rt_policy((p)->policy))
 
 /* is_idle_policy() and idleprio_task() are defined in include/linux/sched.h */
-#define task_running_idle(p)	((p)->prio == IDLE_PRIO)
+#define is_idle_policy(policy)	((policy) == SCHED_IDLE)
+#define idleprio_task(p)	unlikely(is_idle_policy((p)->policy))
 
 /* is_iso_policy() and iso_task() are defined in include/linux/sched.h */
 #define task_running_iso(p)	((p)->prio == ISO_PRIO)
+
+#define is_normal_policy(policy)	(SCHED_NORMAL == (policy))
+#define normal_task(p)			(is_normal_policy((p)->policy))
+#define task_running_normal(p)		(NORMAL_PRIO == (p)->prio)
 
 #define ISO_PERIOD		((5 * HZ) + 1)
 
@@ -90,7 +96,7 @@ enum {
 
 static inline void print_scheduler_version(void)
 {
-	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.99b by Alfred Chen.\n");
+	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.99c by Alfred Chen.\n");
 }
 
 /* task_struct::on_rq states: */
@@ -904,7 +910,7 @@ static inline void check_preempt_curr(struct rq *rq, struct task_struct *p)
 	if (curr->prio == PRIO_LIMIT)
 		resched_curr(rq);
 
-	if (batch_task(p) || idleprio_task(p))
+	if (task_running_idle(p))
 		return;
 
 	if (p->priodl < curr->priodl)
@@ -1071,13 +1077,11 @@ static inline int rq_dither(struct rq *rq)
 
 static inline int normal_prio(struct task_struct *p)
 {
+	if (normal_task(p))
+		return NORMAL_PRIO;
 	if (has_rt_policy(p))
 		return MAX_RT_PRIO - 1 - p->rt_priority;
-	if (idleprio_task(p))
-		return IDLE_PRIO;
-	if (iso_task(p))
-		return ISO_PRIO;
-	return NORMAL_PRIO;
+	return IDLE_PRIO;
 }
 
 /*
@@ -1679,7 +1683,6 @@ task_preemptible_rq(struct task_struct *p, cpumask_t *chk_mask,
 static inline int select_task_rq(struct task_struct *p)
 {
 	cpumask_t chk_mask;
-	int preempt_level;
 
 	if (unlikely(!cpumask_and(&chk_mask, &p->cpus_allowed, cpu_online_mask)))
 		return select_fallback_rq(task_cpu(p), p);
@@ -1695,10 +1698,8 @@ static inline int select_task_rq(struct task_struct *p)
 		update_task_priodl(p);
 	}
 
-	preempt_level = batch_task(p) ?
-		SCHED_RQ_NORMAL_0:task_running_policy_level(p, this_rq());
-
-	return task_preemptible_rq(p, &chk_mask, preempt_level);
+	return task_preemptible_rq(p, &chk_mask,
+				   task_running_policy_level(p, this_rq()));
 }
 #else /* CONFIG_SMP */
 static inline int select_task_rq(struct task_struct *p)
@@ -2088,7 +2089,6 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 {
 	unsigned long flags;
 	int cpu = get_cpu();
-	struct rq *rq = this_rq();
 
 #ifdef CONFIG_PREEMPT_NOTIFIERS
 	INIT_HLIST_HEAD(&p->preempt_notifiers);
@@ -2119,17 +2119,14 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	 * Revert to default priority/policy on fork if requested.
 	 */
 	if (unlikely(p->sched_reset_on_fork)) {
-		if (p->policy == SCHED_FIFO || p->policy == SCHED_RR) {
+		if (has_rt_policy(p)) {
 			p->policy = SCHED_NORMAL;
-			p->normal_prio = normal_prio(p);
-		}
-
-		if (PRIO_TO_NICE(p->static_prio) < 0) {
 			p->static_prio = NICE_TO_PRIO(0);
-			p->normal_prio = p->static_prio;
-		}
+			p->rt_priority = 0;
+		} else if (PRIO_TO_NICE(p->static_prio) < 0)
+			p->static_prio = NICE_TO_PRIO(0);
 
-		p->prio = p->normal_prio;
+		p->prio = p->normal_prio = normal_prio(p);
 
 		/*
 		 * We don't need the reset flag anymore after the fork. It has
@@ -2145,6 +2142,8 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	 */
 	if (SCHED_NORMAL == p->policy || SCHED_RR == p->policy ||
 	    SCHED_ISO == p->policy) {
+		struct rq *rq = this_rq();
+
 		raw_spin_lock_irqsave(&rq->lock, flags);
 		rq->curr->time_slice /= 2;
 		p->time_slice = rq->curr->time_slice;
@@ -2767,8 +2766,7 @@ static inline void pds_update_curr(struct rq *rq, struct task_struct *p)
 	account_group_exec_runtime(p, ns);
 
 	/* time_slice accounting is done in usecs to avoid overflow on 32bit */
-	if (likely(p->policy != SCHED_FIFO))
-		p->time_slice -= NS_TO_US(ns);
+	p->time_slice -= NS_TO_US(ns);
 	p->last_ran = rq->clock_task;
 }
 
@@ -2894,9 +2892,6 @@ static inline void pds_scheduler_task_tick(struct rq *rq)
 		}
 	}
 
-	/* SCHED_FIFO tasks never run out of timeslice. */
-	if (unlikely(p->policy == SCHED_FIFO))
-		return;
 	/*
 	 * Tasks that were scheduled in the first half of a tick are not
 	 * allowed to run into the 2nd half of the next tick if they will
@@ -3304,11 +3299,9 @@ static inline void preempt_latency_stop(int val) { }
  */
 static void time_slice_expired(struct task_struct *p, struct rq *rq)
 {
-	if (unlikely(p->policy == SCHED_FIFO))
-		return;
 	p->time_slice = timeslice();
 
-	if (unlikely(p->policy == SCHED_RR))
+	if (unlikely(has_rt_policy(p)))
 		return;
 	if (p->policy == SCHED_NORMAL) {
 		p->deadline /= 2;
@@ -3335,9 +3328,9 @@ static inline void check_deadline(struct task_struct *p, struct rq *rq)
 
 	pds_update_curr(rq, p);
 
-	if (p->time_slice < RESCHED_US || batch_task(p)) {
+	if (p->time_slice < RESCHED_US) {
 		time_slice_expired(p, rq);
-		if (task_on_rq_queued(p))
+		if (SCHED_FIFO != p->policy && task_on_rq_queued(p))
 			requeue_task(p, rq);
 	}
 }
@@ -3537,7 +3530,7 @@ static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 	p->last_ran = rq->clock_task;
 
 #ifdef CONFIG_HIGH_RES_TIMERS
-	if (!(p == rq->idle || p->policy == SCHED_FIFO))
+	if (p != rq->idle)
 		hrtick_start(rq, US_TO_NS(p->time_slice));
 #endif
 	/* update rq->dither */
@@ -4407,6 +4400,12 @@ static int
 __sched_setscheduler(struct task_struct *p,
 		     const struct sched_attr *attr, bool user, bool pi)
 {
+	const struct sched_attr dl_squash_attr = {
+		.size		= sizeof(struct sched_attr),
+		.sched_policy	= SCHED_FIFO,
+		.sched_nice	= 0,
+		.sched_priority = 99,
+	};
 	int newprio = MAX_RT_PRIO - 1 - attr->sched_priority;
 	int retval, oldpolicy = -1;
 	int policy = attr->sched_policy;
@@ -4417,6 +4416,15 @@ __sched_setscheduler(struct task_struct *p,
 
 	/* The pi code expects interrupts enabled */
 	BUG_ON(pi && in_interrupt());
+
+	/*
+	 * PDS supports SCHED_DEADLINE by squash it as prio 0 SCHED_FIFO
+	 */
+	if (unlikely(SCHED_DEADLINE == policy)) {
+		attr = &dl_squash_attr;
+		policy = attr->sched_policy;
+		newprio = MAX_RT_PRIO - 1 - attr->sched_priority;
+	}
 recheck:
 	/* Double check policy once rq lock held */
 	if (policy < 0) {
@@ -4441,7 +4449,8 @@ recheck:
 	    (p->mm && attr->sched_priority > MAX_USER_RT_PRIO - 1) ||
 	    (!p->mm && attr->sched_priority > MAX_RT_PRIO - 1))
 		return -EINVAL;
-	if (is_rt_policy(policy) != (attr->sched_priority != 0))
+	if ((SCHED_RR == policy || SCHED_FIFO == policy) !=
+	    (attr->sched_priority != 0))
 		return -EINVAL;
 
 	/*
@@ -5390,10 +5399,7 @@ SYSCALL_DEFINE1(sched_get_priority_min, int, policy)
 static int sched_rr_get_interval(pid_t pid, struct timespec64 *t)
 {
 	struct task_struct *p;
-	unsigned int time_slice;
-	unsigned long flags;
 	int retval;
-	raw_spinlock_t *lock;
 
 	if (pid < 0)
 		return -EINVAL;
@@ -5407,13 +5413,9 @@ static int sched_rr_get_interval(pid_t pid, struct timespec64 *t)
 	retval = security_task_getscheduler(p);
 	if (retval)
 		goto out_unlock;
-
-	task_access_lock_irqsave(p, &lock, &flags);
-	time_slice = p->policy == SCHED_FIFO ? 0 : MS_TO_NS(rr_interval);
-	task_access_unlock_irqrestore(p, lock, &flags);
-
 	rcu_read_unlock();
-	*t = ns_to_timespec64(time_slice);
+
+	*t = ns_to_timespec64(MS_TO_NS(rr_interval));
 	return 0;
 
 out_unlock:
