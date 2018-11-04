@@ -531,7 +531,11 @@ static void ip_sublist_rcv_finish(struct list_head *head)
 	struct sk_buff *skb, *next;
 
 	list_for_each_entry_safe(skb, next, head, list) {
-		skb_list_del_init(skb);
+		list_del(&skb->list);
+		/* Handle ip{6}_forward case, as sch_direct_xmit have
+		 * another kind of SKB-list usage (see validate_xmit_skb_list)
+		 */
+		skb->next = NULL;
 		dst_input(skb);
 	}
 }

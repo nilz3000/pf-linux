@@ -578,7 +578,7 @@ finish_segs:
 	if (segs) {
 		while (segs) {
 			skb2 = segs->next;
-			skb_mark_not_on_list(segs);
+			segs->next = NULL;
 			qdisc_skb_cb(segs)->pkt_len = segs->len;
 			last_len = segs->len;
 			rc = qdisc_enqueue(segs, sch, to_free);

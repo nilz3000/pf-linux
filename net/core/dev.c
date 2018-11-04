@@ -3250,7 +3250,7 @@ struct sk_buff *dev_hard_start_xmit(struct sk_buff *first, struct net_device *de
 	while (skb) {
 		struct sk_buff *next = skb->next;
 
-		skb_mark_not_on_list(skb);
+		skb->next = NULL;
 		rc = xmit_one(skb, dev, txq, next != NULL);
 		if (unlikely(!dev_xmit_complete(rc))) {
 			skb->next = next;
@@ -3350,7 +3350,7 @@ struct sk_buff *validate_xmit_skb_list(struct sk_buff *skb, struct net_device *d
 
 	for (; skb != NULL; skb = next) {
 		next = skb->next;
-		skb_mark_not_on_list(skb);
+		skb->next = NULL;
 
 		/* in case skb wont be segmented, point to itself */
 		skb->prev = skb;
@@ -5314,7 +5314,8 @@ static void __napi_gro_flush_chain(struct napi_struct *napi, u32 index,
 	list_for_each_entry_safe_reverse(skb, p, head, list) {
 		if (flush_old && NAPI_GRO_CB(skb)->age == jiffies)
 			return;
-		skb_list_del_init(skb);
+		list_del(&skb->list);
+		skb->next = NULL;
 		napi_gro_complete(skb);
 		napi->gro_hash[index].count--;
 	}
@@ -5429,7 +5430,7 @@ static void gro_flush_oldest(struct list_head *head)
 	/* Do not adjust napi->gro_hash[].count, caller is adding a new
 	 * SKB to the chain.
 	 */
-	skb_list_del_init(oldest);
+	list_del(&oldest->list);
 	napi_gro_complete(oldest);
 }
 
@@ -5499,7 +5500,8 @@ static enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff 
 	ret = NAPI_GRO_CB(skb)->free ? GRO_MERGED_FREE : GRO_MERGED;
 
 	if (pp) {
-		skb_list_del_init(pp);
+		list_del(&pp->list);
+		pp->next = NULL;
 		napi_gro_complete(pp);
 		napi->gro_hash[hash].count--;
 	}
