@@ -651,7 +651,7 @@ out:
 	return err;
 }
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 static int rtsx_usb_ms_suspend(struct device *dev)
 {
 	struct rtsx_usb_ms *host = dev_get_drvdata(dev);
@@ -688,7 +688,9 @@ static int rtsx_usb_ms_resume(struct device *dev)
 
 	return 0;
 }
+#endif /* CONFIG_PM_SLEEP */
 
+#ifdef CONFIG_PM
 static int rtsx_usb_ms_runtime_suspend(struct device *dev)
 {
 	struct rtsx_usb_ms *host = dev_get_drvdata(dev);
@@ -714,13 +716,13 @@ static int rtsx_usb_ms_runtime_resume(struct device *dev)
 
 	return 0;
 }
+#endif /* CONFIG_PM */
 
 static const struct dev_pm_ops rtsx_usb_ms_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(rtsx_usb_ms_suspend, rtsx_usb_ms_resume)
 	SET_RUNTIME_PM_OPS(rtsx_usb_ms_runtime_suspend, rtsx_usb_ms_runtime_resume, NULL)
 };
 
-#endif /* CONFIG_PM */
 
 static void rtsx_usb_ms_poll_card(struct work_struct *work)
 {
@@ -796,10 +798,10 @@ static int rtsx_usb_ms_drv_probe(struct platform_device *pdev)
 	msh->set_param = rtsx_usb_ms_set_param;
 	msh->caps = MEMSTICK_CAP_PAR4;
 
+	pm_runtime_get_noresume(ms_dev(host));
 	pm_runtime_set_active(ms_dev(host));
 	pm_runtime_enable(ms_dev(host));
 
-	pm_runtime_get_sync(ms_dev(host));
 	err = memstick_add_host(msh);
 	if (err)
 		goto err_out;
@@ -809,6 +811,7 @@ static int rtsx_usb_ms_drv_probe(struct platform_device *pdev)
 	return 0;
 err_out:
 	memstick_free_host(msh);
+	pm_runtime_disable(ms_dev(host));
 	pm_runtime_put_noidle(ms_dev(host));
 	return err;
 }
