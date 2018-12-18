@@ -872,9 +872,7 @@ static struct platform_driver rtsx_usb_ms_driver = {
 	.id_table       = rtsx_usb_ms_ids,
 	.driver		= {
 		.name	= "rtsx_usb_ms",
-#ifdef CONFIG_PM
 		.pm	= &rtsx_usb_ms_pm_ops,
-#endif
 	},
 };
 module_platform_driver(rtsx_usb_ms_driver);
