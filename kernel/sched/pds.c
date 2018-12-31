@@ -84,7 +84,7 @@ enum {
 
 static inline void print_scheduler_version(void)
 {
-	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.99i by Alfred Chen.\n");
+	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.99j by Alfred Chen.\n");
 }
 
 /*
@@ -582,7 +582,7 @@ static void resched_cpu_if_curr_is(int cpu, int priority)
 	if (set_nr_if_polling(rq->idle)) {
 		trace_sched_wake_idle_without_ipi(cpu);
 	} else {
-		if (unlikely(!do_raw_spin_trylock(&rq->lock)))
+		if (!do_raw_spin_trylock(&rq->lock))
 			goto out;
 		spin_acquire(&rq->lock.dep_map, SINGLE_DEPTH_NESTING, 1, _RET_IP_);
 
@@ -1615,20 +1615,18 @@ out:
 	return dest_cpu;
 }
 
-static inline int best_mask_cpu(const int cpu, cpumask_t *cpumask)
+static inline int best_mask_cpu(int cpu, cpumask_t *cpumask)
 {
-	cpumask_t tmp, *mask;
+	cpumask_t *mask;
 
 	if (cpumask_test_cpu(cpu, cpumask))
 		return cpu;
 
-	for (mask = &(per_cpu(sched_cpu_affinity_chk_masks, cpu)[0]);
-	     mask < per_cpu(sched_cpu_affinity_chk_end_masks, cpu); mask++)
-		if (cpumask_and(&tmp, cpumask, mask))
-			return cpumask_any(&tmp);
+	mask = &(per_cpu(sched_cpu_affinity_chk_masks, cpu)[0]);
+	while ((cpu = cpumask_any_and(cpumask, mask)) >= nr_cpu_ids)
+		mask++;
 
-	/* Safe fallback, should never come here */
-	return cpumask_first(cpumask);
+	return cpu;
 }
 
 /*
@@ -2860,25 +2858,23 @@ static inline void pds_scheduler_task_tick(struct rq *rq)
 #ifdef CONFIG_SCHED_SMT
 static int active_load_balance_cpu_stop(void *data)
 {
-	struct rq *origin_rq, *rq = this_rq();
+	struct rq *rq = this_rq();
 	struct task_struct *p = data;
-	cpumask_t tmp;
+	int cpu;
 	unsigned long flags;
 
-	origin_rq = rq;
 	local_irq_save(flags);
 
 	raw_spin_lock(&p->pi_lock);
 	raw_spin_lock(&rq->lock);
 
+	rq->active_balance = 0;
 	/*
 	 * _something_ may have changed the task, double check again
 	 */
 	if (task_on_rq_queued(p) && task_rq(p) == rq &&
-	    cpumask_and(&tmp, &p->cpus_allowed, &sched_cpu_sg_idle_mask))
-		rq = __migrate_task(rq, p, cpumask_any(&tmp));
-
-	origin_rq->active_balance = 0;
+	    (cpu = cpumask_any_and(&p->cpus_allowed, &sched_cpu_sg_idle_mask)) < nr_cpu_ids)
+		rq = __migrate_task(rq, p, cpu);
 
 	raw_spin_unlock(&rq->lock);
 	raw_spin_unlock(&p->pi_lock);
@@ -2894,13 +2890,12 @@ static void pds_sg_balance_trigger(const int cpu)
 	struct rq *rq = cpu_rq(cpu);
 	unsigned long flags;
 	struct task_struct *curr;
-	cpumask_t tmp;
 
 	if (!raw_spin_trylock_irqsave(&rq->lock, flags))
 		return;
 	curr = rq->curr;
 	if (!is_idle_task(curr) &&
-	    cpumask_and(&tmp, &curr->cpus_allowed, &sched_cpu_sg_idle_mask)) {
+	    cpumask_intersects(&curr->cpus_allowed, &sched_cpu_sg_idle_mask)) {
 		int active_balance = 0;
 
 		if (likely(!rq->active_balance)) {
@@ -3222,11 +3217,10 @@ take_queued_task_cpumask(struct rq *rq, cpumask_t *chk_mask, int filter_prio)
 		int nr_migrated;
 		struct rq *src_rq = cpu_rq(src_cpu);
 
-		if (unlikely(!do_raw_spin_trylock(&src_rq->lock))) {
+		if (!do_raw_spin_trylock(&src_rq->lock)) {
 			if (PRIO_LIMIT == filter_prio)
 				continue;
-			else
-				return 0;
+			return 0;
 		}
 		spin_acquire(&src_rq->lock.dep_map, SINGLE_DEPTH_NESTING, 1, _RET_IP_);
 
@@ -3236,7 +3230,7 @@ take_queued_task_cpumask(struct rq *rq, cpumask_t *chk_mask, int filter_prio)
 		spin_release(&src_rq->lock.dep_map, 1, _RET_IP_);
 		do_raw_spin_unlock(&src_rq->lock);
 
-		if (nr_migrated)
+		if (nr_migrated || PRIO_LIMIT != filter_prio)
 			return nr_migrated;
 	}
 	return 0;
@@ -6013,11 +6007,12 @@ static void sched_init_topology_cpumask(void)
 		cpumask_setall(chk);
 		cpumask_clear_cpu(cpu, chk);
 		if (cpumask_and(chk, chk, topology_sibling_cpumask(cpu))) {
-			per_cpu(sched_sibling_cpu, cpu) = cpumask_any(chk);
+			per_cpu(sched_sibling_cpu, cpu) = cpumask_first(chk);
 			printk(KERN_INFO "pds: cpu #%d affinity check mask - smt 0x%08lx",
 			       cpu, (chk++)->bits[0]);
 		}
 #endif
+#ifdef CONFIG_SCHED_MC
 		cpumask_setall(chk);
 		cpumask_clear_cpu(cpu, chk);
 		if (cpumask_and(chk, chk, cpu_coregroup_mask(cpu))) {
@@ -6032,7 +6027,15 @@ static void sched_init_topology_cpumask(void)
 		 */
 		per_cpu(sd_llc_id, cpu) =
 			cpumask_first(cpu_coregroup_mask(cpu));
+#else
+		per_cpu(sd_llc_id, cpu) =
+			cpumask_first(topology_core_cpumask(cpu));
 
+		per_cpu(sched_cpu_llc_start_mask, cpu) = chk;
+
+		cpumask_setall(chk);
+		cpumask_clear_cpu(cpu, chk);
+#endif /* NOT CONFIG_SCHED_MC */
 		if (cpumask_and(chk, chk, topology_core_cpumask(cpu)))
 			printk(KERN_INFO "pds: cpu #%d affinity check mask - core 0x%08lx",
 			       cpu, (chk++)->bits[0]);
