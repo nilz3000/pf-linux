@@ -84,7 +84,7 @@ enum {
 
 static inline void print_scheduler_version(void)
 {
-	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.99j by Alfred Chen.\n");
+	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.99k by Alfred Chen.\n");
 }
 
 /*
@@ -259,7 +259,7 @@ __task_access_unlock(struct task_struct *p, raw_spinlock_t *lock)
 		raw_spin_unlock(lock);
 }
 
-struct rq
+static inline struct rq
 *task_access_lock_irqsave(struct task_struct *p, raw_spinlock_t **plock,
 			  unsigned long *flags)
 {
@@ -288,6 +288,13 @@ struct rq
 			raw_spin_unlock_irqrestore(&p->pi_lock, *flags);
 		}
 	}
+}
+
+static inline void
+task_access_unlock_irqrestore(struct task_struct *p, raw_spinlock_t *lock,
+			      unsigned long *flags)
+{
+	raw_spin_unlock_irqrestore(lock, *flags);
 }
 
 /*
@@ -817,10 +824,9 @@ static inline int pds_skiplist_random_level(const struct task_struct *p)
 	 * so mask out ~microseconds as a factor of the random seed for skiplist
 	 * insertion.
 	 * 2. Use address of task structure pointer as another factor of the
-	 * random seed for task burst forking scenario. Shift right 9 bits to
-	 * remove the aligned zero bits in the task structure address.
+	 * random seed for task burst forking scenario.
 	 */
-	randseed = (task_rq(p)->clock >> 10) ^ ((long unsigned int)p >> 9);
+	randseed = (task_rq(p)->clock ^ (long unsigned int)p) >> 10;
 
 	return find_first_bit(&randseed, NUM_SKIPLIST_LEVEL - 1);
 }
@@ -2006,6 +2012,12 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 		atomic_dec(&task_rq(p)->nr_iowait);
 	}
 
+	if (SCHED_ISO == p->policy && ISO_PRIO != p->prio) {
+		p->prio = ISO_PRIO;
+		p->deadline = 0UL;
+		update_task_priodl(p);
+	}
+
 	cpu = select_task_rq(p);
 
 	if (cpu != task_cpu(p)) {
@@ -3163,6 +3175,11 @@ static inline void check_deadline(struct task_struct *p, struct rq *rq)
 
 	if (p->time_slice < RESCHED_US) {
 		time_slice_expired(p, rq);
+		if (SCHED_ISO == p->policy && ISO_PRIO == p->prio) {
+			p->prio = NORMAL_PRIO;
+			p->deadline = rq->clock + task_deadline_diff(p);
+			update_task_priodl(p);
+		}
 		if (SCHED_FIFO != p->policy && task_on_rq_queued(p))
 			requeue_task(p, rq);
 	}
@@ -4298,7 +4315,7 @@ recheck:
 	 * Allow unprivileged RT tasks to decrease priority:
 	 */
 	if (user && !capable(CAP_SYS_NICE)) {
-		if (rt_policy(policy)) {
+		if (SCHED_FIFO == policy || SCHED_RR == policy) {
 			unsigned long rlim_rtprio =
 					task_rlimit(p, RLIMIT_RTPRIO);
 
@@ -4310,25 +4327,6 @@ recheck:
 			if (attr->sched_priority > p->rt_priority &&
 			    attr->sched_priority > rlim_rtprio)
 				return -EPERM;
-		} else {
-			switch (p->policy) {
-				/*
-				 * Can only downgrade policies but not back to
-				 * SCHED_NORMAL
-				 */
-				case SCHED_BATCH:
-					if (policy == SCHED_BATCH)
-						return 0;
-					if (policy != SCHED_IDLE)
-						return -EPERM;
-					break;
-				case SCHED_IDLE:
-					if (policy == SCHED_IDLE)
-						return 0;
-					return -EPERM;
-				default:
-					break;
-			}
 		}
 
 		/* Can't change other user's priorities */
