@@ -458,11 +458,10 @@ static inline u64 static_deadline_diff(int static_prio)
 static inline void time_slice_expired(struct task_struct *p, struct rq *rq)
 {
 	p->time_slice = timeslice();
-
-	if (p->prio >= NORMAL_PRIO) {
+	if (p->prio >= NORMAL_PRIO)
 		p->deadline = rq->clock + task_deadline_diff(p);
-		update_task_priodl(p);
-	}
+
+	update_task_priodl(p);
 }
 
 static inline struct task_struct *rq_first_queued_task(struct rq *rq)
