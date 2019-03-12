@@ -1,5 +1,5 @@
-#ifndef PDS_SCHED_H
-#define PDS_SCHED_H
+#ifndef BMQ_SCHED_H
+#define BMQ_SCHED_H
 
 #include <linux/sched.h>
 
@@ -59,6 +59,19 @@ static inline int task_on_rq_migrating(struct task_struct *p)
 	return p->on_rq == TASK_ON_RQ_MIGRATING;
 }
 
+enum {
+	/* bits:
+	 * RT, Low prio adj range, nice width, high prio adj range, cpu idle task */
+	bmq_BITS = (NICE_WIDTH + 2 * MAX_PRIORITY_ADJ + 2)
+};
+
+#define IDLE_TASK_SCHED_PRIO (bmq_BITS - 1)
+
+struct bmq {
+	DECLARE_BITMAP(bitmap, bmq_BITS);
+	struct list_head heads[bmq_BITS];
+};
+
 /*
  * This is the main, per-CPU runqueue data structure.
  * This data should only be modified by the local cpu.
@@ -70,7 +83,8 @@ struct rq {
 	struct task_struct *curr, *idle, *stop;
 	struct mm_struct *prev_mm;
 
-	struct skiplist_node sl_header;
+	struct bmq queue;
+	unsigned long watermark;
 
 	/* switch count */
 	u64 nr_switches;
@@ -84,9 +98,6 @@ struct rq {
 #ifdef CONFIG_HAVE_SCHED_AVG_IRQ
 	struct sched_avg	avg_irq;
 #endif
-
-	unsigned long queued_level;
-	unsigned long pending_level;
 
 #ifdef CONFIG_SCHED_SMT
 	int active_balance;
@@ -108,8 +119,8 @@ struct rq {
 	long calc_load_active;
 
 	u64 clock, last_tick;
+	u64 last_ts_switch;
 	u64 clock_task;
-	int dither;
 
 	unsigned long nr_running;
 	unsigned long nr_uninterruptible;
@@ -231,7 +242,7 @@ static inline u64 rq_clock_task(struct rq *rq)
 /*
  * Below are scheduler API which using in other kernel code
  * It use the dummy rq_flags
- * ToDo : PDS need to support these APIs for compatibility with mainline
+ * ToDo : BMQ need to support these APIs for compatibility with mainline
  * scheduler code.
  */
 struct rq_flags {
@@ -428,4 +439,8 @@ extern void schedule_idle(void);
  */
 #define SCHED_FLAG_SUGOV	0x10000000
 
-#endif /* PDS_SCHED_H */
+static inline int task_running_nice(struct task_struct *p)
+{
+	return (p->prio + p->boost_prio > DEFAULT_PRIO + MAX_PRIORITY_ADJ);
+}
+#endif /* BMQ_SCHED_H */

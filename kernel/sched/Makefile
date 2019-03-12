@@ -16,8 +16,8 @@ ifneq ($(CONFIG_SCHED_OMIT_FRAME_POINTER),y)
 CFLAGS_core.o := $(PROFILING) -fno-omit-frame-pointer
 endif
 
-ifdef CONFIG_SCHED_PDS
-obj-y += pds.o
+ifdef CONFIG_SCHED_BMQ
+obj-y += bmq.o
 else
 obj-y += core.o
 obj-y += fair.o rt.o deadline.o

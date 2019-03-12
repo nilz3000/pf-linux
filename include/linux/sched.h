@@ -29,7 +29,6 @@
 #include <linux/mm_types_task.h>
 #include <linux/task_io_accounting.h>
 #include <linux/rseq.h>
-#include <linux/skip_list.h>
 
 /* task_struct member predeclarations (sorted alphabetically): */
 struct audit_context;
@@ -613,10 +612,10 @@ struct task_struct {
 	unsigned int			flags;
 	unsigned int			ptrace;
 
-#if defined(CONFIG_SMP) && !defined(CONFIG_SCHED_PDS)
+#if defined(CONFIG_SMP) && !defined(CONFIG_SCHED_BMQ)
 	struct llist_node		wake_entry;
 #endif
-#if defined(CONFIG_SMP) || defined(CONFIG_SCHED_PDS)
+#if defined(CONFIG_SMP) || defined(CONFIG_SCHED_BMQ)
 	int				on_cpu;
 #endif
 #ifdef CONFIG_SMP
@@ -624,11 +623,11 @@ struct task_struct {
 	/* Current CPU: */
 	unsigned int			cpu;
 #endif
+#ifndef CONFIG_SCHED_BMQ
 	unsigned int			wakee_flips;
 	unsigned long			wakee_flip_decay_ts;
 	struct task_struct		*last_wakee;
 
-#ifndef CONFIG_SCHED_PDS
 	/*
 	 * recent_used_cpu is initially set as the last CPU used by a task
 	 * that wakes affine another task. Waker/wakee relationships can
@@ -637,8 +636,8 @@ struct task_struct {
 	 * used CPU that may be idle.
 	 */
 	int				recent_used_cpu;
-#endif /* CONFIG_SCHED_PDS */
 	int				wake_cpu;
+#endif /* !CONFIG_SCHED_BMQ */
 #endif
 	int				on_rq;
 
@@ -647,19 +646,16 @@ struct task_struct {
 	int				normal_prio;
 	unsigned int			rt_priority;
 
-#ifdef CONFIG_SCHED_PDS
-	int				time_slice;
-	u64				deadline;
-	/* skip list level */
-	int				sl_level;
-	/* skip list node */
-	struct skiplist_node		sl_node;
-	/* 8bits prio and 56bits deadline for quick processing */
-	u64				priodl;
+#ifdef CONFIG_SCHED_BMQ
 	u64				last_ran;
+	s64				time_slice;
+	int				boost_prio;
+	int				bmq_idx;
+	struct list_head		bmq_node;
+	int				ts_deboost;
 	/* sched_clock time spent running */
 	u64				sched_time;
-#else /* CONFIG_SCHED_PDS */
+#else /* !CONFIG_SCHED_BMQ */
 	const struct sched_class	*sched_class;
 	struct sched_entity		se;
 	struct sched_rt_entity		rt;
@@ -1240,28 +1236,14 @@ struct task_struct {
 	 */
 };
 
-#ifdef CONFIG_SCHED_PDS
-void cpu_scaling(int cpu);
-void cpu_nonscaling(int cpu);
+#ifdef CONFIG_SCHED_BMQ
 #define tsk_seruntime(t)		((t)->sched_time)
 /* replace the uncertian rt_timeout with 0UL */
 #define tsk_rttimeout(t)		(0UL)
-
-#define task_running_idle(p)	((p)->prio == IDLE_PRIO)
 #else /* CFS */
-extern int runqueue_is_locked(int cpu);
-static inline void cpu_scaling(int cpu)
-{
-}
-
-static inline void cpu_nonscaling(int cpu)
-{
-}
 #define tsk_seruntime(t)	((t)->se.sum_exec_runtime)
 #define tsk_rttimeout(t)	((t)->rt.timeout)
-
-#define iso_task(p)		(false)
-#endif /* CONFIG_SCHED_PDS */
+#endif /* !CONFIG_SCHED_BMQ */
 
 static inline struct pid *task_pid(struct task_struct *task)
 {

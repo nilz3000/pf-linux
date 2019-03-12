@@ -658,7 +658,7 @@ out:
 	return ret;
 }
 
-#if defined(CONFIG_SMP) && !defined(CONFIG_SCHED_PDS)
+#if defined(CONFIG_SMP) && !defined(CONFIG_SCHED_BMQ)
 /*
  * Helper routine for generate_sched_domains().
  * Do cpusets a, b have overlapping effective cpus_allowed masks?
@@ -974,7 +974,7 @@ static void rebuild_sched_domains_locked(void)
 out:
 	put_online_cpus();
 }
-#else /* !CONFIG_SMP || CONFIG_SCHED_PDS */
+#else /* !CONFIG_SMP || CONFIG_SCHED_BMQ */
 static void rebuild_sched_domains_locked(void)
 {
 }

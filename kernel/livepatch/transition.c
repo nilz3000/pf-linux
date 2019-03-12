@@ -316,7 +316,7 @@ static bool klp_try_switch_task(struct task_struct *task)
 	 */
 	rq = task_rq_lock(task, &flags);
 
-#ifdef	CONFIG_SCHED_PDS
+#ifdef	CONFIG_SCHED_BMQ
 	if (task_running(task) && task != current) {
 #else
 	if (task_running(rq, task) && task != current) {

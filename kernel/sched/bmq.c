@@ -1,7 +1,7 @@
 /*
- *  kernel/sched/pds.c, was kernel/sched.c
+ *  kernel/sched/bmq.c
  *
- *  PDS-mq Core kernel scheduler code and related syscalls
+ *  BMQ Core kernel scheduler code and related syscalls
  *
  *  Copyright (C) 1991-2002  Linus Torvalds
  *
@@ -9,8 +9,9 @@
  *		a whole lot of those previous things.
  *  2017-09-06	Priority and Deadline based Skip list multiple queue kernel
  *		scheduler by Alfred Chen.
+ *  2019-02-20	BMQ(BitMap Queue) kernel scheduler by Alfred Chen.
  */
-#include "pds_sched.h"
+#include "bmq_sched.h"
 
 #include <linux/sched/rt.h>
 
@@ -41,34 +42,65 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/sched.h>
 
-
-#define rt_prio(prio)		((prio) < MAX_RT_PRIO)
+/* rt_prio(prio) defined in include/linux/sched/rt.h */
 #define rt_task(p)		rt_prio((p)->prio)
-#define rt_policy(policy)	((policy) == SCHED_FIFO || \
-				 (policy) == SCHED_RR || \
-				 (policy) == SCHED_ISO)
+#define rt_policy(policy)	((policy) == SCHED_FIFO || (policy) == SCHED_RR)
 #define task_has_rt_policy(p)	(rt_policy((p)->policy))
-
-#define idle_policy(policy)	((policy) == SCHED_IDLE)
-#define idleprio_task(p)	unlikely(idle_policy((p)->policy))
 
 #define STOP_PRIO		(MAX_RT_PRIO - 1)
 
-/*
- * Some helpers for converting to/from various scales. Use shifts to get
- * approximate multiples of ten for less overhead.
- */
-#define JIFFIES_TO_NS(TIME)	((TIME) * (1000000000 / HZ))
-#define JIFFY_NS		(1000000000 / HZ)
-#define HALF_JIFFY_NS		(1000000000 / HZ / 2)
-#define HALF_JIFFY_US		(1000000 / HZ / 2)
-#define MS_TO_NS(TIME)		((TIME) << 20)
-#define MS_TO_US(TIME)		((TIME) << 10)
-#define NS_TO_MS(TIME)		((TIME) >> 20)
-#define NS_TO_US(TIME)		((TIME) >> 10)
-#define US_TO_NS(TIME)		((TIME) << 10)
+#define SCHED_TIMESLICE_NS	(CONFIG_SCHED_TIMESLICE * 1000 * 1000)
 
-#define RESCHED_US	(100) /* Reschedule if less than this many μs left */
+/* Reschedule if less than this many μs left */
+#define RESCHED_NS		(100 * 1000)
+
+static inline void print_scheduler_version(void)
+{
+	printk(KERN_INFO "bmq: BMQ CPU Scheduler 0.89 by Alfred Chen.\n");
+}
+
+/**
+ * sched_yield_type - Choose what sort of yield sched_yield will perform.
+ * 0: No yield.
+ * 1: Deboost and requeue task. (default)
+ */
+int sched_yield_type __read_mostly = 1;
+
+static inline int ts_overrun(struct task_struct *p, struct rq *rq)
+{
+	const static u64 ts_overrun_th[] = {
+		SCHED_TIMESLICE_NS / 2,
+		SCHED_TIMESLICE_NS / 2,
+		SCHED_TIMESLICE_NS / 2,
+		SCHED_TIMESLICE_NS / 2,
+		SCHED_TIMESLICE_NS * 3 / 4,
+		SCHED_TIMESLICE_NS * 7 / 8,
+		SCHED_TIMESLICE_NS * 15 / 16,
+		SCHED_TIMESLICE_NS * 31 / 32,
+		SCHED_TIMESLICE_NS * 63 / 64};
+	return (rq->clock - rq->last_ts_switch >
+		ts_overrun_th[MAX_PRIORITY_ADJ + p->boost_prio]);
+}
+
+static inline int task_normal_boost(struct task_struct *p, struct rq *rq)
+{
+	const static u64 ts_nonboost_th[] = {
+		SCHED_TIMESLICE_NS << 7,
+		SCHED_TIMESLICE_NS << 6,
+		SCHED_TIMESLICE_NS << 5,
+		SCHED_TIMESLICE_NS << 4,
+		SCHED_TIMESLICE_NS << 3,
+		SCHED_TIMESLICE_NS << 3,
+		SCHED_TIMESLICE_NS << 3,
+		SCHED_TIMESLICE_NS << 3,
+		SCHED_TIMESLICE_NS << 3
+	};
+	return ((rq->clock - rq->last_ts_switch) >
+		ts_nonboost_th[MAX_PRIORITY_ADJ + p->boost_prio]);
+}
+
+#ifdef CONFIG_SMP
+static cpumask_t sched_rq_pending_mask ____cacheline_aligned_in_smp;
 
 enum {
 	BASE_CPU_AFFINITY_CHK_LEVEL = 1,
@@ -81,122 +113,14 @@ enum {
 	NR_CPU_AFFINITY_CHK_LEVEL
 };
 
-static inline void print_scheduler_version(void)
-{
-	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.99o by Alfred Chen.\n");
-}
-
-/*
- * This is the time all tasks within the same priority round robin.
- * Value is in ms and set to a minimum of 6ms. Scales with number of cpus.
- * Tunable via /proc interface.
- */
-#define SCHED_DEFAULT_RR (4)
-int rr_interval __read_mostly = SCHED_DEFAULT_RR;
-
-static int __init rr_interval_set(char *str)
-{
-	u32 rr;
-
-	pr_info("rr_interval: ");
-	if (kstrtouint(str, 0, &rr)) {
-		pr_cont("using default of %u, unable to parse %s\n",
-			rr_interval, str);
-		return 1;
-	}
-
-	rr_interval = rr;
-	pr_cont("%d\n", rr_interval);
-
-	return 1;
-}
-__setup("rr_interval=", rr_interval_set);
-
-
-static const u64 sched_prio2deadline[NICE_WIDTH] = {
-/* -20 */	  6291456,   6920601,   7612661,   8373927,   9211319,
-/* -15 */	 10132450,  11145695,  12260264,  13486290,  14834919,
-/* -10 */	 16318410,  17950251,  19745276,  21719803,  23891783,
-/*  -5 */	 26280961,  28909057,  31799962,  34979958,  38477953,
-/*   0 */	 42325748,  46558322,  51214154,  56335569,  61969125,
-/*   5 */	 68166037,  74982640,  82480904,  90728994,  99801893,
-/*  10 */	109782082, 120760290, 132836319, 146119950, 160731945,
-/*  15 */	176805139, 194485652, 213934217, 235327638, 258860401
-};
-
-/**
- * sched_yield_type - Choose what sort of yield sched_yield will perform.
- * 0: No yield.
- * 1: Yield only to better priority/deadline tasks. (default)
- * 2: Expire timeslice and recalculate deadline.
- */
-int sched_yield_type __read_mostly = 1;
-
-/*
- * The quota handed out to tasks of all priority levels when refilling their
- * time_slice.
- */
-static inline int timeslice(void)
-{
-	return MS_TO_US(rr_interval);
-}
-
-#ifdef CONFIG_SMP
-enum {
-SCHED_RQ_EMPTY		=	0,
-SCHED_RQ_IDLE,
-SCHED_RQ_NORMAL_0,
-SCHED_RQ_NORMAL_1,
-SCHED_RQ_NORMAL_2,
-SCHED_RQ_NORMAL_3,
-SCHED_RQ_NORMAL_4,
-SCHED_RQ_NORMAL_5,
-SCHED_RQ_NORMAL_6,
-SCHED_RQ_NORMAL_7,
-SCHED_RQ_ISO,
-SCHED_RQ_RT,
-NR_SCHED_RQ_QUEUED_LEVEL
-};
-
-static cpumask_t sched_rq_queued_masks[NR_SCHED_RQ_QUEUED_LEVEL]
-____cacheline_aligned_in_smp;
-
-static DECLARE_BITMAP(sched_rq_queued_masks_bitmap, NR_SCHED_RQ_QUEUED_LEVEL)
-____cacheline_aligned_in_smp;
-
-static cpumask_t sched_rq_pending_masks[NR_SCHED_RQ_QUEUED_LEVEL]
-____cacheline_aligned_in_smp;
-
-static DECLARE_BITMAP(sched_rq_pending_masks_bitmap, NR_SCHED_RQ_QUEUED_LEVEL)
-____cacheline_aligned_in_smp;
-
 DEFINE_PER_CPU(cpumask_t [NR_CPU_AFFINITY_CHK_LEVEL], sched_cpu_affinity_chk_masks);
 DEFINE_PER_CPU(cpumask_t *, sched_cpu_llc_start_mask);
 DEFINE_PER_CPU(cpumask_t *, sched_cpu_affinity_chk_end_masks);
 
 #ifdef CONFIG_SCHED_SMT
-DEFINE_PER_CPU(int, sched_sibling_cpu);
 DEFINE_STATIC_KEY_FALSE(sched_smt_present);
 EXPORT_SYMBOL_GPL(sched_smt_present);
-
-static cpumask_t sched_cpu_sg_idle_mask ____cacheline_aligned_in_smp;
-
-#ifdef CONFIG_SMT_NICE
-/*
- * Preemptible sibling group mask
- * Which all sibling cpus are running at PRIO_LIMIT or IDLE_PRIO
- */
-static cpumask_t sched_cpu_psg_mask ____cacheline_aligned_in_smp;
-/*
- * SMT supressed mask
- * When a cpu is running task with NORMAL/ISO/RT policy, its sibling cpu
- * will be supressed to run IDLE priority task.
- */
-static cpumask_t sched_smt_supressed_mask ____cacheline_aligned_in_smp;
-#endif /* CONFIG_SMT_NICE */
 #endif
-
-static int sched_rq_prio[NR_CPUS] ____cacheline_aligned;
 
 /*
  * Keep a unique ID per domain (we use the first CPUs number in the cpumask of
@@ -223,6 +147,144 @@ DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 #ifndef finish_arch_post_lock_switch
 # define finish_arch_post_lock_switch()	do { } while (0)
 #endif
+
+#define WM_BITS	(bmq_BITS + 1)
+#define IDLE_WM	(1)
+
+static cpumask_t sched_rq_watermark[WM_BITS] ____cacheline_aligned_in_smp;
+
+static DECLARE_BITMAP(sched_rq_watermark_bitmap, WM_BITS)
+____cacheline_aligned_in_smp;
+
+#define SCHED_PRIO2WATERMARK(prio) (IDLE_TASK_SCHED_PRIO - (prio) + 1)
+#define TASK_SCHED_WATERMARK(p) (SCHED_PRIO2WATERMARK((p)->bmq_idx))
+
+static inline void update_sched_rq_watermark(struct rq *rq)
+{
+	unsigned long watermark = find_first_bit(&rq->queue.bitmap[0], bmq_BITS);
+	unsigned long last_wm = rq->watermark;
+	int cpu;
+
+	BUG_ON(bmq_BITS == watermark);
+	if ((watermark = SCHED_PRIO2WATERMARK(watermark)) == last_wm)
+		return;
+
+	cpu = cpu_of(rq);
+	if (!cpumask_andnot(&sched_rq_watermark[last_wm],
+			    &sched_rq_watermark[last_wm], cpumask_of(cpu)))
+		clear_bit(last_wm, &sched_rq_watermark_bitmap[0]);
+	cpumask_set_cpu(cpu, &sched_rq_watermark[watermark]);
+	set_bit(watermark, &sched_rq_watermark_bitmap[0]);
+	rq->watermark = watermark;
+
+#ifdef CONFIG_SCHED_SMT
+	if (!static_branch_likely(&sched_smt_present))
+		return;
+
+	if (1ULL == last_wm) {
+		if (!cpumask_andnot(&sched_rq_watermark[0],
+				    &sched_rq_watermark[0], cpu_smt_mask(cpu)))
+			clear_bit(0, &sched_rq_watermark_bitmap[0]);
+	} else if (1ULL == watermark) {
+		cpumask_t tmp;
+
+		cpumask_and(&tmp, cpu_smt_mask(cpu), &sched_rq_watermark[IDLE_WM]);
+		if (cpumask_equal(&tmp, cpu_smt_mask(cpu))) {
+			cpumask_or(&sched_rq_watermark[0], cpu_smt_mask(cpu),
+				   &sched_rq_watermark[0]);
+			set_bit(0, &sched_rq_watermark_bitmap[0]);
+		}
+	}
+#endif
+}
+
+static inline int task_sched_prio(struct task_struct *p)
+{
+	if (p->prio < MAX_RT_PRIO)
+		return 0;
+
+	return (p->prio - MAX_RT_PRIO + p->boost_prio);
+}
+
+static inline void bmq_init(struct bmq *q)
+{
+	int i;
+
+	bitmap_zero(&q->bitmap[0], bmq_BITS);
+	for(i = 0; i < bmq_BITS; i++)
+		INIT_LIST_HEAD(&q->heads[i]);
+}
+
+static inline void bmq_init_idle(struct bmq *q, struct task_struct *idle)
+{
+	INIT_LIST_HEAD(&q->heads[IDLE_TASK_SCHED_PRIO]);
+	list_add(&idle->bmq_node, &q->heads[IDLE_TASK_SCHED_PRIO]);
+	set_bit(IDLE_TASK_SCHED_PRIO, &q->bitmap[0]);
+}
+
+static inline void bmq_add_task(struct task_struct *p, struct bmq *q, int idx)
+{
+	struct list_head *n;
+
+	if (likely(idx)) {
+		list_add_tail(&p->bmq_node, &q->heads[idx]);
+		return;
+	}
+
+	list_for_each(n, &q->heads[idx]) {
+		struct task_struct *t;
+
+		t = list_entry(n, struct task_struct, bmq_node);
+		if (t->prio > p->prio)
+			break;
+	}
+
+	__list_add(&p->bmq_node, n->prev, n);
+}
+
+/*
+ * This routine used in bmq scheduler only which assume the idle task in the bmq
+ */
+static inline struct task_struct *
+__rq_next_bmq_task(const struct rq *rq, unsigned long offset)
+{
+	unsigned long idx = find_next_bit(&rq->queue.bitmap[0], bmq_BITS, offset);
+	const struct list_head *head = &rq->queue.heads[idx];
+
+	BUG_ON(list_empty(head));
+	return list_first_entry(head, struct task_struct, bmq_node);
+}
+
+static inline struct task_struct *rq_first_bmq_task(struct rq *rq)
+{
+	return __rq_next_bmq_task(rq, 0UL);
+}
+
+static inline struct task_struct *
+rq_next_bmq_task(struct task_struct *p, struct rq *rq)
+{
+	unsigned long idx = p->bmq_idx;
+	const struct list_head *head = &rq->queue.heads[idx];
+
+	BUG_ON(list_empty(head));
+	if (list_is_last(&p->bmq_node, head))
+		return __rq_next_bmq_task(rq, idx + 1);
+
+	return list_next_entry(p, bmq_node);
+
+}
+
+static inline void boost_task(struct task_struct *p)
+{
+	if (p->boost_prio > -MAX_PRIORITY_ADJ)
+		p->boost_prio--;
+}
+
+static inline void deboost_task(struct task_struct *p, const int limit)
+{
+	if (p->boost_prio < limit)
+		p->boost_prio++;
+}
 
 /*
  * Context: p->pi_lock
@@ -427,84 +489,6 @@ static inline void update_rq_clock(struct rq *rq)
 	update_rq_clock_task(rq, delta);
 }
 
-static inline void update_task_priodl(struct task_struct *p)
-{
-	p->priodl = (((u64) (p->prio))<<56) | ((p->deadline)>>8);
-}
-
-/*
- * Deadline is "now" in niffies + (offset by priority). Setting the deadline
- * is the key to everything. It distributes CPU fairly amongst tasks of the
- * same nice value, it proportions CPU according to nice level, it means the
- * task that last woke up the longest ago has the earliest deadline, thus
- * ensuring that interactive tasks get low latency on wake up. The CPU
- * proportion works out to the square of the virtual deadline difference, so
- * this equation will give nice 19 3% CPU compared to nice 0.
- */
-static inline u64 task_deadline_diff(const struct task_struct *p)
-{
-	return sched_prio2deadline[TASK_USER_PRIO(p)];
-}
-
-static inline u64 static_deadline_diff(int static_prio)
-{
-	return sched_prio2deadline[USER_PRIO(static_prio)];
-}
-
-/*
- * The time_slice is only refilled when it is empty and that is when we set a
- * new deadline for non-rt tasks.
- */
-static inline void time_slice_expired(struct task_struct *p, struct rq *rq)
-{
-	p->time_slice = timeslice();
-	if (p->prio >= NORMAL_PRIO)
-		p->deadline = rq->clock + task_deadline_diff(p);
-
-	update_task_priodl(p);
-}
-
-static inline struct task_struct *rq_first_queued_task(struct rq *rq)
-{
-	struct skiplist_node *node = rq->sl_header.next[0];
-
-	if (node == &rq->sl_header)
-		return rq->idle;
-
-	return skiplist_entry(node, struct task_struct, sl_node);
-}
-
-static inline struct task_struct *rq_second_queued_task(struct rq *rq)
-{
-	struct skiplist_node *node = rq->sl_header.next[0]->next[0];
-
-	if (node == &rq->sl_header)
-		return rq->idle;
-
-	return skiplist_entry(node, struct task_struct, sl_node);
-}
-
-static inline int is_second_in_rq(struct task_struct *p, struct rq *rq)
-{
-	return (p->sl_node.prev[0]->prev[0] == &rq->sl_header);
-}
-
-static const int task_dl_hash_tbl[] = {
-/*	0           4           8           12           */
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1,
-/*	16          20          24          28           */
-	1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 4, 4, 5, 6, 7
-};
-
-static inline int
-task_deadline_level(const struct task_struct *p, const struct rq *rq)
-{
-	u64 delta = (rq->clock + sched_prio2deadline[39] - p->deadline) >> 23;
-
-	delta = min((size_t)delta, ARRAY_SIZE(task_dl_hash_tbl) - 1);
-	return task_dl_hash_tbl[delta];
-}
-
 /*
  * cmpxchg based fetch_or, macro so it works for different integer types
  */
@@ -574,168 +558,6 @@ static bool set_nr_if_polling(struct task_struct *p)
 #endif
 #endif
 
-#ifdef	CONFIG_SMP
-#ifdef	CONFIG_SMT_NICE
-static void resched_cpu_if_curr_is(int cpu, int priority)
-{
-	struct rq *rq = cpu_rq(cpu);
-
-	rcu_read_lock();
-
-	if (rcu_dereference(rq->curr)->prio != priority)
-		goto out;
-
-	if (set_nr_if_polling(rq->idle)) {
-		trace_sched_wake_idle_without_ipi(cpu);
-	} else {
-		if (!do_raw_spin_trylock(&rq->lock))
-			goto out;
-		spin_acquire(&rq->lock.dep_map, SINGLE_DEPTH_NESTING, 1, _RET_IP_);
-
-		if (priority == rq->curr->prio)
-			smp_send_reschedule(cpu);
-		/* Else CPU is not idle, do nothing here */
-
-		spin_release(&rq->lock.dep_map, 1, _RET_IP_);
-		do_raw_spin_unlock(&rq->lock);
-	}
-
-out:
-	rcu_read_unlock();
-}
-#endif /* CONFIG_SMT_NICE */
-
-static inline bool
-__update_cpumasks_bitmap(int cpu, unsigned long *plevel, unsigned long level,
-			 cpumask_t cpumasks[], unsigned long bitmap[])
-{
-	if (*plevel == level)
-		return false;
-
-	cpumask_clear_cpu(cpu, cpumasks + *plevel);
-	if (cpumask_empty(cpumasks + *plevel))
-		clear_bit(*plevel, bitmap);
-	cpumask_set_cpu(cpu, cpumasks + level);
-	set_bit(level, bitmap);
-
-	*plevel = level;
-
-	return true;
-}
-
-static inline int
-task_running_policy_level(const struct task_struct *p, const struct rq *rq)
-{
-	int prio = p->prio;
-
-	if (NORMAL_PRIO == prio)
-		return SCHED_RQ_NORMAL_0 + task_deadline_level(p, rq);
-
-	if (ISO_PRIO == prio)
-		return SCHED_RQ_ISO;
-	if (prio < MAX_RT_PRIO)
-		return SCHED_RQ_RT;
-	return PRIO_LIMIT - prio;
-}
-
-static inline void update_sched_rq_queued_masks_normal(struct rq *rq)
-{
-	struct task_struct *p = rq_first_queued_task(rq);
-
-	if (p->prio != NORMAL_PRIO)
-		return;
-
-	__update_cpumasks_bitmap(cpu_of(rq), &rq->queued_level,
-				 task_running_policy_level(p, rq),
-				 &sched_rq_queued_masks[0],
-				 &sched_rq_queued_masks_bitmap[0]);
-}
-
-#ifdef CONFIG_SMT_NICE
-static inline void update_sched_cpu_psg_mask(const int cpu)
-{
-	cpumask_t tmp;
-
-	cpumask_or(&tmp, &sched_rq_queued_masks[SCHED_RQ_EMPTY],
-		   &sched_rq_queued_masks[SCHED_RQ_IDLE]);
-	cpumask_and(&tmp, &tmp, cpu_smt_mask(cpu));
-	if (cpumask_equal(&tmp, cpu_smt_mask(cpu)))
-		cpumask_or(&sched_cpu_psg_mask, &sched_cpu_psg_mask,
-			   cpu_smt_mask(cpu));
-	else
-		cpumask_andnot(&sched_cpu_psg_mask, &sched_cpu_psg_mask,
-			       cpu_smt_mask(cpu));
-}
-#endif
-
-static inline void update_sched_rq_queued_masks(struct rq *rq)
-{
-	int cpu = cpu_of(rq);
-	struct task_struct *p = rq_first_queued_task(rq);
-	unsigned long level;
-#ifdef CONFIG_SCHED_SMT
-	unsigned long last_level = rq->queued_level;
-#endif
-
-	level = task_running_policy_level(p, rq);
-	sched_rq_prio[cpu] = p->prio;
-
-	if (!__update_cpumasks_bitmap(cpu, &rq->queued_level, level,
-				      &sched_rq_queued_masks[0],
-				      &sched_rq_queued_masks_bitmap[0]))
-		return;
-
-#ifdef CONFIG_SCHED_SMT
-	if (cpu == per_cpu(sched_sibling_cpu, cpu))
-		return;
-
-	if (SCHED_RQ_EMPTY == last_level) {
-		cpumask_andnot(&sched_cpu_sg_idle_mask, &sched_cpu_sg_idle_mask,
-			       cpu_smt_mask(cpu));
-	} else if (SCHED_RQ_EMPTY == level) {
-		cpumask_t tmp;
-
-		cpumask_and(&tmp, cpu_smt_mask(cpu),
-			    &sched_rq_queued_masks[SCHED_RQ_EMPTY]);
-		if (cpumask_equal(&tmp, cpu_smt_mask(cpu)))
-			cpumask_or(&sched_cpu_sg_idle_mask, cpu_smt_mask(cpu),
-				   &sched_cpu_sg_idle_mask);
-	}
-
-#ifdef CONFIG_SMT_NICE
-	if (level <= SCHED_RQ_IDLE && last_level > SCHED_RQ_IDLE) {
-		cpumask_clear_cpu(per_cpu(sched_sibling_cpu, cpu),
-				  &sched_smt_supressed_mask);
-		update_sched_cpu_psg_mask(cpu);
-		resched_cpu_if_curr_is(per_cpu(sched_sibling_cpu, cpu), PRIO_LIMIT);
-	} else if (last_level <= SCHED_RQ_IDLE && level > SCHED_RQ_IDLE) {
-		cpumask_set_cpu(per_cpu(sched_sibling_cpu, cpu),
-				&sched_smt_supressed_mask);
-		update_sched_cpu_psg_mask(cpu);
-		resched_cpu_if_curr_is(per_cpu(sched_sibling_cpu, cpu), IDLE_PRIO);
-	}
-#endif /* CONFIG_SMT_NICE */
-#endif
-}
-
-static inline void update_sched_rq_pending_masks(struct rq *rq)
-{
-	unsigned long level;
-	struct task_struct *p = rq_second_queued_task(rq);
-
-	level = task_running_policy_level(p, rq);
-
-	__update_cpumasks_bitmap(cpu_of(rq), &rq->pending_level, level,
-				 &sched_rq_pending_masks[0],
-				 &sched_rq_pending_masks_bitmap[0]);
-}
-
-#else /* CONFIG_SMP */
-static inline void update_sched_rq_queued_masks(struct rq *rq) {}
-static inline void update_sched_rq_queued_masks_normal(struct rq *rq) {}
-static inline void update_sched_rq_pending_masks(struct rq *rq) {}
-#endif
-
 #ifdef CONFIG_NO_HZ_FULL
 /*
  * Tick may be needed by tasks in the runqueue depending on their policy and
@@ -775,81 +597,22 @@ static inline void dequeue_task(struct task_struct *p, struct rq *rq, int flags)
 {
 	lockdep_assert_held(&rq->lock);
 
-	WARN_ONCE(task_rq(p) != rq, "pds: dequeue task reside on cpu%d from cpu%d\n",
+	WARN_ONCE(task_rq(p) != rq, "bmq: dequeue task reside on cpu%d from cpu%d\n",
 		  task_cpu(p), cpu_of(rq));
-	if (skiplist_del_init(&rq->sl_header, &p->sl_node)) {
-		update_sched_rq_queued_masks(rq);
-		update_sched_rq_pending_masks(rq);
-	} else if (is_second_in_rq(p, rq))
-		update_sched_rq_pending_masks(rq);
-	rq->nr_running--;
+
+	list_del(&p->bmq_node);
+	if (list_empty(&rq->queue.heads[p->bmq_idx])) {
+		clear_bit(p->bmq_idx, &rq->queue.bitmap[0]);
+		update_sched_rq_watermark(rq);
+	}
+	if (1 == --rq->nr_running)
+		cpumask_clear_cpu(cpu_of(rq), &sched_rq_pending_mask);
 
 	sched_update_tick_dependency(rq);
 	psi_dequeue(p, flags & DEQUEUE_SLEEP);
 
 	sched_info_dequeued(rq, p);
 }
-
-/*
- * To determine if it's safe for a task of SCHED_IDLE to actually run as
- * an idle task, we ensure none of the following conditions are met.
- */
-static inline bool idleprio_suitable(struct task_struct *p)
-{
-	return (!freezing(p) && !signal_pending(p) &&
-		!(task_contributes_to_load(p)) && !(p->flags & (PF_EXITING)));
-}
-
-/*
- * pds_skiplist_random_level -- Returns a pseudo-random level number for skip
- * list node which is used in PDS run queue.
- *
- * In current implementation, based on testing, the first 8 bits in microseconds
- * of niffies are suitable for random level population.
- * find_first_bit() is used to satisfy p = 0.5 between each levels, and there
- * should be platform hardware supported instruction(known as ctz/clz) to speed
- * up this function.
- * The skiplist level for a task is populated when task is created and doesn't
- * change in task's life time. When task is being inserted into run queue, this
- * skiplist level is set to task's sl_node->level, the skiplist insert function
- * may change it based on current level of the skip lsit.
- */
-static inline int pds_skiplist_random_level(const struct task_struct *p)
-{
-	long unsigned int randseed;
-
-	/*
-	 * 1. Some architectures don't have better than microsecond resolution
-	 * so mask out ~microseconds as a factor of the random seed for skiplist
-	 * insertion.
-	 * 2. Use address of task structure pointer as another factor of the
-	 * random seed for task burst forking scenario.
-	 */
-	randseed = (task_rq(p)->clock ^ (long unsigned int)p) >> 10;
-
-	return find_first_bit(&randseed, NUM_SKIPLIST_LEVEL - 1);
-}
-
-/**
- * pds_skiplist_task_search -- search function used in PDS run queue skip list
- * node insert operation.
- * @it: iterator pointer to the node in the skip list
- * @node: pointer to the skiplist_node to be inserted
- *
- * Returns true if key of @it is less or equal to key value of @node, otherwise
- * false.
- */
-static inline bool
-pds_skiplist_task_search(struct skiplist_node *it, struct skiplist_node *node)
-{
-	return (skiplist_entry(it, struct task_struct, sl_node)->priodl <=
-		skiplist_entry(node, struct task_struct, sl_node)->priodl);
-}
-
-/*
- * Define the skip list insert function for PDS
- */
-DEFINE_SKIPLIST_INSERT_FUNC(pds_skiplist_insert, pds_skiplist_task_search);
 
 /*
  * Adding task to the runqueue.
@@ -860,16 +623,15 @@ static inline void enqueue_task(struct task_struct *p, struct rq *rq, int flags)
 {
 	lockdep_assert_held(&rq->lock);
 
-	WARN_ONCE(task_rq(p) != rq, "pds: enqueue task reside on cpu%d to cpu%d\n",
+	WARN_ONCE(task_rq(p) != rq, "bmq: enqueue task reside on cpu%d to cpu%d\n",
 		  task_cpu(p), cpu_of(rq));
 
-	p->sl_node.level = p->sl_level;
-	if (pds_skiplist_insert(&rq->sl_header, &p->sl_node)) {
-		update_sched_rq_queued_masks(rq);
-		update_sched_rq_pending_masks(rq);
-	} else if (is_second_in_rq(p, rq))
-		update_sched_rq_pending_masks(rq);
-	rq->nr_running++;
+	p->bmq_idx = task_sched_prio(p);
+	bmq_add_task(p, &rq->queue, p->bmq_idx);
+	set_bit(p->bmq_idx, &rq->queue.bitmap[0]);
+	update_sched_rq_watermark(rq);
+	if (2 == ++rq->nr_running)
+		cpumask_set_cpu(cpu_of(rq), &sched_rq_pending_mask);
 
 	sched_update_tick_dependency(rq);
 
@@ -887,22 +649,43 @@ static inline void enqueue_task(struct task_struct *p, struct rq *rq, int flags)
 
 static inline void requeue_task(struct task_struct *p, struct rq *rq)
 {
-	bool b_first, b_second;
+	int idx = task_sched_prio(p);
 
 	lockdep_assert_held(&rq->lock);
-
-	WARN_ONCE(task_rq(p) != rq, "pds: cpu[%d] requeue task reside on cpu%d\n",
+	WARN_ONCE(task_rq(p) != rq, "bmq: cpu[%d] requeue task reside on cpu%d\n",
 		  cpu_of(rq), task_cpu(p));
 
-	b_first = skiplist_del_init(&rq->sl_header, &p->sl_node);
-	b_second = is_second_in_rq(p, rq);
+	list_del(&p->bmq_node);
+	bmq_add_task(p, &rq->queue, idx);
+	if (idx != p->bmq_idx) {
+		if (list_empty(&rq->queue.heads[p->bmq_idx]))
+			clear_bit(p->bmq_idx, &rq->queue.bitmap[0]);
+		p->bmq_idx = idx;
+		set_bit(p->bmq_idx, &rq->queue.bitmap[0]);
+		update_sched_rq_watermark(rq);
+	}
+}
 
-	p->sl_node.level = p->sl_level;
-	if (pds_skiplist_insert(&rq->sl_header, &p->sl_node) || b_first) {
-		update_sched_rq_queued_masks(rq);
-		update_sched_rq_pending_masks(rq);
-	} else if (is_second_in_rq(p, rq) || b_second)
-		update_sched_rq_pending_masks(rq);
+static inline int requeue_task_lazy(struct task_struct *p, struct rq *rq)
+{
+	int idx = task_sched_prio(p);
+
+	lockdep_assert_held(&rq->lock);
+	WARN_ONCE(task_rq(p) != rq, "bmq: cpu[%d] requeue task lazy reside on cpu%d\n",
+		  cpu_of(rq), task_cpu(p));
+
+	if (idx == p->bmq_idx)
+		return 0;
+
+	list_del(&p->bmq_node);
+	bmq_add_task(p, &rq->queue, idx);
+	if (list_empty(&rq->queue.heads[p->bmq_idx]))
+		clear_bit(p->bmq_idx, &rq->queue.bitmap[0]);
+	p->bmq_idx = idx;
+	set_bit(p->bmq_idx, &rq->queue.bitmap[0]);
+	update_sched_rq_watermark(rq);
+
+	return 1;
 }
 
 /*
@@ -939,13 +722,12 @@ static inline void check_preempt_curr(struct rq *rq, struct task_struct *p)
 {
 	struct task_struct *curr = rq->curr;
 
-	if (curr->prio == PRIO_LIMIT)
+	if (MAX_PRIO == curr->prio)
 		resched_curr(rq);
 
-	if (task_running_idle(p))
-		return;
+	/* ToDo: Don't preempt for IDLE/BATCH policy */
 
-	if (p->priodl < curr->priodl)
+	if (rq_first_bmq_task(rq) == p)
 		resched_curr(rq);
 }
 
@@ -988,7 +770,7 @@ static enum hrtimer_restart hrtick(struct hrtimer *timer)
 static inline int hrtick_enabled(struct rq *rq)
 {
 	/**
-	 * PDS doesn't support sched_feat yet
+	 * BMQ doesn't support sched_feat yet
 	if (!sched_feat(HRTICK))
 		return 0;
 	*/
@@ -1078,15 +860,6 @@ static void hrtick_rq_init(struct rq *rq)
 	hrtimer_init(&rq->hrtick_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	rq->hrtick_timer.function = hrtick;
 }
-
-static inline int rq_dither(struct rq *rq)
-{
-	if ((rq->clock - rq->last_tick > HALF_JIFFY_NS) || hrtick_enabled(rq))
-		return 0;
-
-	return HALF_JIFFY_NS;
-}
-
 #else	/* CONFIG_SCHED_HRTICK */
 static inline int hrtick_enabled(struct rq *rq)
 {
@@ -1100,27 +873,14 @@ static inline void hrtick_clear(struct rq *rq)
 static inline void hrtick_rq_init(struct rq *rq)
 {
 }
-
-static inline int rq_dither(struct rq *rq)
-{
-	return (rq->clock - rq->last_tick > HALF_JIFFY_NS)? 0:HALF_JIFFY_NS;
-}
 #endif	/* CONFIG_SCHED_HRTICK */
 
 static inline int normal_prio(struct task_struct *p)
 {
-	static const int policy_to_prio[] = {
-		NORMAL_PRIO,	/* SCHED_NORMAL */
-		0,		/* SCHED_FIFO */
-		0,		/* SCHED_RR */
-		IDLE_PRIO,	/* SCHED_BATCH */
-		ISO_PRIO,	/* SCHED_ISO */
-		IDLE_PRIO	/* SCHED_IDLE */
-	};
-
 	if (task_has_rt_policy(p))
 		return MAX_RT_PRIO - 1 - p->rt_priority;
-	return policy_to_prio[p->policy];
+
+	return p->static_prio + MAX_PRIORITY_ADJ;
 }
 
 /*
@@ -1640,68 +1400,19 @@ static inline int best_mask_cpu(int cpu, cpumask_t *cpumask)
  * @only_preempt_low_policy: indicate only preempt rq running low policy than @p
  */
 static inline int
-task_preemptible_rq_idle(struct task_struct *p, cpumask_t *chk_mask)
-{
-	cpumask_t tmp;
-
-#ifdef CONFIG_SCHED_SMT
-	if (cpumask_and(&tmp, chk_mask, &sched_cpu_sg_idle_mask))
-		return best_mask_cpu(task_cpu(p), &tmp);
-#endif
-
-#ifdef CONFIG_SMT_NICE
-	/* Only ttwu on cpu which is not smt supressed */
-	if (cpumask_andnot(&tmp, chk_mask, &sched_smt_supressed_mask)) {
-		cpumask_t t;
-		if (cpumask_and(&t, &tmp, &sched_rq_queued_masks[SCHED_RQ_EMPTY]))
-			return best_mask_cpu(task_cpu(p), &t);
-		return best_mask_cpu(task_cpu(p), &tmp);
-	}
-#endif
-
-	if (cpumask_and(&tmp, chk_mask, &sched_rq_queued_masks[SCHED_RQ_EMPTY]))
-		return best_mask_cpu(task_cpu(p), &tmp);
-	return best_mask_cpu(task_cpu(p), chk_mask);
-}
-
-static inline int
 task_preemptible_rq(struct task_struct *p, cpumask_t *chk_mask,
-		    int preempt_level)
+		    unsigned long preempt_level)
 {
 	cpumask_t tmp;
-	int level;
+	unsigned long level;
 
-#ifdef CONFIG_SCHED_SMT
-#ifdef CONFIG_SMT_NICE
-	if (cpumask_and(&tmp, chk_mask, &sched_cpu_psg_mask))
-		return best_mask_cpu(task_cpu(p), &tmp);
-#else
-	if (cpumask_and(&tmp, chk_mask, &sched_cpu_sg_idle_mask))
-		return best_mask_cpu(task_cpu(p), &tmp);
-#endif
-#endif
-
-	level = find_first_bit(sched_rq_queued_masks_bitmap,
-			       NR_SCHED_RQ_QUEUED_LEVEL);
-
+	level = find_first_bit(&sched_rq_watermark_bitmap[0], WM_BITS);
 	while (level < preempt_level) {
-		if (cpumask_and(&tmp, chk_mask, &sched_rq_queued_masks[level]))
+		if (cpumask_and(&tmp, chk_mask, &sched_rq_watermark[level]))
 			return best_mask_cpu(task_cpu(p), &tmp);
 
-		level = find_next_bit(sched_rq_queued_masks_bitmap,
-				      NR_SCHED_RQ_QUEUED_LEVEL,
+		level = find_next_bit(&sched_rq_watermark_bitmap[0], WM_BITS,
 				      level + 1);
-	}
-
-	if (unlikely(SCHED_RQ_RT == level &&
-		     level == preempt_level &&
-		     cpumask_and(&tmp, chk_mask,
-				 &sched_rq_queued_masks[SCHED_RQ_RT]))) {
-		unsigned int cpu;
-
-		for_each_cpu (cpu, &tmp)
-			if (p->prio < sched_rq_prio[cpu])
-				return cpu;
 	}
 
 	return best_mask_cpu(task_cpu(p), chk_mask);
@@ -1721,19 +1432,8 @@ static inline int select_task_rq(struct task_struct *p)
 	if (unlikely(!cpumask_and(&chk_mask, &p->cpus_allowed, cpu_online_mask)))
 		return select_fallback_rq(task_cpu(p), p);
 
-	/* Check IDLE tasks suitable to run normal priority */
-	if (idleprio_task(p)) {
-		if (idleprio_suitable(p)) {
-			p->prio = p->normal_prio;
-			update_task_priodl(p);
-			return task_preemptible_rq_idle(p, &chk_mask);
-		}
-		p->prio = NORMAL_PRIO;
-		update_task_priodl(p);
-	}
-
 	return task_preemptible_rq(p, &chk_mask,
-				   task_running_policy_level(p, this_rq()));
+				   SCHED_PRIO2WATERMARK(task_sched_prio(p)));
 }
 #else /* CONFIG_SMP */
 static inline int select_task_rq(struct task_struct *p)
@@ -1756,7 +1456,7 @@ ttwu_stat(struct task_struct *p, int cpu, int wake_flags)
 	if (cpu == rq->cpu)
 		__schedstat_inc(rq->ttwu_local);
 	else {
-		/** PDS ToDo:
+		/** BMQ ToDo:
 		 * How to do ttwu_wake_remote
 		 */
 	}
@@ -1770,7 +1470,7 @@ static inline void ttwu_activate(struct task_struct *p, struct rq *rq)
 	activate_task(p, rq);
 
 	/*
-	 * if a worker is waking up, notify workqueue. Note that on PDS, we
+	 * if a worker is waking up, notify workqueue. Note that on BMQ, we
 	 * don't really know what CPU it will be, so we fake it for
 	 * wq_worker_waking_up :/
 	 */
@@ -2005,16 +1705,11 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 
 	p->sched_contributes_to_load = !!task_contributes_to_load(p);
 	p->state = TASK_WAKING;
+	boost_task(p);
 
 	if (p->in_iowait) {
 		delayacct_blkio_end(p);
 		atomic_dec(&task_rq(p)->nr_iowait);
-	}
-
-	if (SCHED_ISO == p->policy && ISO_PRIO != p->prio) {
-		p->prio = ISO_PRIO;
-		p->deadline = 0UL;
-		update_task_priodl(p);
 	}
 
 	cpu = select_task_rq(p);
@@ -2083,11 +1778,11 @@ static void try_to_wake_up_local(struct task_struct *p)
 	trace_sched_waking(p);
 
 	if (!task_on_rq_queued(p)) {
+		boost_task(p);
 		if (p->in_iowait) {
 			delayacct_blkio_end(p);
 			atomic_dec(&task_rq(p)->nr_iowait);
 		}
-
 		ttwu_activate(p, rq);
 	}
 
@@ -2133,15 +1828,12 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 #ifdef CONFIG_PREEMPT_NOTIFIERS
 	INIT_HLIST_HEAD(&p->preempt_notifiers);
 #endif
-	/* Should be reset in fork.c but done here for ease of PDS patching */
+	/* Should be reset in fork.c but done here for ease of BMQ patching */
 	p->on_cpu =
 	p->on_rq =
 	p->utime =
 	p->stime =
 	p->sched_time = 0;
-
-	p->sl_level = pds_skiplist_random_level(p);
-	INIT_SKIPLIST_NODE(&p->sl_node);
 
 	/*
 	 * We mark the process as NEW here. This guarantees that
@@ -2166,6 +1858,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 		} else if (PRIO_TO_NICE(p->static_prio) < 0)
 			p->static_prio = NICE_TO_PRIO(0);
 
+		p->boost_prio = 0;
 		p->prio = p->normal_prio = normal_prio(p);
 
 		/*
@@ -2184,15 +1877,13 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	rq->curr->time_slice /= 2;
 	p->time_slice = rq->curr->time_slice;
 #ifdef CONFIG_SCHED_HRTICK
-	hrtick_start(rq, US_TO_NS(rq->curr->time_slice));
+	hrtick_start(rq, rq->curr->time_slice);
 #endif
 
-	if (p->time_slice < RESCHED_US) {
-		update_rq_clock(rq);
-		time_slice_expired(p, rq);
+	if (p->time_slice < RESCHED_NS) {
+		p->time_slice = SCHED_TIMESLICE_NS;
 		resched_curr(rq);
-	} else
-		update_task_priodl(p);
+	}
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
 
 	/*
@@ -2780,7 +2471,7 @@ DEFINE_PER_CPU(struct kernel_cpustat, kernel_cpustat);
 EXPORT_PER_CPU_SYMBOL(kstat);
 EXPORT_PER_CPU_SYMBOL(kernel_cpustat);
 
-static inline void pds_update_curr(struct rq *rq, struct task_struct *p)
+static inline void update_curr(struct rq *rq, struct task_struct *p)
 {
 	s64 ns = rq->clock_task - p->last_ran;
 
@@ -2788,7 +2479,7 @@ static inline void pds_update_curr(struct rq *rq, struct task_struct *p)
 	account_group_exec_runtime(p, ns);
 
 	/* time_slice accounting is done in usecs to avoid overflow on 32bit */
-	p->time_slice -= NS_TO_US(ns);
+	p->time_slice -= ns;
 	p->last_ran = rq->clock_task;
 }
 
@@ -2828,7 +2519,7 @@ unsigned long long task_sched_runtime(struct task_struct *p)
 	 */
 	if (p == rq->curr && task_on_rq_queued(p)) {
 		update_rq_clock(rq);
-		pds_update_curr(rq, p);
+		update_curr(rq, p);
 	}
 	ns = tsk_seruntime(p);
 	task_access_unlock_irqrestore(p, lock, &flags);
@@ -2837,37 +2528,27 @@ unsigned long long task_sched_runtime(struct task_struct *p)
 }
 
 /* This manages tasks that have run out of timeslice during a scheduler_tick */
-static inline void pds_scheduler_task_tick(struct rq *rq)
+static inline void scheduler_task_tick(struct rq *rq)
 {
 	struct task_struct *p = rq->curr;
 
 	if (is_idle_task(p))
 		return;
 
-	pds_update_curr(rq, p);
-
+	update_curr(rq, p);
 	cpufreq_update_util(rq, 0);
 
 	/*
-	 * Tasks that were scheduled in the first half of a tick are not
-	 * allowed to run into the 2nd half of the next tick if they will
-	 * run out of time slice in the interim. Otherwise, if they have
-	 * less than RESCHED_US μs of time slice left they will be rescheduled.
+	 * Tasks have less than RESCHED_NS of time slice left they will be
+	 * rescheduled.
 	 */
-	if (p->time_slice - rq->dither >= RESCHED_US)
+	if (p->time_slice >= RESCHED_NS)
 		return;
-
-	/**
-	 * p->time_slice < RESCHED_US. We will modify task_struct under
-	 * rq lock as p is rq->curr
-	 */
 	__set_tsk_resched(p);
 }
 
-#ifdef CONFIG_SMP
-
 #ifdef CONFIG_SCHED_SMT
-static int active_load_balance_cpu_stop(void *data)
+static inline int active_load_balance_cpu_stop(void *data)
 {
 	struct rq *rq = this_rq();
 	struct task_struct *p = data;
@@ -2884,7 +2565,7 @@ static int active_load_balance_cpu_stop(void *data)
 	 * _something_ may have changed the task, double check again
 	 */
 	if (task_on_rq_queued(p) && task_rq(p) == rq &&
-	    (cpu = cpumask_any_and(&p->cpus_allowed, &sched_cpu_sg_idle_mask)) < nr_cpu_ids)
+	    (cpu = cpumask_any_and(&p->cpus_allowed, &sched_rq_watermark[0])) < nr_cpu_ids)
 		rq = __migrate_task(rq, p, cpu);
 
 	raw_spin_unlock(&rq->lock);
@@ -2895,18 +2576,19 @@ static int active_load_balance_cpu_stop(void *data)
 	return 0;
 }
 
-/* pds_sg_balance_trigger - trigger slibing group balance for @cpu */
-static void pds_sg_balance_trigger(const int cpu)
+/* sg_balance_trigger - trigger slibing group balance for @cpu */
+static inline int sg_balance_trigger(const int cpu)
 {
 	struct rq *rq = cpu_rq(cpu);
 	unsigned long flags;
 	struct task_struct *curr;
 
 	if (!raw_spin_trylock_irqsave(&rq->lock, flags))
-		return;
+		return 0;
 	curr = rq->curr;
 	if (!is_idle_task(curr) &&
-	    cpumask_intersects(&curr->cpus_allowed, &sched_cpu_sg_idle_mask)) {
+	    1 == rq->nr_running &&
+	    cpumask_intersects(&curr->cpus_allowed, &sched_rq_watermark[0])) {
 		int active_balance = 0;
 
 		if (likely(!rq->active_balance)) {
@@ -2916,44 +2598,47 @@ static void pds_sg_balance_trigger(const int cpu)
 
 		raw_spin_unlock_irqrestore(&rq->lock, flags);
 
-		if (likely(active_balance))
+		if (likely(active_balance)) {
 			stop_one_cpu_nowait(cpu, active_load_balance_cpu_stop,
 					    curr, &rq->active_balance_work);
+			return 1;
+		}
 	} else
 		raw_spin_unlock_irqrestore(&rq->lock, flags);
+	return 0;
 }
 
 /*
- * pds_sg_balance_check - slibing group balance check for run queue @rq
+ * sg_balance_check - slibing group balance check for run queue @rq
  */
-static inline void pds_sg_balance_check(const struct rq *rq)
+static inline void sg_balance_check(const struct rq *rq)
 {
 	cpumask_t chk;
-	int i;
+	int i, cpu = cpu_of(rq);
 
 	/* Only online cpu will do sg balance checking */
 	if (unlikely(!rq->online))
 		return;
 
 	/* Only cpu in slibing idle group will do the checking */
-	if (!cpumask_test_cpu(cpu_of(rq), &sched_cpu_sg_idle_mask))
+	if (!cpumask_test_cpu(cpu, &sched_rq_watermark[0]))
 		return;
 
 	/* Find potential cpus which can migrate the currently running task */
-	if (!cpumask_andnot(&chk, &sched_rq_pending_masks[SCHED_RQ_EMPTY],
-			    &sched_rq_queued_masks[SCHED_RQ_EMPTY]))
+	if (!cpumask_andnot(&chk, cpu_online_mask, &sched_rq_pending_mask) ||
+	    !cpumask_andnot(&chk, &chk, &sched_rq_watermark[IDLE_WM]))
 		return;
 
-	for_each_cpu(i, &chk) {
+	for_each_cpu_wrap(i, &chk, cpu) {
 		/* skip the cpu which has idle slibing cpu */
-		if (cpumask_test_cpu(per_cpu(sched_sibling_cpu, i),
-				     &sched_rq_queued_masks[SCHED_RQ_EMPTY]))
+		if (cpumask_intersects(cpu_smt_mask(i),
+				       &sched_rq_watermark[IDLE_WM]))
 			continue;
-		pds_sg_balance_trigger(i);
+		if (sg_balance_trigger(i))
+			return;
 	}
 }
 #endif /* CONFIG_SCHED_SMT */
-#endif /* CONFIG_SMP */
 
 /*
  * This function gets called by the timer code, with HZ frequency.
@@ -2969,8 +2654,7 @@ void scheduler_tick(void)
 	raw_spin_lock(&rq->lock);
 	update_rq_clock(rq);
 
-	pds_scheduler_task_tick(rq);
-	update_sched_rq_queued_masks_normal(rq);
+	scheduler_task_tick(rq);
 	calc_global_load_tick(rq);
 	psi_task_tick(rq);
 
@@ -3022,8 +2706,7 @@ static void sched_tick_remote(struct work_struct *work)
 	 * amount of time.
 	 */
 	WARN_ON_ONCE(delta > (u64)NSEC_PER_SEC * 3);
-	pds_scheduler_task_tick(rq);
-	update_sched_rq_queued_masks_normal(rq);
+	scheduler_task_tick(rq);
 
 out_unlock:
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
@@ -3157,30 +2840,25 @@ static inline void preempt_latency_stop(int val) { }
 #endif
 
 /*
- * Timeslices below RESCHED_US are considered as good as expired as there's no
- * point rescheduling when there's so little time left. SCHED_BATCH tasks
- * have been flagged be not latency sensitive and likely to be fully CPU
- * bound so every time they're rescheduled they have their time_slice
- * refilled, but get a new later deadline to have little effect on
- * SCHED_NORMAL tasks.
-
+ * Timeslices below RESCHED_NS are considered as good as expired as there's no
+ * point rescheduling when there's so little time left.
  */
-static inline void check_deadline(struct task_struct *p, struct rq *rq)
+static inline void check_curr(struct task_struct *p, struct rq *rq)
 {
 	if (rq->idle == p)
 		return;
 
-	pds_update_curr(rq, p);
+	update_curr(rq, p);
 
-	if (p->time_slice < RESCHED_US) {
-		time_slice_expired(p, rq);
-		if (SCHED_ISO == p->policy && ISO_PRIO == p->prio) {
-			p->prio = NORMAL_PRIO;
-			p->deadline = rq->clock + task_deadline_diff(p);
-			update_task_priodl(p);
-		}
-		if (SCHED_FIFO != p->policy && task_on_rq_queued(p))
+	if (p->time_slice < RESCHED_NS) {
+		p->time_slice = SCHED_TIMESLICE_NS;
+		if (SCHED_FIFO != p->policy && task_on_rq_queued(p)) {
+			if (SCHED_RR != p->policy &&
+			    (p->ts_deboost || ts_overrun(p, rq)))
+				deboost_task(p, MAX_PRIORITY_ADJ);
 			requeue_task(p, rq);
+		}
+		p->ts_deboost = 0;
 	}
 }
 
@@ -3193,22 +2871,19 @@ static inline void check_deadline(struct task_struct *p, struct rq *rq)
  * SCHED_RQ_NR_MIGRATION to @dest_cpu
  */
 static inline int
-migrate_pending_tasks(struct rq *rq, struct rq *dest_rq, int filter_prio)
+migrate_pending_tasks(struct rq *rq, struct rq *dest_rq)
 {
-	struct task_struct *p;
+	struct task_struct *p, *next;
 	int dest_cpu = cpu_of(dest_rq);
 	int nr_migrated = 0;
 	int nr_tries = min((rq->nr_running + 1) / 2, SCHED_RQ_NR_MIGRATION);
-	struct skiplist_node *node = rq->sl_header.next[0];
 
-	while (nr_tries && node != &rq->sl_header) {
-		p = skiplist_entry(node, struct task_struct, sl_node);
-		node = node->next[0];
-
+	for (p = rq_first_bmq_task(rq);
+	     nr_tries && p != rq->idle;
+	     p = rq_next_bmq_task(p, rq)) {
 		if (task_running(p))
 			continue;
-		if (p->prio >= filter_prio)
-			break;
+		next = rq_next_bmq_task(p, rq);
 		if (cpumask_test_cpu(dest_cpu, &p->cpus_allowed)) {
 			detach_task(rq, p, dest_cpu);
 			attach_task(dest_rq, p);
@@ -3216,78 +2891,56 @@ migrate_pending_tasks(struct rq *rq, struct rq *dest_rq, int filter_prio)
 		}
 		nr_tries--;
 		/* make a jump */
-		if (node == &rq->sl_header)
+		if (next == rq->idle)
 			break;
-		node = node->next[0];
+		p = next;
 	}
 
 	return nr_migrated;
 }
 
 static inline int
-take_queued_task_cpumask(struct rq *rq, cpumask_t *chk_mask, int filter_prio)
+lock_and_migrate_pending_tasks(struct rq *src_rq, struct rq *rq)
 {
-	int src_cpu;
+	int nr_migrated;
 
-	for_each_cpu(src_cpu, chk_mask) {
-		int nr_migrated;
-		struct rq *src_rq = cpu_rq(src_cpu);
+	if (!do_raw_spin_trylock(&src_rq->lock))
+		return 0;
+	spin_acquire(&src_rq->lock.dep_map, SINGLE_DEPTH_NESTING, 1, _RET_IP_);
 
-		if (!do_raw_spin_trylock(&src_rq->lock)) {
-			if (PRIO_LIMIT == filter_prio)
-				continue;
-			return 0;
-		}
-		spin_acquire(&src_rq->lock.dep_map, SINGLE_DEPTH_NESTING, 1, _RET_IP_);
+	update_rq_clock(src_rq);
+	nr_migrated = migrate_pending_tasks(src_rq, rq);
 
-		update_rq_clock(src_rq);
-		nr_migrated = migrate_pending_tasks(src_rq, rq, filter_prio);
+	spin_release(&src_rq->lock.dep_map, 1, _RET_IP_);
+	do_raw_spin_unlock(&src_rq->lock);
 
-		spin_release(&src_rq->lock.dep_map, 1, _RET_IP_);
-		do_raw_spin_unlock(&src_rq->lock);
-
-		if (nr_migrated || PRIO_LIMIT != filter_prio)
-			return nr_migrated;
-	}
-	return 0;
+	return nr_migrated;
 }
 
-static inline int take_other_rq_task(struct rq *rq, int cpu, int filter_prio)
+static inline int
+take_other_rq_tasks(struct rq *rq, int cpu, unsigned long watermark)
 {
 	struct cpumask *affinity_mask, *end;
 	struct cpumask chk;
 
-	if (PRIO_LIMIT == filter_prio) {
-		cpumask_complement(&chk, &sched_rq_pending_masks[SCHED_RQ_EMPTY]);
-#ifdef CONFIG_SMT_NICE
-		{
-		/* also try to take IDLE priority tasks from smt supressed cpu */
-		struct cpumask t;
-		if (cpumask_and(&t, &sched_smt_supressed_mask,
-				&sched_rq_queued_masks[SCHED_RQ_IDLE]))
-			cpumask_or(&chk, &chk, &t);
-		}
-#endif
-	} else if (NORMAL_PRIO == filter_prio) {
-		cpumask_or(&chk, &sched_rq_pending_masks[SCHED_RQ_RT],
-			   &sched_rq_pending_masks[SCHED_RQ_ISO]);
-	} else if (IDLE_PRIO == filter_prio) {
-		cpumask_complement(&chk, &sched_rq_pending_masks[SCHED_RQ_EMPTY]);
-		cpumask_andnot(&chk, &chk, &sched_rq_pending_masks[SCHED_RQ_IDLE]);
-	} else
-		cpumask_copy(&chk, &sched_rq_pending_masks[SCHED_RQ_RT]);
+	if (watermark > IDLE_WM)
+		return 0;
 
-	if (cpumask_empty(&chk))
+	if (!cpumask_and(&chk, &sched_rq_pending_mask, cpu_online_mask))
 		return 0;
 
 	affinity_mask = per_cpu(sched_cpu_llc_start_mask, cpu);
 	end = per_cpu(sched_cpu_affinity_chk_end_masks, cpu);
 	do {
 		struct cpumask tmp;
+		int i;
 
-		if (cpumask_and(&tmp, &chk, affinity_mask) &&
-		    take_queued_task_cpumask(rq, &tmp, filter_prio))
-			return 1;
+		if (unlikely(!cpumask_and(&tmp, &chk, affinity_mask)))
+			continue;
+
+		for_each_cpu_wrap(i, &tmp, cpu)
+			if (lock_and_migrate_pending_tasks(cpu_rq(i), rq))
+				return 1;
 	} while (++affinity_mask < end);
 
 	return 0;
@@ -3297,24 +2950,13 @@ static inline int take_other_rq_task(struct rq *rq, int cpu, int filter_prio)
 static inline struct task_struct *
 choose_next_task(struct rq *rq, int cpu, struct task_struct *prev)
 {
-	struct task_struct *next = rq_first_queued_task(rq);
-
-#ifdef CONFIG_SMT_NICE
-	if (cpumask_test_cpu(cpu, &sched_smt_supressed_mask)) {
-		if (next->prio >= IDLE_PRIO) {
-			if (rq->online &&
-			    take_other_rq_task(rq, cpu, IDLE_PRIO))
-				return rq_first_queued_task(rq);
-			return rq->idle;
-		}
-	}
-#endif
+	struct task_struct *next = rq_first_bmq_task(rq);
 
 #ifdef	CONFIG_SMP
 	if (likely(rq->online))
-		if (take_other_rq_task(rq, cpu, next->prio)) {
+		if (take_other_rq_tasks(rq, cpu, TASK_SCHED_WATERMARK(next))) {
 			resched_curr(rq);
-			return rq_first_queued_task(rq);
+			return rq_first_bmq_task(rq);
 		}
 #endif
 	return next;
@@ -3385,12 +3027,12 @@ static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 {
 	p->last_ran = rq->clock_task;
 
+	if (unlikely(SCHED_TIMESLICE_NS == p->time_slice))
+		rq->last_ts_switch = rq->clock;
 #ifdef CONFIG_HIGH_RES_TIMERS
 	if (p != rq->idle)
-		hrtick_start(rq, US_TO_NS(p->time_slice));
+		hrtick_start(rq, p->time_slice);
 #endif
-	/* update rq->dither */
-	rq->dither = rq_dither(rq);
 }
 
 /*
@@ -3445,7 +3087,7 @@ static void __sched notrace __schedule(bool preempt)
 
 	schedule_debug(prev);
 
-	/* by passing sched_feat(HRTICK) checking which PDS doesn't support */
+	/* by passing sched_feat(HRTICK) checking which BMQ doesn't support */
 	hrtick_clear(rq);
 
 	local_irq_disable();
@@ -3469,6 +3111,12 @@ static void __sched notrace __schedule(bool preempt)
 		if (signal_pending_state(prev->state, prev)) {
 			prev->state = TASK_RUNNING;
 		} else {
+			prev->ts_deboost |= ts_overrun(prev, rq);
+			if ((SCHED_NORMAL == prev->policy &&
+			     task_normal_boost(prev, rq)) ||
+			    SCHED_BATCH == prev->policy ||
+			    SCHED_IDLE == prev->policy)
+				deboost_task(prev, 1);
 			deactivate_task(prev, rq);
 
 			if (prev->in_iowait) {
@@ -3496,14 +3144,14 @@ static void __sched notrace __schedule(bool preempt)
 	clear_tsk_need_resched(prev);
 	clear_preempt_need_resched();
 
-	check_deadline(prev, rq);
+	check_curr(prev, rq);
 
 	next = choose_next_task(rq, cpu, prev);
 
 	set_rq_task(rq, next);
 
 	if (prev != next) {
-		if (next->prio == PRIO_LIMIT)
+		if (MAX_PRIO == next->prio)
 			schedstat_inc(rq->sched_goidle);
 
 		rq->curr = next;
@@ -3523,13 +3171,14 @@ static void __sched notrace __schedule(bool preempt)
 		 */
 		++*switch_count;
 		rq->nr_switches++;
+		rq->last_ts_switch = rq->clock;
 
 		trace_sched_switch(preempt, prev, next);
 
 		/* Also unlocks the rq: */
 		rq = context_switch(rq, prev, next);
 #ifdef CONFIG_SCHED_SMT
-		pds_sg_balance_check(rq);
+		sg_balance_check(rq);
 #endif
 	} else
 		raw_spin_unlock_irq(&rq->lock);
@@ -3770,22 +3419,11 @@ int default_wake_function(wait_queue_entry_t *curr, unsigned mode, int wake_flag
 }
 EXPORT_SYMBOL(default_wake_function);
 
-static inline void
-check_task_changed(struct rq *rq, struct task_struct *p)
+static inline void check_task_changed(struct rq *rq, struct task_struct *p)
 {
-	/*
-	 * Trigger changes when task priority/deadline modified.
-	 */
-	if (task_on_rq_queued(p)) {
-		struct task_struct *first;
-
-		requeue_task(p, rq);
-
-		/* Resched if first queued task not running and not IDLE */
-		if ((first = rq_first_queued_task(rq)) != rq->curr &&
-		    !task_running_idle(first))
-			resched_curr(rq);
-	}
+	/* Trigger resched if task priority modified. */
+	if (task_on_rq_queued(p) && requeue_task_lazy(p, rq))
+		check_preempt_curr(rq, p);
 }
 
 #ifdef CONFIG_RT_MUTEXES
@@ -3870,10 +3508,8 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
 
 	trace_sched_pi_setprio(p, pi_task);
 	p->prio = prio;
-	update_task_priodl(p);
 
 	check_task_changed(rq, p);
-
 out_unlock:
 	__task_access_unlock(p, lock);
 }
@@ -3886,14 +3522,12 @@ static inline int rt_effective_prio(struct task_struct *p, int prio)
 
 void set_user_nice(struct task_struct *p, long nice)
 {
-	int new_static;
 	unsigned long flags;
 	struct rq *rq;
 	raw_spinlock_t *lock;
 
 	if (task_nice(p) == nice || nice < MIN_NICE || nice > MAX_NICE)
 		return;
-	new_static = NICE_TO_PRIO(nice);
 	/*
 	 * We have to be careful, if called from sys_setpriority(),
 	 * the task might be in the middle of scheduling on another CPU.
@@ -3901,10 +3535,7 @@ void set_user_nice(struct task_struct *p, long nice)
 	raw_spin_lock_irqsave(&p->pi_lock, flags);
 	rq = __task_access_lock(p, &lock);
 
-	/* rq lock may not held!! */
-	update_rq_clock(rq);
-
-	p->static_prio = new_static;
+	p->static_prio = NICE_TO_PRIO(nice);
 	/*
 	 * The RT priorities are set via sched_setscheduler(), but we still
 	 * allow the 'normal' nice value to be set - but as expected
@@ -3914,11 +3545,7 @@ void set_user_nice(struct task_struct *p, long nice)
 	if (task_has_rt_policy(p))
 		goto out_unlock;
 
-	p->deadline -= task_deadline_diff(p);
-	p->deadline += static_deadline_diff(new_static);
 	p->prio = effective_prio(p);
-	update_task_priodl(p);
-
 	check_task_changed(rq, p);
 out_unlock:
 	__task_access_unlock(p, lock);
@@ -3986,21 +3613,7 @@ SYSCALL_DEFINE1(nice, int, increment)
  */
 int task_prio(const struct task_struct *p)
 {
-	int level, prio = p->prio - MAX_RT_PRIO;
-	static const int level_to_nice_prio[] = {39, 33, 26, 20, 14, 7, 0, 0};
-
-	/* rt tasks */
-	if (prio <= 0)
-		goto out;
-
-	preempt_disable();
-	level = task_deadline_level(p, this_rq());
-	preempt_enable();
-	prio += level_to_nice_prio[level];
-	if (idleprio_task(p))
-		prio += NICE_WIDTH;
-out:
-	return prio;
+	return (p->prio - MAX_RT_PRIO);
 }
 
 /**
@@ -4171,20 +3784,6 @@ __set_cpus_allowed_ptr(struct task_struct *p,
 }
 #endif
 
-static u64 task_init_deadline(const struct task_struct *p)
-{
-	return task_rq(p)->clock + task_deadline_diff(p);
-}
-
-u64 (* task_init_deadline_func_tbl[])(const struct task_struct *p) = {
-	task_init_deadline,	/* SCHED_NORMAL */
-	NULL,			/* SCHED_FIFO */
-	NULL,			/* SCHED_RR */
-	task_init_deadline,	/* SCHED_BATCH */
-	NULL,			/* SCHED_ISO */
-	task_init_deadline	/* SCHED_IDLE */
-};
-
 /*
  * sched_setparam() passes in -1 for its policy, to let the functions
  * it calls know not to change it.
@@ -4194,7 +3793,6 @@ u64 (* task_init_deadline_func_tbl[])(const struct task_struct *p) = {
 static void __setscheduler_params(struct task_struct *p,
 		const struct sched_attr *attr)
 {
-	int old_policy = p->policy;
 	int policy = attr->sched_policy;
 
 	if (policy == SETPARAM_POLICY)
@@ -4216,10 +3814,6 @@ static void __setscheduler_params(struct task_struct *p,
 	 */
 	p->rt_priority = attr->sched_priority;
 	p->normal_prio = normal_prio(p);
-
-	if (old_policy != policy)
-		p->deadline = (task_init_deadline_func_tbl[p->policy])?
-			task_init_deadline_func_tbl[p->policy](p):0ULL;
 }
 
 /* Actually do priority change: must hold rq lock. */
@@ -4235,7 +3829,6 @@ static void __setscheduler(struct rq *rq, struct task_struct *p,
 	p->prio = normal_prio(p);
 	if (keep_boost)
 		p->prio = rt_effective_prio(p, p->prio);
-	update_task_priodl(p);
 }
 
 /*
@@ -4254,9 +3847,9 @@ static bool check_same_owner(struct task_struct *p)
 	return match;
 }
 
-static int
-__sched_setscheduler(struct task_struct *p,
-		     const struct sched_attr *attr, bool user, bool pi)
+static int __sched_setscheduler(struct task_struct *p,
+				const struct sched_attr *attr,
+				bool user, bool pi)
 {
 	const struct sched_attr dl_squash_attr = {
 		.size		= sizeof(struct sched_attr),
@@ -4276,7 +3869,7 @@ __sched_setscheduler(struct task_struct *p,
 	BUG_ON(pi && in_interrupt());
 
 	/*
-	 * PDS supports SCHED_DEADLINE by squash it as prio 0 SCHED_FIFO
+	 * BMQ supports SCHED_DEADLINE by squash it as prio 0 SCHED_FIFO
 	 */
 	if (unlikely(SCHED_DEADLINE == policy)) {
 		attr = &dl_squash_attr;
@@ -4791,7 +4384,9 @@ SYSCALL_DEFINE4(sched_getattr, pid_t, pid, struct sched_attr __user *, uattr,
 		goto out_unlock;
 
 	attr.sched_policy = p->policy;
-	if (rt_task(p))
+	if (p->sched_reset_on_fork)
+		attr.sched_flags |= SCHED_FLAG_RESET_ON_FORK;
+	if (task_has_rt_policy(p))
 		attr.sched_priority = p->rt_priority;
 	else
 		attr.sched_nice = task_nice(p);
@@ -4998,8 +4593,8 @@ static void do_sched_yield(void)
 
 	rq = this_rq_lock_irq(&rf);
 
-	if (sched_yield_type > 1) {
-		time_slice_expired(current, rq);
+	if (rt_task(current)) {
+		current->boost_prio = MAX_PRIORITY_ADJ;
 		requeue_task(current, rq);
 	}
 	schedstat_inc(rq->yld_count);
@@ -5101,7 +4696,7 @@ EXPORT_SYMBOL(yield);
  * It's the caller's job to ensure that the target task struct
  * can't go away on us before we can do any checks.
  *
- * In PDS, yield_to is not supported.
+ * In BMQ, yield_to is not supported.
  *
  * Return:
  *	true (>0) if we indeed boosted the target task.
@@ -5179,7 +4774,6 @@ SYSCALL_DEFINE1(sched_get_priority_max, int, policy)
 		break;
 	case SCHED_NORMAL:
 	case SCHED_BATCH:
-	case SCHED_ISO:
 	case SCHED_IDLE:
 		ret = 0;
 		break;
@@ -5206,7 +4800,6 @@ SYSCALL_DEFINE1(sched_get_priority_min, int, policy)
 		break;
 	case SCHED_NORMAL:
 	case SCHED_BATCH:
-	case SCHED_ISO:
 	case SCHED_IDLE:
 		ret = 0;
 		break;
@@ -5228,12 +4821,16 @@ static int sched_rr_get_interval(pid_t pid, struct timespec64 *t)
 	if (!p)
 		goto out_unlock;
 
+	printk(KERN_INFO "bmq: %d - p:%d n:%d s:%d b:%d\n",
+	       p->pid, p->prio, p->normal_prio,
+	       p->static_prio, p->boost_prio);
+
 	retval = security_task_getscheduler(p);
 	if (retval)
 		goto out_unlock;
 	rcu_read_unlock();
 
-	*t = ns_to_timespec64(MS_TO_NS(rr_interval));
+	*t = ns_to_timespec64(SCHED_TIMESLICE_NS);
 	return 0;
 
 out_unlock:
@@ -5355,7 +4952,7 @@ void show_state_filter(unsigned long state_filter)
 	}
 
 #ifdef CONFIG_SCHED_DEBUG
-	/* PDS TODO: should support this
+	/* TODO: BMQ should support this
 	if (!state_filter)
 		sysrq_sched_debug_show();
 	*/
@@ -5395,9 +4992,10 @@ void init_idle(struct task_struct *idle, int cpu)
 	idle->state = TASK_RUNNING;
 	idle->flags |= PF_IDLE;
 	/* Setting prio to illegal value shouldn't matter when never queued */
-	idle->prio = PRIO_LIMIT;
-	idle->deadline = rq_clock(rq) + task_deadline_diff(idle);
-	update_task_priodl(idle);
+	idle->prio = MAX_PRIO;
+
+	idle->bmq_idx = IDLE_TASK_SCHED_PRIO;
+	bmq_init_idle(&rq->queue, idle);
 
 	kasan_unpoison_task_stack(idle);
 
@@ -5627,7 +5225,6 @@ static void migrate_tasks(struct rq *dead_rq)
 {
 	struct rq *rq = dead_rq;
 	struct task_struct *p, *stop = rq->stop;
-	struct skiplist_node *node;
 	int count = 0;
 
 	/*
@@ -5641,15 +5238,15 @@ static void migrate_tasks(struct rq *dead_rq)
 	 */
 	rq->stop = NULL;
 
-	node = &rq->sl_header;
-	while ((node = node->next[0]) != &rq->sl_header) {
+	p = rq_first_bmq_task(rq);
+	while (p != rq->idle) {
 		int dest_cpu;
 
-		p = skiplist_entry(node, struct task_struct, sl_node);
-
 		/* skip the running task */
-		if (task_running(p))
+		if (task_running(p) || 1 == p->nr_cpus_allowed) {
+			p = rq_next_bmq_task(p, rq);
 			continue;
+		}
 
 		/*
 		 * Rules for changing task_struct::cpus_allowed are holding
@@ -5671,6 +5268,7 @@ static void migrate_tasks(struct rq *dead_rq)
 		 */
 		if (WARN_ON(task_rq(p) != rq || !task_on_rq_queued(p))) {
 			raw_spin_unlock(&p->pi_lock);
+			p = rq_next_bmq_task(p, rq);
 			continue;
 		}
 
@@ -5685,7 +5283,7 @@ static void migrate_tasks(struct rq *dead_rq)
 		rq = dead_rq;
 		raw_spin_lock(&rq->lock);
 		/* Check queued task all over from the header again */
-		node = &rq->sl_header;
+		p = rq_first_bmq_task(rq);
 	}
 
 	rq->stop = stop;
@@ -5839,7 +5437,7 @@ void partition_sched_domains(int ndoms_new, cpumask_var_t doms_new[],
 			     struct sched_domain_attr *dattr_new)
 {
 	/**
-	 * PDS doesn't depend on sched domains, but just keep this api
+	 * BMQ doesn't depend on sched domains, but just keep this api
 	 */
 }
 
@@ -5941,8 +5539,13 @@ int sched_cpu_deactivate(unsigned int cpu)
 	/*
 	 * When going down, decrement the number of cores with SMT present.
 	 */
-	if (cpumask_weight(cpu_smt_mask(cpu)) == 2)
+	if (cpumask_weight(cpu_smt_mask(cpu)) == 2) {
 		static_branch_dec_cpuslocked(&sched_smt_present);
+		if (!static_branch_likely(&sched_smt_present)) {
+			clear_bit(0, &sched_rq_watermark_bitmap[0]);
+			cpumask_clear(&sched_rq_watermark[0]);
+		}
+	}
 #endif
 
 	if (!sched_smp_initialized)
@@ -6018,8 +5621,7 @@ static void sched_init_topology_cpumask(void)
 		cpumask_setall(chk);
 		cpumask_clear_cpu(cpu, chk);
 		if (cpumask_and(chk, chk, topology_sibling_cpumask(cpu))) {
-			per_cpu(sched_sibling_cpu, cpu) = cpumask_first(chk);
-			printk(KERN_INFO "pds: cpu #%d affinity check mask - smt 0x%08lx",
+			printk(KERN_INFO "bmq: cpu #%d affinity check mask - smt 0x%08lx",
 			       cpu, (chk++)->bits[0]);
 		}
 #endif
@@ -6028,7 +5630,7 @@ static void sched_init_topology_cpumask(void)
 		cpumask_clear_cpu(cpu, chk);
 		if (cpumask_and(chk, chk, cpu_coregroup_mask(cpu))) {
 			per_cpu(sched_cpu_llc_start_mask, cpu) = chk;
-			printk(KERN_INFO "pds: cpu #%d affinity check mask - coregroup 0x%08lx",
+			printk(KERN_INFO "bmq: cpu #%d affinity check mask - coregroup 0x%08lx",
 			       cpu, (chk++)->bits[0]);
 		}
 		cpumask_complement(chk, cpu_coregroup_mask(cpu));
@@ -6048,12 +5650,12 @@ static void sched_init_topology_cpumask(void)
 		cpumask_clear_cpu(cpu, chk);
 #endif /* NOT CONFIG_SCHED_MC */
 		if (cpumask_and(chk, chk, topology_core_cpumask(cpu)))
-			printk(KERN_INFO "pds: cpu #%d affinity check mask - core 0x%08lx",
+			printk(KERN_INFO "bmq: cpu #%d affinity check mask - core 0x%08lx",
 			       cpu, (chk++)->bits[0]);
 		cpumask_complement(chk, topology_core_cpumask(cpu));
 
 		if (cpumask_and(chk, chk, cpu_online_mask))
-			printk(KERN_INFO "pds: cpu #%d affinity check mask - others 0x%08lx",
+			printk(KERN_INFO "bmq: cpu #%d affinity check mask - others 0x%08lx",
 			       cpu, (chk++)->bits[0]);
 
 		per_cpu(sched_cpu_affinity_chk_end_masks, cpu) = chk;
@@ -6066,8 +5668,6 @@ void __init sched_init_smp(void)
 	/* Move init over to a non-isolated CPU */
 	if (set_cpus_allowed_ptr(current, housekeeping_cpumask(HK_FLAG_DOMAIN)) < 0)
 		BUG();
-
-	cpumask_copy(&sched_rq_queued_masks[SCHED_RQ_EMPTY], cpu_online_mask);
 
 	sched_init_topology_cpumask();
 
@@ -6120,13 +5720,8 @@ void __init sched_init(void)
 	wait_bit_init();
 
 #ifdef CONFIG_SMP
-	for (i = 0; i < NR_SCHED_RQ_QUEUED_LEVEL; i++)
-		cpumask_clear(&sched_rq_queued_masks[i]);
-	cpumask_setall(&sched_rq_queued_masks[SCHED_RQ_EMPTY]);
-	set_bit(SCHED_RQ_EMPTY, sched_rq_queued_masks_bitmap);
-
-	cpumask_setall(&sched_rq_pending_masks[SCHED_RQ_EMPTY]);
-	set_bit(SCHED_RQ_EMPTY, sched_rq_pending_masks_bitmap);
+	cpumask_copy(&sched_rq_watermark[1], cpu_present_mask);
+	set_bit(1, &sched_rq_watermark_bitmap[0]);
 #else
 	uprq = &per_cpu(runqueues, 0);
 #endif
@@ -6140,9 +5735,11 @@ void __init sched_init(void)
 #endif /* CONFIG_CGROUP_SCHED */
 	for_each_possible_cpu(i) {
 		rq = cpu_rq(i);
-		FULL_INIT_SKIPLIST_NODE(&rq->sl_header);
+
+		bmq_init(&rq->queue);
+		rq->watermark = IDLE_WM;
+
 		raw_spin_lock_init(&rq->lock);
-		rq->dither = 0;
 		rq->nr_running = rq->nr_uninterruptible = 0;
 		rq->calc_load_active = 0;
 		rq->calc_load_update = jiffies + LOAD_FREQ;
@@ -6150,10 +5747,7 @@ void __init sched_init(void)
 		rq->online = false;
 		rq->cpu = i;
 
-		rq->queued_level = SCHED_RQ_EMPTY;
-		rq->pending_level = SCHED_RQ_EMPTY;
 #ifdef CONFIG_SCHED_SMT
-		per_cpu(sched_sibling_cpu, i) = i;
 		rq->active_balance = 0;
 #endif
 #endif

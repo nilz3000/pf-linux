@@ -240,7 +240,7 @@ ___update_load_avg(struct sched_avg *sa, unsigned long load, unsigned long runna
 	WRITE_ONCE(sa->util_avg, sa->util_sum / divider);
 }
 
-#ifndef CONFIG_SCHED_PDS
+#ifndef CONFIG_SCHED_BMQ
 /*
  * sched_entity:
  *

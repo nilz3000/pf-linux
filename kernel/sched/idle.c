@@ -353,7 +353,7 @@ void cpu_startup_entry(enum cpuhp_state state)
 		do_idle();
 }
 
-#ifndef CONFIG_SCHED_PDS
+#ifndef CONFIG_SCHED_BMQ
 /*
  * idle-task scheduling class.
  */

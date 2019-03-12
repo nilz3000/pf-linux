@@ -792,7 +792,7 @@ check_timers_list(struct list_head *timers,
 	return 0;
 }
 
-#ifndef CONFIG_SCHED_PDS
+#ifndef CONFIG_SCHED_BMQ
 static inline void check_dl_overrun(struct task_struct *tsk)
 {
 	if (tsk->dl.dl_overrun) {
@@ -815,7 +815,7 @@ static void check_thread_timers(struct task_struct *tsk,
 	u64 expires;
 	unsigned long soft;
 
-#ifndef CONFIG_SCHED_PDS
+#ifndef CONFIG_SCHED_BMQ
 	if (dl_task(tsk))
 		check_dl_overrun(tsk);
 #endif
@@ -1126,7 +1126,7 @@ static inline int fastpath_timer_check(struct task_struct *tsk)
 			return 1;
 	}
 
-#ifndef CONFIG_SCHED_PDS
+#ifndef CONFIG_SCHED_BMQ
 	if (dl_task(tsk) && tsk->dl.dl_overrun)
 		return 1;
 #endif

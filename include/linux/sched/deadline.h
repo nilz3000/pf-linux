@@ -1,17 +1,17 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 
-#ifdef CONFIG_SCHED_PDS
+#ifdef CONFIG_SCHED_BMQ
 
-#define __tsk_deadline(p)	((p)->deadline)
+#define __tsk_deadline(p)	(0UL)
 
 static inline int dl_prio(int prio)
 {
-	return 1;
+	return 0;
 }
 
 static inline int dl_task(struct task_struct *p)
 {
-	return 1;
+	return 0;
 }
 #else
 
@@ -36,7 +36,7 @@ static inline int dl_task(struct task_struct *p)
 {
 	return dl_prio(p->prio);
 }
-#endif /* CONFIG_SCHED_PDS */
+#endif /* CONFIG_SCHED_BMQ */
 
 static inline bool dl_time_before(u64 a, u64 b)
 {

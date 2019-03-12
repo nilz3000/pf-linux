@@ -121,12 +121,7 @@ void account_user_time(struct task_struct *p, u64 cputime)
 	p->utime += cputime;
 	account_group_user_time(p, cputime);
 
-#ifdef	CONFIG_SCHED_PDS
-	index = (task_nice(p) > 0 || task_running_idle(p)) ? CPUTIME_NICE :
-		CPUTIME_USER;
-#else
-	index = (task_nice(p) > 0) ? CPUTIME_NICE : CPUTIME_USER;
-#endif
+	index = task_running_nice(p) ? CPUTIME_NICE : CPUTIME_USER;
 
 	/* Add user time to cpustat. */
 	task_group_account_field(p, index, cputime);
@@ -150,11 +145,7 @@ void account_guest_time(struct task_struct *p, u64 cputime)
 	p->gtime += cputime;
 
 	/* Add guest time to cpustat. */
-#ifdef	CONFIG_SCHED_PDS
-	if (task_nice(p) > 0 || task_running_idle(p)) {
-#else
-	if (task_nice(p) > 0) {
-#endif
+	if (task_running_nice(p)) {
 		cpustat[CPUTIME_NICE] += cputime;
 		cpustat[CPUTIME_GUEST_NICE] += cputime;
 	} else {

@@ -59,7 +59,7 @@ struct task_struct init_task
 	__init_task_data
 #endif
 = {
-#ifdef CONFIG_SCHED_PDS
+#ifdef CONFIG_SCHED_BMQ
 #ifdef CONFIG_THREAD_INFO_IN_TASK
 	.thread_info	= INIT_THREAD_INFO(init_task),
 	.stack_refcount	= ATOMIC_INIT(1),
@@ -68,10 +68,9 @@ struct task_struct init_task
 	.stack		= init_stack,
 	.usage		= ATOMIC_INIT(2),
 	.flags		= PF_KTHREAD,
-	.prio		= NORMAL_PRIO,
-	.static_prio	= MAX_PRIO - 20,
-	.normal_prio	= NORMAL_PRIO,
-	.deadline	= 0, /* PDS only */
+	.prio		= DEFAULT_PRIO + MAX_PRIORITY_ADJ,
+	.static_prio	= DEFAULT_PRIO,
+	.normal_prio	= DEFAULT_PRIO + MAX_PRIORITY_ADJ,
 	.policy		= SCHED_NORMAL,
 	.cpus_allowed	= CPU_MASK_ALL,
 	.nr_cpus_allowed= NR_CPUS,
@@ -80,9 +79,11 @@ struct task_struct init_task
 	.restart_block	= {
 		.fn = do_no_restart_syscall,
 	},
-	.sl_level	= 0, /* PDS only */
-	.sl_node	= SKIPLIST_NODE_INIT(init_task.sl_node), /* PDS only */
-	.time_slice	= HZ, /* PDS only */
+	.ts_deboost	= 0,
+	.boost_prio	= 0,
+	.bmq_idx	= 15,
+	.bmq_node	= LIST_HEAD_INIT(init_task.bmq_node),
+	.time_slice	= HZ,
 	.tasks		= LIST_HEAD_INIT(init_task.tasks),
 #ifdef CONFIG_SMP
 	.pushable_tasks	= PLIST_NODE_INIT(init_task.pushable_tasks, MAX_PRIO),
@@ -177,7 +178,7 @@ struct task_struct init_task
 #ifdef CONFIG_SECURITY
 	.security	= NULL,
 #endif
-#else /* CONFIG_SCHED_PDS */
+#else /* !CONFIG_SCHED_BMQ */
 #ifdef CONFIG_THREAD_INFO_IN_TASK
 	.thread_info	= INIT_THREAD_INFO(init_task),
 	.stack_refcount	= ATOMIC_INIT(1),
@@ -298,7 +299,7 @@ struct task_struct init_task
 #ifdef CONFIG_SECURITY
 	.security	= NULL,
 #endif
-#endif /* CONFIG_SCHED_PDS */
+#endif /* !CONFIG_SCHED_BMQ */
 };
 EXPORT_SYMBOL(init_task);
 
