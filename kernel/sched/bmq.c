@@ -56,7 +56,7 @@
 
 static inline void print_scheduler_version(void)
 {
-	printk(KERN_INFO "bmq: BMQ CPU Scheduler 0.89 by Alfred Chen.\n");
+	printk(KERN_INFO "bmq: BMQ CPU Scheduler 0.90 by Alfred Chen.\n");
 }
 
 /**
@@ -161,7 +161,7 @@ ____cacheline_aligned_in_smp;
 
 static inline void update_sched_rq_watermark(struct rq *rq)
 {
-	unsigned long watermark = find_first_bit(&rq->queue.bitmap[0], bmq_BITS);
+	unsigned long watermark = find_first_bit(rq->queue.bitmap, bmq_BITS);
 	unsigned long last_wm = rq->watermark;
 	int cpu;
 
@@ -172,9 +172,9 @@ static inline void update_sched_rq_watermark(struct rq *rq)
 	cpu = cpu_of(rq);
 	if (!cpumask_andnot(&sched_rq_watermark[last_wm],
 			    &sched_rq_watermark[last_wm], cpumask_of(cpu)))
-		clear_bit(last_wm, &sched_rq_watermark_bitmap[0]);
+		clear_bit(last_wm, sched_rq_watermark_bitmap);
 	cpumask_set_cpu(cpu, &sched_rq_watermark[watermark]);
-	set_bit(watermark, &sched_rq_watermark_bitmap[0]);
+	set_bit(watermark, sched_rq_watermark_bitmap);
 	rq->watermark = watermark;
 
 #ifdef CONFIG_SCHED_SMT
@@ -184,7 +184,7 @@ static inline void update_sched_rq_watermark(struct rq *rq)
 	if (1ULL == last_wm) {
 		if (!cpumask_andnot(&sched_rq_watermark[0],
 				    &sched_rq_watermark[0], cpu_smt_mask(cpu)))
-			clear_bit(0, &sched_rq_watermark_bitmap[0]);
+			clear_bit(0, sched_rq_watermark_bitmap);
 	} else if (1ULL == watermark) {
 		cpumask_t tmp;
 
@@ -192,7 +192,7 @@ static inline void update_sched_rq_watermark(struct rq *rq)
 		if (cpumask_equal(&tmp, cpu_smt_mask(cpu))) {
 			cpumask_or(&sched_rq_watermark[0], cpu_smt_mask(cpu),
 				   &sched_rq_watermark[0]);
-			set_bit(0, &sched_rq_watermark_bitmap[0]);
+			set_bit(0, sched_rq_watermark_bitmap);
 		}
 	}
 #endif
@@ -210,7 +210,7 @@ static inline void bmq_init(struct bmq *q)
 {
 	int i;
 
-	bitmap_zero(&q->bitmap[0], bmq_BITS);
+	bitmap_zero(q->bitmap, bmq_BITS);
 	for(i = 0; i < bmq_BITS; i++)
 		INIT_LIST_HEAD(&q->heads[i]);
 }
@@ -219,7 +219,7 @@ static inline void bmq_init_idle(struct bmq *q, struct task_struct *idle)
 {
 	INIT_LIST_HEAD(&q->heads[IDLE_TASK_SCHED_PRIO]);
 	list_add(&idle->bmq_node, &q->heads[IDLE_TASK_SCHED_PRIO]);
-	set_bit(IDLE_TASK_SCHED_PRIO, &q->bitmap[0]);
+	set_bit(IDLE_TASK_SCHED_PRIO, q->bitmap);
 }
 
 static inline void bmq_add_task(struct task_struct *p, struct bmq *q, int idx)
@@ -248,7 +248,7 @@ static inline void bmq_add_task(struct task_struct *p, struct bmq *q, int idx)
 static inline struct task_struct *
 __rq_next_bmq_task(const struct rq *rq, unsigned long offset)
 {
-	unsigned long idx = find_next_bit(&rq->queue.bitmap[0], bmq_BITS, offset);
+	unsigned long idx = find_next_bit(rq->queue.bitmap, bmq_BITS, offset);
 	const struct list_head *head = &rq->queue.heads[idx];
 
 	BUG_ON(list_empty(head));
@@ -602,11 +602,13 @@ static inline void dequeue_task(struct task_struct *p, struct rq *rq, int flags)
 
 	list_del(&p->bmq_node);
 	if (list_empty(&rq->queue.heads[p->bmq_idx])) {
-		clear_bit(p->bmq_idx, &rq->queue.bitmap[0]);
+		clear_bit(p->bmq_idx, rq->queue.bitmap);
 		update_sched_rq_watermark(rq);
 	}
 	if (1 == --rq->nr_running)
+#ifdef CONFIG_SMP
 		cpumask_clear_cpu(cpu_of(rq), &sched_rq_pending_mask);
+#endif
 
 	sched_update_tick_dependency(rq);
 	psi_dequeue(p, flags & DEQUEUE_SLEEP);
@@ -628,10 +630,12 @@ static inline void enqueue_task(struct task_struct *p, struct rq *rq, int flags)
 
 	p->bmq_idx = task_sched_prio(p);
 	bmq_add_task(p, &rq->queue, p->bmq_idx);
-	set_bit(p->bmq_idx, &rq->queue.bitmap[0]);
+	set_bit(p->bmq_idx, rq->queue.bitmap);
 	update_sched_rq_watermark(rq);
 	if (2 == ++rq->nr_running)
+#ifdef CONFIG_SMP
 		cpumask_set_cpu(cpu_of(rq), &sched_rq_pending_mask);
+#endif
 
 	sched_update_tick_dependency(rq);
 
@@ -659,9 +663,9 @@ static inline void requeue_task(struct task_struct *p, struct rq *rq)
 	bmq_add_task(p, &rq->queue, idx);
 	if (idx != p->bmq_idx) {
 		if (list_empty(&rq->queue.heads[p->bmq_idx]))
-			clear_bit(p->bmq_idx, &rq->queue.bitmap[0]);
+			clear_bit(p->bmq_idx, rq->queue.bitmap);
 		p->bmq_idx = idx;
-		set_bit(p->bmq_idx, &rq->queue.bitmap[0]);
+		set_bit(p->bmq_idx, rq->queue.bitmap);
 		update_sched_rq_watermark(rq);
 	}
 }
@@ -680,9 +684,9 @@ static inline int requeue_task_lazy(struct task_struct *p, struct rq *rq)
 	list_del(&p->bmq_node);
 	bmq_add_task(p, &rq->queue, idx);
 	if (list_empty(&rq->queue.heads[p->bmq_idx]))
-		clear_bit(p->bmq_idx, &rq->queue.bitmap[0]);
+		clear_bit(p->bmq_idx, rq->queue.bitmap);
 	p->bmq_idx = idx;
-	set_bit(p->bmq_idx, &rq->queue.bitmap[0]);
+	set_bit(p->bmq_idx, rq->queue.bitmap);
 	update_sched_rq_watermark(rq);
 
 	return 1;
@@ -1406,12 +1410,12 @@ task_preemptible_rq(struct task_struct *p, cpumask_t *chk_mask,
 	cpumask_t tmp;
 	unsigned long level;
 
-	level = find_first_bit(&sched_rq_watermark_bitmap[0], WM_BITS);
+	level = find_first_bit(sched_rq_watermark_bitmap, WM_BITS);
 	while (level < preempt_level) {
 		if (cpumask_and(&tmp, chk_mask, &sched_rq_watermark[level]))
 			return best_mask_cpu(task_cpu(p), &tmp);
 
-		level = find_next_bit(&sched_rq_watermark_bitmap[0], WM_BITS,
+		level = find_next_bit(sched_rq_watermark_bitmap, WM_BITS,
 				      level + 1);
 	}
 
@@ -2917,32 +2921,25 @@ lock_and_migrate_pending_tasks(struct rq *src_rq, struct rq *rq)
 	return nr_migrated;
 }
 
-static inline int
-take_other_rq_tasks(struct rq *rq, int cpu, unsigned long watermark)
+static inline int take_other_rq_tasks(struct rq *rq, int cpu)
 {
-	struct cpumask *affinity_mask, *end;
-	struct cpumask chk;
-
-	if (watermark > IDLE_WM)
-		return 0;
+	struct cpumask *affinity_mask;
+	struct cpumask chk, tmp;
+	int i, tried;
 
 	if (!cpumask_and(&chk, &sched_rq_pending_mask, cpu_online_mask))
 		return 0;
 
+	tried = 0;
 	affinity_mask = per_cpu(sched_cpu_llc_start_mask, cpu);
-	end = per_cpu(sched_cpu_affinity_chk_end_masks, cpu);
-	do {
-		struct cpumask tmp;
-		int i;
-
-		if (unlikely(!cpumask_and(&tmp, &chk, affinity_mask)))
-			continue;
-
-		for_each_cpu_wrap(i, &tmp, cpu)
+	while (cpumask_and(&tmp, &chk, affinity_mask++))
+		for_each_cpu_wrap(i, &tmp, cpu) {
 			if (lock_and_migrate_pending_tasks(cpu_rq(i), rq))
 				return 1;
-	} while (++affinity_mask < end);
-
+			if (tried)
+				return 0;
+			tried++;
+		}
 	return 0;
 }
 #endif
@@ -2954,10 +2951,8 @@ choose_next_task(struct rq *rq, int cpu, struct task_struct *prev)
 
 #ifdef	CONFIG_SMP
 	if (likely(rq->online))
-		if (take_other_rq_tasks(rq, cpu, TASK_SCHED_WATERMARK(next))) {
-			resched_curr(rq);
+		if (next == rq->idle && take_other_rq_tasks(rq, cpu))
 			return rq_first_bmq_task(rq);
-		}
 #endif
 	return next;
 }
@@ -3613,7 +3608,9 @@ SYSCALL_DEFINE1(nice, int, increment)
  */
 int task_prio(const struct task_struct *p)
 {
-	return (p->prio - MAX_RT_PRIO);
+	if (p->prio < MAX_RT_PRIO)
+		return (p->prio - MAX_RT_PRIO);
+	return (p->prio - MAX_RT_PRIO + p->boost_prio);
 }
 
 /**
@@ -4821,10 +4818,6 @@ static int sched_rr_get_interval(pid_t pid, struct timespec64 *t)
 	if (!p)
 		goto out_unlock;
 
-	printk(KERN_INFO "bmq: %d - p:%d n:%d s:%d b:%d\n",
-	       p->pid, p->prio, p->normal_prio,
-	       p->static_prio, p->boost_prio);
-
 	retval = security_task_getscheduler(p);
 	if (retval)
 		goto out_unlock;
@@ -5542,7 +5535,7 @@ int sched_cpu_deactivate(unsigned int cpu)
 	if (cpumask_weight(cpu_smt_mask(cpu)) == 2) {
 		static_branch_dec_cpuslocked(&sched_smt_present);
 		if (!static_branch_likely(&sched_smt_present)) {
-			clear_bit(0, &sched_rq_watermark_bitmap[0]);
+			clear_bit(0, sched_rq_watermark_bitmap);
 			cpumask_clear(&sched_rq_watermark[0]);
 		}
 	}
@@ -5721,7 +5714,7 @@ void __init sched_init(void)
 
 #ifdef CONFIG_SMP
 	cpumask_copy(&sched_rq_watermark[1], cpu_present_mask);
-	set_bit(1, &sched_rq_watermark_bitmap[0]);
+	set_bit(1, sched_rq_watermark_bitmap);
 #else
 	uprq = &per_cpu(runqueues, 0);
 #endif
