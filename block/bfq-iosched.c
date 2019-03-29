@@ -704,7 +704,7 @@ static bool bfq_asymmetric_scenario(struct bfq_data *bfqd,
 		(bfqd->busy_queues[1] && bfqd->busy_queues[2]);
 
 	return varied_queue_weights || multiple_classes_busy
-#ifdef BFQ_GROUP_IOSCHED_ENABLED
+#ifdef CONFIG_BFQ_GROUP_IOSCHED
 	       || bfqd->num_groups_with_pending_reqs > 0
 #endif
 		;
