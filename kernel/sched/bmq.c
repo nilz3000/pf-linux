@@ -56,7 +56,7 @@
 
 static inline void print_scheduler_version(void)
 {
-	printk(KERN_INFO "bmq: BMQ CPU Scheduler 0.90 by Alfred Chen.\n");
+	printk(KERN_INFO "bmq: BMQ CPU Scheduler 0.91 by Alfred Chen.\n");
 }
 
 /**
@@ -66,38 +66,32 @@ static inline void print_scheduler_version(void)
  */
 int sched_yield_type __read_mostly = 1;
 
-static inline int ts_overrun(struct task_struct *p, struct rq *rq)
-{
-	const static u64 ts_overrun_th[] = {
-		SCHED_TIMESLICE_NS / 2,
-		SCHED_TIMESLICE_NS / 2,
-		SCHED_TIMESLICE_NS / 2,
-		SCHED_TIMESLICE_NS / 2,
-		SCHED_TIMESLICE_NS * 3 / 4,
-		SCHED_TIMESLICE_NS * 7 / 8,
-		SCHED_TIMESLICE_NS * 15 / 16,
-		SCHED_TIMESLICE_NS * 31 / 32,
-		SCHED_TIMESLICE_NS * 63 / 64};
-	return (rq->clock - rq->last_ts_switch >
-		ts_overrun_th[MAX_PRIORITY_ADJ + p->boost_prio]);
-}
+const static u64 ts_overrun_th[] = {
+	SCHED_TIMESLICE_NS / 8,
+	SCHED_TIMESLICE_NS / 4,
+	SCHED_TIMESLICE_NS / 2,
+	SCHED_TIMESLICE_NS * 3 / 4,
+	SCHED_TIMESLICE_NS * 7 / 8,
+	SCHED_TIMESLICE_NS * 15 / 16,
+	SCHED_TIMESLICE_NS * 31 / 32,
+	SCHED_TIMESLICE_NS * 63 / 64,
+	SCHED_TIMESLICE_NS * 127 / 128
+};
 
-static inline int task_normal_boost(struct task_struct *p, struct rq *rq)
-{
-	const static u64 ts_nonboost_th[] = {
-		SCHED_TIMESLICE_NS << 7,
-		SCHED_TIMESLICE_NS << 6,
-		SCHED_TIMESLICE_NS << 5,
-		SCHED_TIMESLICE_NS << 4,
-		SCHED_TIMESLICE_NS << 3,
-		SCHED_TIMESLICE_NS << 3,
-		SCHED_TIMESLICE_NS << 3,
-		SCHED_TIMESLICE_NS << 3,
-		SCHED_TIMESLICE_NS << 3
-	};
-	return ((rq->clock - rq->last_ts_switch) >
-		ts_nonboost_th[MAX_PRIORITY_ADJ + p->boost_prio]);
-}
+const static u64 ts_nonboost_th[] = {
+	SCHED_TIMESLICE_NS >> 8,
+	SCHED_TIMESLICE_NS >> 7,
+	SCHED_TIMESLICE_NS >> 6,
+	SCHED_TIMESLICE_NS >> 5,
+	SCHED_TIMESLICE_NS >> 4,
+	SCHED_TIMESLICE_NS >> 3,
+	SCHED_TIMESLICE_NS >> 2,
+	SCHED_TIMESLICE_NS >> 1,
+	SCHED_TIMESLICE_NS >> 1
+};
+
+#define TASK_ST_OVER(p, rq, th)	(((rq)->clock - (rq)->last_ts_switch) > \
+				 (th)[MAX_PRIORITY_ADJ +  (p)->boost_prio])
 
 #ifdef CONFIG_SMP
 static cpumask_t sched_rq_pending_mask ____cacheline_aligned_in_smp;
@@ -133,8 +127,6 @@ int __weak arch_sd_sibling_asym_packing(void)
 {
        return 0*SD_ASYM_PACKING;
 }
-#else
-struct rq *uprq;
 #endif /* CONFIG_SMP */
 
 static DEFINE_MUTEX(sched_hotcpu_mutex);
@@ -2620,29 +2612,45 @@ static inline int sg_balance_trigger(const int cpu)
 static inline void sg_balance_check(const struct rq *rq)
 {
 	cpumask_t chk;
-	int i, cpu = cpu_of(rq);
+	int cpu;
 
-	/* Only online cpu will do sg balance checking */
-	if (unlikely(!rq->online))
+	/* exit when no sg in idle */
+	if (cpumask_empty(&sched_rq_watermark[0]))
 		return;
 
+	cpu = cpu_of(rq);
 	/* Only cpu in slibing idle group will do the checking */
-	if (!cpumask_test_cpu(cpu, &sched_rq_watermark[0]))
-		return;
+	if (cpumask_test_cpu(cpu, &sched_rq_watermark[0])) {
+		/* Find potential cpus which can migrate the currently running task */
+		if (cpumask_andnot(&chk, cpu_online_mask, &sched_rq_pending_mask) &&
+		    cpumask_andnot(&chk, &chk, &sched_rq_watermark[IDLE_WM])) {
+			int i, tried = 0;
 
-	/* Find potential cpus which can migrate the currently running task */
-	if (!cpumask_andnot(&chk, cpu_online_mask, &sched_rq_pending_mask) ||
-	    !cpumask_andnot(&chk, &chk, &sched_rq_watermark[IDLE_WM]))
+			for_each_cpu_wrap(i, &chk, cpu) {
+				/* skip the cpu which has idle slibing cpu */
+				if (cpumask_intersects(cpu_smt_mask(i),
+						       &sched_rq_watermark[IDLE_WM]))
+					continue;
+				if (cpumask_intersects(cpu_smt_mask(i),
+						       &sched_rq_pending_mask))
+					continue;
+				if (sg_balance_trigger(i))
+					return;
+				if (tried)
+					return;
+				tried++;
+			}
+		}
 		return;
-
-	for_each_cpu_wrap(i, &chk, cpu) {
-		/* skip the cpu which has idle slibing cpu */
-		if (cpumask_intersects(cpu_smt_mask(i),
-				       &sched_rq_watermark[IDLE_WM]))
-			continue;
-		if (sg_balance_trigger(i))
-			return;
 	}
+
+	if (1 != rq->nr_running)
+		return;
+
+	if (cpumask_andnot(&chk, cpu_smt_mask(cpu), &sched_rq_pending_mask) &&
+	    cpumask_andnot(&chk, &chk, &sched_rq_watermark[IDLE_WM]) &&
+	    cpumask_equal(&chk, cpu_smt_mask(cpu)))
+		sg_balance_trigger(cpu);
 }
 #endif /* CONFIG_SCHED_SMT */
 
@@ -2860,7 +2868,7 @@ static inline void check_curr(struct task_struct *p, struct rq *rq)
 		p->time_slice = SCHED_TIMESLICE_NS;
 		if (SCHED_FIFO != p->policy && task_on_rq_queued(p)) {
 			if (SCHED_RR != p->policy &&
-			    (p->ts_deboost || ts_overrun(p, rq)))
+			    (p->ts_deboost || TASK_ST_OVER(p, rq, ts_overrun_th)))
 				deboost_task(p, MAX_PRIORITY_ADJ);
 			requeue_task(p, rq);
 		}
@@ -3108,9 +3116,9 @@ static void __sched notrace __schedule(bool preempt)
 		if (signal_pending_state(prev->state, prev)) {
 			prev->state = TASK_RUNNING;
 		} else {
-			prev->ts_deboost |= ts_overrun(prev, rq);
+			prev->ts_deboost |= TASK_ST_OVER(prev, rq, ts_overrun_th);
 			if ((SCHED_NORMAL == prev->policy &&
-			     task_normal_boost(prev, rq)) ||
+			     TASK_ST_OVER(prev, rq, ts_nonboost_th)) ||
 			    SCHED_BATCH == prev->policy ||
 			    SCHED_IDLE == prev->policy)
 				deboost_task(prev, 1);
@@ -4592,7 +4600,7 @@ static void do_sched_yield(void)
 
 	rq = this_rq_lock_irq(&rf);
 
-	if (rt_task(current)) {
+	if (!rt_task(current)) {
 		current->boost_prio = MAX_PRIORITY_ADJ;
 		requeue_task(current, rq);
 	}
@@ -5717,8 +5725,6 @@ void __init sched_init(void)
 #ifdef CONFIG_SMP
 	cpumask_copy(&sched_rq_watermark[1], cpu_present_mask);
 	set_bit(1, sched_rq_watermark_bitmap);
-#else
-	uprq = &per_cpu(runqueues, 0);
 #endif
 
 #ifdef CONFIG_CGROUP_SCHED
