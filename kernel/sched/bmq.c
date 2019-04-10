@@ -56,7 +56,7 @@
 
 static inline void print_scheduler_version(void)
 {
-	printk(KERN_INFO "bmq: BMQ CPU Scheduler 0.91 by Alfred Chen.\n");
+	printk(KERN_INFO "bmq: BMQ CPU Scheduler 0.92 by Alfred Chen.\n");
 }
 
 /**
@@ -67,31 +67,57 @@ static inline void print_scheduler_version(void)
 int sched_yield_type __read_mostly = 1;
 
 const static u64 ts_overrun_th[] = {
+	SCHED_TIMESLICE_NS / 32,
+	SCHED_TIMESLICE_NS / 16,
 	SCHED_TIMESLICE_NS / 8,
 	SCHED_TIMESLICE_NS / 4,
 	SCHED_TIMESLICE_NS / 2,
 	SCHED_TIMESLICE_NS * 3 / 4,
-	SCHED_TIMESLICE_NS * 7 / 8,
 	SCHED_TIMESLICE_NS * 15 / 16,
-	SCHED_TIMESLICE_NS * 31 / 32,
 	SCHED_TIMESLICE_NS * 63 / 64,
 	SCHED_TIMESLICE_NS * 127 / 128
 };
 
-const static u64 ts_nonboost_th[] = {
+const static u64 ts_boost_th[] = {
+	SCHED_TIMESLICE_NS >> 10,
+	SCHED_TIMESLICE_NS >> 9,
 	SCHED_TIMESLICE_NS >> 8,
 	SCHED_TIMESLICE_NS >> 7,
 	SCHED_TIMESLICE_NS >> 6,
 	SCHED_TIMESLICE_NS >> 5,
 	SCHED_TIMESLICE_NS >> 4,
 	SCHED_TIMESLICE_NS >> 3,
-	SCHED_TIMESLICE_NS >> 2,
-	SCHED_TIMESLICE_NS >> 1,
-	SCHED_TIMESLICE_NS >> 1
+	SCHED_TIMESLICE_NS >> 2
 };
 
-#define TASK_ST_OVER(p, rq, th)	(((rq)->clock - (rq)->last_ts_switch) > \
+#define TASK_ST(p, rq, op, th)	(((rq)->clock - (rq)->last_ts_switch) op\
 				 (th)[MAX_PRIORITY_ADJ +  (p)->boost_prio])
+
+static inline void boost_task(struct task_struct *p, struct rq *rq)
+{
+	int limit;
+
+	switch (p->policy) {
+	case SCHED_NORMAL:
+		limit = -MAX_PRIORITY_ADJ;
+		break;
+	case SCHED_BATCH:
+	case SCHED_IDLE:
+		limit = 0;
+		break;
+	default:
+		return;
+	}
+
+	if (p->boost_prio > limit && TASK_ST(p, rq, <, ts_boost_th))
+		p->boost_prio--;
+}
+
+static inline void deboost_task(struct task_struct *p)
+{
+	if (p->boost_prio < MAX_PRIORITY_ADJ)
+		p->boost_prio++;
+}
 
 #ifdef CONFIG_SMP
 static cpumask_t sched_rq_pending_mask ____cacheline_aligned_in_smp;
@@ -162,11 +188,11 @@ static inline void update_sched_rq_watermark(struct rq *rq)
 		return;
 
 	cpu = cpu_of(rq);
-	if (!cpumask_andnot(&sched_rq_watermark[last_wm],
-			    &sched_rq_watermark[last_wm], cpumask_of(cpu)))
-		clear_bit(last_wm, sched_rq_watermark_bitmap);
-	cpumask_set_cpu(cpu, &sched_rq_watermark[watermark]);
-	set_bit(watermark, sched_rq_watermark_bitmap);
+	__cpumask_clear_cpu(cpu, &sched_rq_watermark[last_wm]);
+	if (cpumask_empty(&sched_rq_watermark[last_wm]))
+		__clear_bit(last_wm, sched_rq_watermark_bitmap);
+	__cpumask_set_cpu(cpu, &sched_rq_watermark[watermark]);
+	__set_bit(watermark, sched_rq_watermark_bitmap);
 	rq->watermark = watermark;
 
 #ifdef CONFIG_SCHED_SMT
@@ -266,16 +292,14 @@ rq_next_bmq_task(struct task_struct *p, struct rq *rq)
 
 }
 
-static inline void boost_task(struct task_struct *p)
+static inline struct task_struct *rq_runnable_task(struct rq *rq)
 {
-	if (p->boost_prio > -MAX_PRIORITY_ADJ)
-		p->boost_prio--;
-}
+	struct task_struct *next = rq_first_bmq_task(rq);
 
-static inline void deboost_task(struct task_struct *p, const int limit)
-{
-	if (p->boost_prio < limit)
-		p->boost_prio++;
+	if (unlikely(next == rq->skip))
+		next = rq_next_bmq_task(next, rq);
+
+	return next;
 }
 
 /*
@@ -1703,7 +1727,6 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 
 	p->sched_contributes_to_load = !!task_contributes_to_load(p);
 	p->state = TASK_WAKING;
-	boost_task(p);
 
 	if (p->in_iowait) {
 		delayacct_blkio_end(p);
@@ -1776,7 +1799,6 @@ static void try_to_wake_up_local(struct task_struct *p)
 	trace_sched_waking(p);
 
 	if (!task_on_rq_queued(p)) {
-		boost_task(p);
 		if (p->in_iowait) {
 			delayacct_blkio_end(p);
 			atomic_dec(&task_rq(p)->nr_iowait);
@@ -2868,8 +2890,8 @@ static inline void check_curr(struct task_struct *p, struct rq *rq)
 		p->time_slice = SCHED_TIMESLICE_NS;
 		if (SCHED_FIFO != p->policy && task_on_rq_queued(p)) {
 			if (SCHED_RR != p->policy &&
-			    (p->ts_deboost || TASK_ST_OVER(p, rq, ts_overrun_th)))
-				deboost_task(p, MAX_PRIORITY_ADJ);
+			    (p->ts_deboost || TASK_ST(p, rq, >, ts_overrun_th)))
+				deboost_task(p);
 			requeue_task(p, rq);
 		}
 		p->ts_deboost = 0;
@@ -2957,8 +2979,20 @@ static inline int take_other_rq_tasks(struct rq *rq, int cpu)
 static inline struct task_struct *
 choose_next_task(struct rq *rq, int cpu, struct task_struct *prev)
 {
-	struct task_struct *next = rq_first_bmq_task(rq);
+	struct task_struct *next;
 
+	if (unlikely(rq->skip)) {
+		next = rq_runnable_task(rq);
+#ifdef	CONFIG_SMP
+		if (likely(rq->online))
+			if (next == rq->idle && take_other_rq_tasks(rq, cpu))
+				next = rq_runnable_task(rq);
+#endif
+		rq->skip = NULL;
+		return next;
+	}
+
+	next = rq_first_bmq_task(rq);
 #ifdef	CONFIG_SMP
 	if (likely(rq->online))
 		if (next == rq->idle && take_other_rq_tasks(rq, cpu))
@@ -3116,12 +3150,8 @@ static void __sched notrace __schedule(bool preempt)
 		if (signal_pending_state(prev->state, prev)) {
 			prev->state = TASK_RUNNING;
 		} else {
-			prev->ts_deboost |= TASK_ST_OVER(prev, rq, ts_overrun_th);
-			if ((SCHED_NORMAL == prev->policy &&
-			     TASK_ST_OVER(prev, rq, ts_nonboost_th)) ||
-			    SCHED_BATCH == prev->policy ||
-			    SCHED_IDLE == prev->policy)
-				deboost_task(prev, 1);
+			prev->ts_deboost |= TASK_ST(prev, rq, >, ts_overrun_th);
+			boost_task(prev, rq);
 			deactivate_task(prev, rq);
 
 			if (prev->in_iowait) {
@@ -4600,10 +4630,7 @@ static void do_sched_yield(void)
 
 	rq = this_rq_lock_irq(&rf);
 
-	if (!rt_task(current)) {
-		current->boost_prio = MAX_PRIORITY_ADJ;
-		requeue_task(current, rq);
-	}
+	rq->skip = current;
 	schedstat_inc(rq->yld_count);
 
 	/*
@@ -5739,6 +5766,7 @@ void __init sched_init(void)
 
 		bmq_init(&rq->queue);
 		rq->watermark = IDLE_WM;
+		rq->skip = NULL;
 
 		raw_spin_lock_init(&rq->lock);
 		rq->nr_running = rq->nr_uninterruptible = 0;
