@@ -91,7 +91,7 @@ struct bfq_service_tree {
  * expiration. This peculiar definition allows for the following
  * optimization, not yet exploited: while a given entity is still in
  * service, we already know which is the best candidate for next
- * service among the other active entitities in the same parent
+ * service among the other active entities in the same parent
  * entity. We can then quickly compare the timestamps of the
  * in-service entity with those of such best candidate.
  *
@@ -142,7 +142,7 @@ struct bfq_weight_counter {
  *
  * Unless cgroups are used, the weight value is calculated from the
  * ioprio to export the same interface as CFQ.  When dealing with
- * ``well-behaved'' queues (i.e., queues that do not spend too much
+ * "well-behaved" queues (i.e., queues that do not spend too much
  * time to consume their budget and have true sequential behavior, and
  * when there are no external factors breaking anticipation) the
  * relative weights at each level of the cgroups hierarchy should be
@@ -1014,7 +1014,7 @@ bool __bfq_deactivate_entity(struct bfq_entity *entity,
 			     bool ins_into_idle_tree);
 bool next_queue_may_preempt(struct bfq_data *bfqd);
 struct bfq_queue *bfq_get_next_queue(struct bfq_data *bfqd);
-void __bfq_bfqd_reset_in_service(struct bfq_data *bfqd);
+bool __bfq_bfqd_reset_in_service(struct bfq_data *bfqd);
 void bfq_deactivate_bfqq(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 			 bool ins_into_idle_tree, bool expiration);
 void bfq_activate_bfqq(struct bfq_data *bfqd, struct bfq_queue *bfqq);

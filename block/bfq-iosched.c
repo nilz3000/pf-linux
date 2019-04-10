@@ -189,7 +189,7 @@ static const int bfq_default_max_budget = 16 * 1024;
 /*
  * When a sync request is dispatched, the queue that contains that
  * request, and all the ancestor entities of that queue, are charged
- * with the number of sectors of the request. In constrast, if the
+ * with the number of sectors of the request. In contrast, if the
  * request is async, then the queue and its ancestor entities are
  * charged with the number of sectors of the request, multiplied by
  * the factor below. This throttles the bandwidth for async I/O,
@@ -217,7 +217,7 @@ const int bfq_timeout = HZ / 8;
  * queue merging.
  *
  * As can be deduced from the low time limit below, queue merging, if
- * successful, happens at the very beggining of the I/O of the involved
+ * successful, happens at the very beginning of the I/O of the involved
  * cooperating processes, as a consequence of the arrival of the very
  * first requests from each cooperator.  After that, there is very
  * little chance to find cooperators.
@@ -441,7 +441,7 @@ void bfq_schedule_dispatch(struct bfq_data *bfqd)
 
 /*
  * Lifted from AS - choose which of rq1 and rq2 that is best served now.
- * We choose the request that is closesr to the head right now.  Distance
+ * We choose the request that is closer to the head right now.  Distance
  * behind the head is penalized and only allowed to a certain extent.
  */
 static struct request *bfq_choose_req(struct bfq_data *bfqd,
@@ -989,7 +989,7 @@ static unsigned int bfq_wr_duration(struct bfq_data *bfqd)
 	 *   of several files
 	 * mplayer took 23 seconds to start, if constantly weight-raised.
 	 *
-	 * As for higher values than that accomodating the above bad
+	 * As for higher values than that accommodating the above bad
 	 * scenario, tests show that higher values would often yield
 	 * the opposite of the desired result, i.e., would worsen
 	 * responsiveness by allowing non-interactive applications to
@@ -2636,8 +2636,8 @@ static bool bfq_allow_bio_merge(struct request_queue *q, struct request *rq,
 		/*
 		 * bic still points to bfqq, then it has not yet been
 		 * redirected to some other bfq_queue, and a queue
-		 * merge beween bfqq and new_bfqq can be safely
-		 * fulfillled, i.e., bic can be redirected to new_bfqq
+		 * merge between bfqq and new_bfqq can be safely
+		 * fulfilled, i.e., bic can be redirected to new_bfqq
 		 * and bfqq can be put.
 		 */
 		bfq_merge_bfqqs(bfqd, bfqd->bio_bic, bfqq,
@@ -3054,7 +3054,7 @@ static void bfq_dispatch_remove(struct request_queue *q, struct request *rq)
 	bfq_remove_request(q, rq);
 }
 
-static void __bfq_bfqq_expire(struct bfq_data *bfqd, struct bfq_queue *bfqq)
+static bool __bfq_bfqq_expire(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 {
 	/*
 	 * If this bfqq is shared between multiple processes, check
@@ -3089,9 +3089,11 @@ static void __bfq_bfqq_expire(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	/*
 	 * All in-service entities must have been properly deactivated
 	 * or requeued before executing the next function, which
-	 * resets all in-service entites as no more in service.
+	 * resets all in-service entities as no more in service. This
+	 * may cause bfqq to be freed. If this happens, the next
+	 * function returns true.
 	 */
-	__bfq_bfqd_reset_in_service(bfqd);
+	return __bfq_bfqd_reset_in_service(bfqd);
 }
 
 /**
@@ -3489,7 +3491,6 @@ void bfq_bfqq_expire(struct bfq_data *bfqd,
 	bool slow;
 	unsigned long delta = 0;
 	struct bfq_entity *entity = &bfqq->entity;
-	int ref;
 
 	/*
 	 * Check whether the process is slow (see bfq_bfqq_is_slow).
@@ -3582,10 +3583,8 @@ void bfq_bfqq_expire(struct bfq_data *bfqd,
 	 * reason.
 	 */
 	__bfq_bfqq_recalc_budget(bfqd, bfqq, reason);
-	ref = bfqq->ref;
-	__bfq_bfqq_expire(bfqd, bfqq);
-
-	if (ref == 1) /* bfqq is gone, no more actions on it */
+	if (__bfq_bfqq_expire(bfqd, bfqq))
+		/* bfqq is gone, no more actions on it */
 		return;
 
 	/* mark bfqq as waiting a request only if a bic still points to it */
@@ -5632,7 +5631,7 @@ static void bfq_prepare_request(struct request *rq, struct bio *bio)
  * preparation is that, after the prepare_request hook is invoked for
  * rq, rq may still be transformed into a request with no icq, i.e., a
  * request not associated with any queue. No bfq hook is invoked to
- * signal this tranformation. As a consequence, should these
+ * signal this transformation. As a consequence, should these
  * preparation operations be performed when the prepare_request hook
  * is invoked, and should rq be transformed one moment later, bfq
  * would end up in an inconsistent state, because it would have
