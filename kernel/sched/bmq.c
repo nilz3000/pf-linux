@@ -607,7 +607,7 @@ static inline void dequeue_task(struct task_struct *p, struct rq *rq, int flags)
 
 	list_del(&p->bmq_node);
 	if (list_empty(&rq->queue.heads[p->bmq_idx])) {
-		clear_bit(p->bmq_idx, rq->queue.bitmap);
+		__clear_bit(p->bmq_idx, rq->queue.bitmap);
 		update_sched_rq_watermark(rq);
 	}
 	--rq->nr_running;
@@ -636,7 +636,7 @@ static inline void enqueue_task(struct task_struct *p, struct rq *rq, int flags)
 
 	p->bmq_idx = task_sched_prio(p);
 	bmq_add_task(p, &rq->queue, p->bmq_idx);
-	set_bit(p->bmq_idx, rq->queue.bitmap);
+	__set_bit(p->bmq_idx, rq->queue.bitmap);
 	update_sched_rq_watermark(rq);
 	++rq->nr_running;
 #ifdef CONFIG_SMP
@@ -670,9 +670,9 @@ static inline void requeue_task(struct task_struct *p, struct rq *rq)
 	bmq_add_task(p, &rq->queue, idx);
 	if (idx != p->bmq_idx) {
 		if (list_empty(&rq->queue.heads[p->bmq_idx]))
-			clear_bit(p->bmq_idx, rq->queue.bitmap);
+			__clear_bit(p->bmq_idx, rq->queue.bitmap);
 		p->bmq_idx = idx;
-		set_bit(p->bmq_idx, rq->queue.bitmap);
+		__set_bit(p->bmq_idx, rq->queue.bitmap);
 		update_sched_rq_watermark(rq);
 	}
 }
@@ -691,9 +691,9 @@ static inline int requeue_task_lazy(struct task_struct *p, struct rq *rq)
 	list_del(&p->bmq_node);
 	bmq_add_task(p, &rq->queue, idx);
 	if (list_empty(&rq->queue.heads[p->bmq_idx]))
-		clear_bit(p->bmq_idx, rq->queue.bitmap);
+		__clear_bit(p->bmq_idx, rq->queue.bitmap);
 	p->bmq_idx = idx;
-	set_bit(p->bmq_idx, rq->queue.bitmap);
+	__set_bit(p->bmq_idx, rq->queue.bitmap);
 	update_sched_rq_watermark(rq);
 
 	return 1;
