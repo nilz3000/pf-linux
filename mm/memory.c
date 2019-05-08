@@ -2994,6 +2994,10 @@ setpte:
 	update_mmu_cache(vma, vmf->address, vmf->pte);
 unlock:
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
+
+	if (ksm_mode_always())
+		ksm_enter(vma->vm_mm, vma, &vma->vm_flags);
+
 	return ret;
 release:
 	mem_cgroup_cancel_charge(page, memcg, false);
