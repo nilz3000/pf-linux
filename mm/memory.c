@@ -2995,8 +2995,10 @@ setpte:
 unlock:
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
 
+#if defined(CONFIG_KSM) && defined(VM_UNMERGEABLE)
 	if (ksm_mode_always())
 		ksm_enter(vma->vm_mm, vma, &vma->vm_flags);
+#endif
 
 	return ret;
 release:
