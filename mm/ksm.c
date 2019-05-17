@@ -295,12 +295,6 @@ static int ksm_nr_node_ids = 1;
 static unsigned long ksm_run = KSM_RUN_STOP;
 static void wait_while_offlining(void);
 
-#ifdef VM_UNMERGEABLE
-#define KSM_MODE_MADVISE	0
-#define KSM_MODE_ALWAYS		1
-static unsigned long ksm_mode = KSM_MODE_MADVISE;
-#endif
-
 static DECLARE_WAIT_QUEUE_HEAD(ksm_thread_wait);
 static DECLARE_WAIT_QUEUE_HEAD(ksm_iter_wait);
 static DEFINE_MUTEX(ksm_thread_mutex);
@@ -2448,73 +2442,7 @@ static int ksm_scan_thread(void *nothing)
 	return 0;
 }
 
-int ksm_madvise(struct vm_area_struct *vma, unsigned long start,
-		unsigned long end, int advice, unsigned long *vm_flags)
-{
-	struct mm_struct *mm = vma->vm_mm;
-	int err;
-
-	switch (advice) {
-	case MADV_MERGEABLE:
-#ifdef VM_UNMERGEABLE
-		*vm_flags &= ~VM_UNMERGEABLE;
-#endif
-		err = ksm_enter(mm, vma, vm_flags);
-		if (err)
-			return err;
-		break;
-
-	case MADV_UNMERGEABLE:
-#ifdef VM_UNMERGEABLE
-		*vm_flags |= VM_UNMERGEABLE;
-#endif
-		if (!(*vm_flags & VM_MERGEABLE))
-			return 0;		/* just ignore the advice */
-
-		if (vma->anon_vma) {
-			err = unmerge_ksm_pages(vma, start, end);
-			if (err)
-				return err;
-		}
-
-		*vm_flags &= ~VM_MERGEABLE;
-		break;
-	}
-
-	return 0;
-}
-
-#ifdef VM_UNMERGEABLE
-bool ksm_mode_always(void)
-{
-	return ksm_mode == KSM_MODE_ALWAYS;
-}
-
-static int __init setup_ksm_mode(char *str)
-{
-	int ret = 0;
-
-	if (!str)
-		goto out;
-
-	if (!strcmp(str, "madvise")) {
-		ksm_mode = KSM_MODE_MADVISE;
-		ret = 1;
-	} else if (!strcmp(str, "always")) {
-		ksm_mode = KSM_MODE_ALWAYS;
-		ret = 1;
-	}
-
-out:
-	if (!ret)
-		pr_warn("ksm_mode= cannot parse, ignored\n");
-
-	return ret;
-}
-__setup("ksm_mode=", setup_ksm_mode);
-#endif
-
-int ksm_enter(struct mm_struct *mm, struct vm_area_struct *vma,
+int ksm_madvise_merge(struct mm_struct *mm, struct vm_area_struct *vma,
 		unsigned long *vm_flags)
 {
 	int err;
@@ -2538,10 +2466,6 @@ int ksm_enter(struct mm_struct *mm, struct vm_area_struct *vma,
 	if (*vm_flags & VM_SPARC_ADI)
 		return 0;
 #endif
-#ifdef VM_UNMERGEABLE
-	if (*vm_flags & VM_UNMERGEABLE)
-		return 0;
-#endif
 
 	if (!test_bit(MMF_VM_MERGEABLE, &mm->flags)) {
 		err = __ksm_enter(mm);
@@ -2550,6 +2474,48 @@ int ksm_enter(struct mm_struct *mm, struct vm_area_struct *vma,
 	}
 
 	*vm_flags |= VM_MERGEABLE;
+
+	return 0;
+}
+
+int ksm_madvise_unmerge(struct vm_area_struct *vma, unsigned long start,
+		unsigned long end, unsigned long *vm_flags)
+{
+	int err;
+
+	if (!(*vm_flags & VM_MERGEABLE))
+		return 0;		/* just ignore the advice */
+
+	if (vma->anon_vma) {
+		err = unmerge_ksm_pages(vma, start, end);
+		if (err)
+			return err;
+	}
+
+	*vm_flags &= ~VM_MERGEABLE;
+
+	return 0;
+}
+
+int ksm_madvise(struct vm_area_struct *vma, unsigned long start,
+		unsigned long end, int advice, unsigned long *vm_flags)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	int err;
+
+	switch (advice) {
+	case MADV_MERGEABLE:
+		err = ksm_madvise_merge(mm, vma, vm_flags);
+		if (err)
+			return err;
+		break;
+
+	case MADV_UNMERGEABLE:
+		err = ksm_madvise_unmerge(vma, start, end, vm_flags);
+		if (err)
+			return err;
+		break;
+	}
 
 	return 0;
 }
@@ -2917,35 +2883,6 @@ static void wait_while_offlining(void)
 	static struct kobj_attribute _name##_attr = \
 		__ATTR(_name, 0644, _name##_show, _name##_store)
 
-#ifdef VM_UNMERGEABLE
-static ssize_t mode_show(struct kobject *kobj, struct kobj_attribute *attr,
-	char *buf)
-{
-	switch (ksm_mode) {
-	case KSM_MODE_MADVISE:
-		return sprintf(buf, "always [madvise]\n");
-	case KSM_MODE_ALWAYS:
-		return sprintf(buf, "[always] madvise\n");
-	}
-
-	return sprintf(buf, "always [madvise]\n");
-}
-
-static ssize_t mode_store(struct kobject *kobj, struct kobj_attribute *attr,
-	const char *buf, size_t count)
-{
-	if (!memcmp("madvise", buf, min(sizeof("madvise")-1, count)))
-		ksm_mode = KSM_MODE_MADVISE;
-	else if (!memcmp("always", buf, min(sizeof("always")-1, count)))
-		ksm_mode = KSM_MODE_ALWAYS;
-	else
-		return -EINVAL;
-
-	return count;
-}
-KSM_ATTR(mode);
-#endif
-
 static ssize_t sleep_millisecs_show(struct kobject *kobj,
 				    struct kobj_attribute *attr, char *buf)
 {
@@ -3248,9 +3185,6 @@ static ssize_t full_scans_show(struct kobject *kobj,
 KSM_ATTR_RO(full_scans);
 
 static struct attribute *ksm_attrs[] = {
-#ifdef VM_UNMERGEABLE
-	&mode_attr.attr,
-#endif
 	&sleep_millisecs_attr.attr,
 	&pages_to_scan_attr.attr,
 	&run_attr.attr,

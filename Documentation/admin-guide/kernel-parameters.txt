@@ -2008,13 +2008,6 @@
 			0: force disabled
 			1: force enabled
 
-	ksm_mode=
-			[KNL]
-			Format: [madvise|always]
-			Default: madvise
-			Can be used to control the default behavior of the system
-			with respect to merging anonymous memory.
-
 	kvm.ignore_msrs=[KVM] Ignore guest accesses to unhandled MSRs.
 			Default is 0 (don't ignore, but inject #GP)
 
