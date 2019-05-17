@@ -78,13 +78,6 @@ KSM daemon sysfs interface
 The KSM daemon is controlled by sysfs files in ``/sys/kernel/mm/ksm/``,
 readable by all but writable only by root:
 
-mode
-        * set madvise to deduplicate only madvised memory
-        * set always to allow deduplicating all the anonymous memory
-          (applies to newly allocated memory only)
-
-        Default: madvise (maintains old behaviour)
-
 pages_to_scan
         how many pages to scan before ksmd goes to sleep
         e.g. ``echo 100 > /sys/kernel/mm/ksm/pages_to_scan``.
