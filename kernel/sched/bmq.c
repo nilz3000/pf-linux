@@ -56,7 +56,7 @@
 
 static inline void print_scheduler_version(void)
 {
-	printk(KERN_INFO "bmq: BMQ CPU Scheduler 0.94 by Alfred Chen.\n");
+	printk(KERN_INFO "bmq: BMQ CPU Scheduler 0.95 by Alfred Chen.\n");
 }
 
 /**
@@ -67,20 +67,9 @@ static inline void print_scheduler_version(void)
  */
 int sched_yield_type __read_mostly = 1;
 
-const static u64 ts_boost_th[] = {
-	SCHED_TIMESLICE_NS >> 10,
-	SCHED_TIMESLICE_NS >> 9,
-	SCHED_TIMESLICE_NS >> 8,
-	SCHED_TIMESLICE_NS >> 7,
-	SCHED_TIMESLICE_NS >> 6,
-	SCHED_TIMESLICE_NS >> 5,
-	SCHED_TIMESLICE_NS >> 4,
-	SCHED_TIMESLICE_NS >> 3,
-	SCHED_TIMESLICE_NS >> 2
-};
-
-#define TASK_ST(p, rq, op, th)	(((rq)->clock - (rq)->last_ts_switch) op\
-				 (th)[MAX_PRIORITY_ADJ +  (p)->boost_prio])
+#define rq_switch_time(rq)	((rq)->clock - (rq)->last_ts_switch)
+#define boost_threshold(p)	(SCHED_TIMESLICE_NS >>\
+				 (10 - MAX_PRIORITY_ADJ -  (p)->boost_prio))
 
 static inline void boost_task(struct task_struct *p, struct rq *rq)
 {
@@ -98,7 +87,7 @@ static inline void boost_task(struct task_struct *p, struct rq *rq)
 		return;
 	}
 
-	if (p->boost_prio > limit && TASK_ST(p, rq, <, ts_boost_th))
+	if (p->boost_prio > limit && rq_switch_time(rq) < boost_threshold(p))
 		p->boost_prio--;
 }
 
@@ -177,8 +166,12 @@ static inline void update_sched_rq_watermark(struct rq *rq)
 		return;
 
 	cpu = cpu_of(rq);
-	if (!cpumask_andnot(&sched_rq_watermark[last_wm],
-			    &sched_rq_watermark[last_wm], cpumask_of(cpu)))
+#ifdef CONFIG_X86
+	__cpumask_clear_cpu(cpu, &sched_rq_watermark[last_wm]);
+#else
+	cpumask_clear_cpu(cpu, &sched_rq_watermark[last_wm]);
+#endif
+	if (cpumask_empty(&sched_rq_watermark[last_wm]))
 		clear_bit(last_wm, sched_rq_watermark_bitmap);
 	cpumask_set_cpu(cpu, &sched_rq_watermark[watermark]);
 	set_bit(watermark, sched_rq_watermark_bitmap);
@@ -607,7 +600,7 @@ static inline void dequeue_task(struct task_struct *p, struct rq *rq, int flags)
 
 	list_del(&p->bmq_node);
 	if (list_empty(&rq->queue.heads[p->bmq_idx])) {
-		clear_bit(p->bmq_idx, rq->queue.bitmap);
+		__clear_bit(p->bmq_idx, rq->queue.bitmap);
 		update_sched_rq_watermark(rq);
 	}
 	--rq->nr_running;
@@ -636,7 +629,7 @@ static inline void enqueue_task(struct task_struct *p, struct rq *rq, int flags)
 
 	p->bmq_idx = task_sched_prio(p);
 	bmq_add_task(p, &rq->queue, p->bmq_idx);
-	set_bit(p->bmq_idx, rq->queue.bitmap);
+	__set_bit(p->bmq_idx, rq->queue.bitmap);
 	update_sched_rq_watermark(rq);
 	++rq->nr_running;
 #ifdef CONFIG_SMP
@@ -655,7 +648,7 @@ static inline void enqueue_task(struct task_struct *p, struct rq *rq, int flags)
 	 * passed.
 	 */
 	if (p->in_iowait)
-		cpufreq_update_this_cpu(rq, SCHED_CPUFREQ_IOWAIT);
+		cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT);
 }
 
 static inline void requeue_task(struct task_struct *p, struct rq *rq)
@@ -670,9 +663,9 @@ static inline void requeue_task(struct task_struct *p, struct rq *rq)
 	bmq_add_task(p, &rq->queue, idx);
 	if (idx != p->bmq_idx) {
 		if (list_empty(&rq->queue.heads[p->bmq_idx]))
-			clear_bit(p->bmq_idx, rq->queue.bitmap);
+			__clear_bit(p->bmq_idx, rq->queue.bitmap);
 		p->bmq_idx = idx;
-		set_bit(p->bmq_idx, rq->queue.bitmap);
+		__set_bit(p->bmq_idx, rq->queue.bitmap);
 		update_sched_rq_watermark(rq);
 	}
 }
@@ -691,9 +684,9 @@ static inline int requeue_task_lazy(struct task_struct *p, struct rq *rq)
 	list_del(&p->bmq_node);
 	bmq_add_task(p, &rq->queue, idx);
 	if (list_empty(&rq->queue.heads[p->bmq_idx]))
-		clear_bit(p->bmq_idx, rq->queue.bitmap);
+		__clear_bit(p->bmq_idx, rq->queue.bitmap);
 	p->bmq_idx = idx;
-	set_bit(p->bmq_idx, rq->queue.bitmap);
+	__set_bit(p->bmq_idx, rq->queue.bitmap);
 	update_sched_rq_watermark(rq);
 
 	return 1;
@@ -924,7 +917,7 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 		rq->nr_uninterruptible--;
 	enqueue_task(p, rq, ENQUEUE_WAKEUP);
 	p->on_rq = 1;
-	cpufreq_update_this_cpu(rq, 0);
+	cpufreq_update_util(rq, 0);
 }
 
 /*
@@ -938,7 +931,7 @@ static inline void deactivate_task(struct task_struct *p, struct rq *rq)
 		rq->nr_uninterruptible++;
 	dequeue_task(p, rq, DEQUEUE_SLEEP);
 	p->on_rq = 0;
-	cpufreq_update_this_cpu(rq, 0);
+	cpufreq_update_util(rq, 0);
 }
 
 static inline void __set_task_cpu(struct task_struct *p, unsigned int cpu)
@@ -1029,37 +1022,6 @@ static inline bool is_cpu_allowed(struct task_struct *p, int cpu)
  */
 
 /*
- * detach_task() -- detach the task for the migration specified in @target_cpu
- */
-static void detach_task(struct rq *rq, struct task_struct *p, int target_cpu)
-{
-	lockdep_assert_held(&rq->lock);
-
-	p->on_rq = TASK_ON_RQ_MIGRATING;
-	if (task_contributes_to_load(p))
-		rq->nr_uninterruptible++;
-	dequeue_task(p, rq, 0);
-
-	set_task_cpu(p, target_cpu);
-}
-
-/*
- * attach_task() -- attach the task detached by detach_task() to its new rq.
- */
-static void attach_task(struct rq *rq, struct task_struct *p)
-{
-	lockdep_assert_held(&rq->lock);
-
-	BUG_ON(task_rq(p) != rq);
-
-	if (task_contributes_to_load(p))
-		rq->nr_uninterruptible--;
-	enqueue_task(p, rq, 0);
-	p->on_rq = TASK_ON_RQ_QUEUED;
-	cpufreq_update_this_cpu(rq, 0);
-}
-
-/*
  * move_queued_task - move a queued task to new rq.
  *
  * Returns (locked) new rq. Old rq's lock is released.
@@ -1067,16 +1029,19 @@ static void attach_task(struct rq *rq, struct task_struct *p)
 static struct rq *move_queued_task(struct rq *rq, struct task_struct *p, int
 				   new_cpu)
 {
-	detach_task(rq, p, new_cpu);
+	lockdep_assert_held(&rq->lock);
+
+	p->on_rq = TASK_ON_RQ_MIGRATING;
+	dequeue_task(p, rq, 0);
+	set_task_cpu(p, new_cpu);
 	raw_spin_unlock(&rq->lock);
 
 	rq = cpu_rq(new_cpu);
 
 	raw_spin_lock(&rq->lock);
-	update_rq_clock(rq);
-
-	attach_task(rq, p);
-
+	BUG_ON(task_cpu(p) != new_cpu);
+	enqueue_task(p, rq, 0);
+	p->on_rq = TASK_ON_RQ_QUEUED;
 	check_preempt_curr(rq, p);
 
 	return rq;
@@ -1406,30 +1371,6 @@ static inline int best_mask_cpu(int cpu, cpumask_t *cpumask)
 }
 
 /*
- * task_preemptible_rq - return the rq which the given task can preempt on
- * @p: task wants to preempt CPU
- * @only_preempt_low_policy: indicate only preempt rq running low policy than @p
- */
-static inline int
-task_preemptible_rq(struct task_struct *p, cpumask_t *chk_mask,
-		    unsigned long preempt_level)
-{
-	cpumask_t tmp;
-	unsigned long level;
-
-	level = find_first_bit(sched_rq_watermark_bitmap, WM_BITS);
-	while (level < preempt_level) {
-		if (cpumask_and(&tmp, chk_mask, &sched_rq_watermark[level]))
-			return best_mask_cpu(task_cpu(p), &tmp);
-
-		level = find_next_bit(sched_rq_watermark_bitmap, WM_BITS,
-				      level + 1);
-	}
-
-	return best_mask_cpu(task_cpu(p), chk_mask);
-}
-
-/*
  * wake flags
  */
 #define WF_SYNC		0x01		/* waker goes to sleep after wakeup */
@@ -1438,13 +1379,23 @@ task_preemptible_rq(struct task_struct *p, cpumask_t *chk_mask,
 
 static inline int select_task_rq(struct task_struct *p)
 {
-	cpumask_t chk_mask;
+	cpumask_t chk_mask, tmp;
+	unsigned long preempt_level, level;
 
 	if (unlikely(!cpumask_and(&chk_mask, &p->cpus_allowed, cpu_online_mask)))
 		return select_fallback_rq(task_cpu(p), p);
 
-	return task_preemptible_rq(p, &chk_mask,
-				   SCHED_PRIO2WATERMARK(task_sched_prio(p)));
+	preempt_level = SCHED_PRIO2WATERMARK(task_sched_prio(p));
+	level = find_first_bit(sched_rq_watermark_bitmap, WM_BITS);
+	while (level < preempt_level) {
+		if (cpumask_and(&tmp, &chk_mask, &sched_rq_watermark[level]))
+			return best_mask_cpu(task_cpu(p), &tmp);
+
+		level = find_next_bit(sched_rq_watermark_bitmap, WM_BITS,
+				      level + 1);
+	}
+
+	return best_mask_cpu(task_cpu(p), &chk_mask);
 }
 #else /* CONFIG_SMP */
 static inline int select_task_rq(struct task_struct *p)
@@ -2912,8 +2863,9 @@ migrate_pending_tasks(struct rq *rq, struct rq *dest_rq)
 			continue;
 		next = rq_next_bmq_task(p, rq);
 		if (cpumask_test_cpu(dest_cpu, &p->cpus_allowed)) {
-			detach_task(rq, p, dest_cpu);
-			attach_task(dest_rq, p);
+			dequeue_task(p, rq, 0);
+			set_task_cpu(p, dest_cpu);
+			enqueue_task(p, dest_rq, 0);
 			nr_migrated++;
 		}
 		nr_tries--;
@@ -2936,7 +2888,8 @@ lock_and_migrate_pending_tasks(struct rq *src_rq, struct rq *rq)
 	spin_acquire(&src_rq->lock.dep_map, SINGLE_DEPTH_NESTING, 1, _RET_IP_);
 
 	update_rq_clock(src_rq);
-	nr_migrated = migrate_pending_tasks(src_rq, rq);
+	if ((nr_migrated = migrate_pending_tasks(src_rq, rq)))
+		cpufreq_update_util(rq, 0);
 
 	spin_release(&src_rq->lock.dep_map, 1, _RET_IP_);
 	do_raw_spin_unlock(&src_rq->lock);
