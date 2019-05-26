@@ -167,11 +167,12 @@ static inline void update_sched_rq_watermark(struct rq *rq)
 
 	cpu = cpu_of(rq);
 #ifdef CONFIG_X86
-	__cpumask_clear_cpu(cpu, &sched_rq_watermark[last_wm]);
+	if (!cpumask_andnot(&sched_rq_watermark[last_wm],
+			    &sched_rq_watermark[last_wm], cpumask_of(cpu)))
 #else
 	cpumask_clear_cpu(cpu, &sched_rq_watermark[last_wm]);
-#endif
 	if (cpumask_empty(&sched_rq_watermark[last_wm]))
+#endif
 		clear_bit(last_wm, sched_rq_watermark_bitmap);
 	cpumask_set_cpu(cpu, &sched_rq_watermark[watermark]);
 	set_bit(watermark, sched_rq_watermark_bitmap);
@@ -600,7 +601,7 @@ static inline void dequeue_task(struct task_struct *p, struct rq *rq, int flags)
 
 	list_del(&p->bmq_node);
 	if (list_empty(&rq->queue.heads[p->bmq_idx])) {
-		__clear_bit(p->bmq_idx, rq->queue.bitmap);
+		clear_bit(p->bmq_idx, rq->queue.bitmap);
 		update_sched_rq_watermark(rq);
 	}
 	--rq->nr_running;
@@ -629,7 +630,7 @@ static inline void enqueue_task(struct task_struct *p, struct rq *rq, int flags)
 
 	p->bmq_idx = task_sched_prio(p);
 	bmq_add_task(p, &rq->queue, p->bmq_idx);
-	__set_bit(p->bmq_idx, rq->queue.bitmap);
+	set_bit(p->bmq_idx, rq->queue.bitmap);
 	update_sched_rq_watermark(rq);
 	++rq->nr_running;
 #ifdef CONFIG_SMP
@@ -663,9 +664,9 @@ static inline void requeue_task(struct task_struct *p, struct rq *rq)
 	bmq_add_task(p, &rq->queue, idx);
 	if (idx != p->bmq_idx) {
 		if (list_empty(&rq->queue.heads[p->bmq_idx]))
-			__clear_bit(p->bmq_idx, rq->queue.bitmap);
+			clear_bit(p->bmq_idx, rq->queue.bitmap);
 		p->bmq_idx = idx;
-		__set_bit(p->bmq_idx, rq->queue.bitmap);
+		set_bit(p->bmq_idx, rq->queue.bitmap);
 		update_sched_rq_watermark(rq);
 	}
 }
@@ -684,9 +685,9 @@ static inline int requeue_task_lazy(struct task_struct *p, struct rq *rq)
 	list_del(&p->bmq_node);
 	bmq_add_task(p, &rq->queue, idx);
 	if (list_empty(&rq->queue.heads[p->bmq_idx]))
-		__clear_bit(p->bmq_idx, rq->queue.bitmap);
+		clear_bit(p->bmq_idx, rq->queue.bitmap);
 	p->bmq_idx = idx;
-	__set_bit(p->bmq_idx, rq->queue.bitmap);
+	set_bit(p->bmq_idx, rq->queue.bitmap);
 	update_sched_rq_watermark(rq);
 
 	return 1;
