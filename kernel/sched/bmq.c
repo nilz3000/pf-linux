@@ -56,7 +56,7 @@
 
 static inline void print_scheduler_version(void)
 {
-	printk(KERN_INFO "bmq: BMQ CPU Scheduler 0.95 by Alfred Chen.\n");
+	printk(KERN_INFO "bmq: BMQ CPU Scheduler 0.96 by Alfred Chen.\n");
 }
 
 /**
@@ -155,9 +155,17 @@ ____cacheline_aligned_in_smp;
 #define SCHED_PRIO2WATERMARK(prio) (IDLE_TASK_SCHED_PRIO - (prio) + 1)
 #define TASK_SCHED_WATERMARK(p) (SCHED_PRIO2WATERMARK((p)->bmq_idx))
 
+#if (bmq_BITS <= BITS_PER_LONG) && (WM_BITS <= BITS_PER_LONG)
+#define bmq_find_first_bit(bm, size)		__ffs((bm[0]))
+#define bmq_find_next_bit(bm, size, start)	__ffs((bm[0] & BITMAP_FIRST_WORD_MASK(start)))
+#else
+#define bmq_find_first_bit(bm, size)		find_first_bit((bm), (size))
+#define bmq_find_next_bit(bm, size, start)	find_next_bit(bm, size, start)
+#endif
+
 static inline void update_sched_rq_watermark(struct rq *rq)
 {
-	unsigned long watermark = find_first_bit(rq->queue.bitmap, bmq_BITS);
+	unsigned long watermark = bmq_find_first_bit(rq->queue.bitmap, bmq_BITS);
 	unsigned long last_wm = rq->watermark;
 	int cpu;
 
@@ -246,30 +254,29 @@ static inline void bmq_add_task(struct task_struct *p, struct bmq *q, int idx)
 /*
  * This routine used in bmq scheduler only which assume the idle task in the bmq
  */
-static inline struct task_struct *
-__rq_next_bmq_task(const struct rq *rq, unsigned long offset)
+static inline struct task_struct *rq_first_bmq_task(struct rq *rq)
 {
-	unsigned long idx = find_next_bit(rq->queue.bitmap, bmq_BITS, offset);
+	unsigned long idx = bmq_find_first_bit(rq->queue.bitmap, bmq_BITS);
 	const struct list_head *head = &rq->queue.heads[idx];
 
 	BUG_ON(list_empty(head));
 	return list_first_entry(head, struct task_struct, bmq_node);
 }
 
-static inline struct task_struct *rq_first_bmq_task(struct rq *rq)
-{
-	return __rq_next_bmq_task(rq, 0UL);
-}
-
 static inline struct task_struct *
 rq_next_bmq_task(struct task_struct *p, struct rq *rq)
 {
 	unsigned long idx = p->bmq_idx;
-	const struct list_head *head = &rq->queue.heads[idx];
+	struct list_head *head = &rq->queue.heads[idx];
 
 	BUG_ON(list_empty(head));
-	if (list_is_last(&p->bmq_node, head))
-		return __rq_next_bmq_task(rq, idx + 1);
+	if (list_is_last(&p->bmq_node, head)) {
+		idx = bmq_find_next_bit(rq->queue.bitmap, bmq_BITS, idx + 1);
+		head = &rq->queue.heads[idx];
+
+		BUG_ON(list_empty(head));
+		return list_first_entry(head, struct task_struct, bmq_node);
+	}
 
 	return list_next_entry(p, bmq_node);
 
@@ -1388,13 +1395,13 @@ static inline int select_task_rq(struct task_struct *p)
 		return select_fallback_rq(task_cpu(p), p);
 
 	preempt_level = SCHED_PRIO2WATERMARK(task_sched_prio(p));
-	level = find_first_bit(sched_rq_watermark_bitmap, WM_BITS);
+	level = bmq_find_first_bit(sched_rq_watermark_bitmap, WM_BITS);
 	while (level < preempt_level) {
 		if (cpumask_and(&tmp, &chk_mask, &sched_rq_watermark[level]))
 			return best_mask_cpu(task_cpu(p), &tmp);
 
-		level = find_next_bit(sched_rq_watermark_bitmap, WM_BITS,
-				      level + 1);
+		level = bmq_find_next_bit(sched_rq_watermark_bitmap, WM_BITS,
+					  level + 1);
 	}
 
 	return best_mask_cpu(task_cpu(p), &chk_mask);
@@ -2901,23 +2908,25 @@ lock_and_migrate_pending_tasks(struct rq *src_rq, struct rq *rq)
 
 static inline int take_other_rq_tasks(struct rq *rq, int cpu)
 {
-	struct cpumask *affinity_mask;
-	struct cpumask chk, tmp;
-	int i, tried;
+	int i, tried = 0;
+	struct cpumask *affinity_mask, *end_mask;
 
-	if (!cpumask_and(&chk, &sched_rq_pending_mask, cpu_online_mask))
+	if (cpumask_empty(&sched_rq_pending_mask))
 		return 0;
 
-	tried = 0;
 	affinity_mask = per_cpu(sched_cpu_llc_start_mask, cpu);
-	while (cpumask_and(&tmp, &chk, affinity_mask++))
-		for_each_cpu_wrap(i, &tmp, cpu) {
+	end_mask = per_cpu(sched_cpu_affinity_chk_end_masks, cpu);
+
+	do {
+		for_each_cpu_and(i, &sched_rq_pending_mask, affinity_mask) {
 			if (lock_and_migrate_pending_tasks(cpu_rq(i), rq))
 				return 1;
 			if (tried)
 				return 0;
 			tried++;
 		}
+	} while (++affinity_mask < end_mask);
+
 	return 0;
 }
 #endif
