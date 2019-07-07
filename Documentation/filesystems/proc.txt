@@ -45,6 +45,7 @@ Table of Contents
   3.9   /proc/<pid>/map_files - Information about memory mapped files
   3.10  /proc/<pid>/timerslack_ns - Task timerslack value
   3.11	/proc/<pid>/patch_state - Livepatch patch operation state
+  3.12  /proc/<pid>/ksm - Remote KSM
 
   4	Configuring procfs
   4.1	Mount options
@@ -1947,6 +1948,19 @@ A value of '1' indicates that a patch is in transition and the task is
 patched.  If the patch is being enabled, then the task has already been
 patched.  If the patch is being disabled, then the task hasn't been
 unpatched yet.
+
+3.12    /proc/<pid>/ksm - Remote KSM
+--------------------------------------------
+This write-only file allows marking memory of another task for merging
+and unmerging via KSM.
+
+The following actions are available:
+
+  * mark task's memory as mergeable:
+    # echo merge > /proc/<pid>/ksm
+
+  * unmerging all the task's memory:
+    # echo unmerge > /proc/<pid>/ksm
 
 
 ------------------------------------------------------------------------------
