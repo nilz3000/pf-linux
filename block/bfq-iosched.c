@@ -2191,8 +2191,7 @@ static void bfq_remove_request(struct request_queue *q,
 
 }
 
-static bool bfq_bio_merge(struct blk_mq_hw_ctx *hctx, struct bio *bio,
-		unsigned int nr_segs)
+static bool bfq_bio_merge(struct blk_mq_hw_ctx *hctx, struct bio *bio)
 {
 	struct request_queue *q = hctx->queue;
 	struct bfq_data *bfqd = q->elevator->elevator_data;
@@ -2215,7 +2214,7 @@ static bool bfq_bio_merge(struct blk_mq_hw_ctx *hctx, struct bio *bio,
 		bfqd->bio_bfqq = NULL;
 	bfqd->bio_bic = bic;
 
-	ret = blk_mq_sched_try_merge(q, bio, nr_segs, &free);
+	ret = blk_mq_sched_try_merge(q, bio, &free);
 
 	if (free)
 		blk_mq_free_request(free);
@@ -4678,7 +4677,7 @@ exit:
 	return rq;
 }
 
-#ifdef CONFIG_BFQ_CGROUP_DEBUG
+#if defined(CONFIG_BFQ_GROUP_IOSCHED) && defined(CONFIG_DEBUG_BLK_CGROUP)
 static void bfq_update_dispatch_stats(struct request_queue *q,
 				      struct request *rq,
 				      struct bfq_queue *in_serv_queue,
@@ -4728,7 +4727,7 @@ static inline void bfq_update_dispatch_stats(struct request_queue *q,
 					     struct request *rq,
 					     struct bfq_queue *in_serv_queue,
 					     bool idle_timer_disabled) {}
-#endif /* CONFIG_BFQ_CGROUP_DEBUG */
+#endif
 
 static struct request *bfq_dispatch_request(struct blk_mq_hw_ctx *hctx)
 {
@@ -5383,7 +5382,7 @@ static bool __bfq_insert_request(struct bfq_data *bfqd, struct request *rq)
 	return idle_timer_disabled;
 }
 
-#ifdef CONFIG_BFQ_CGROUP_DEBUG
+#if defined(CONFIG_BFQ_GROUP_IOSCHED) && defined(CONFIG_DEBUG_BLK_CGROUP)
 static void bfq_update_insert_stats(struct request_queue *q,
 				    struct bfq_queue *bfqq,
 				    bool idle_timer_disabled,
@@ -5413,7 +5412,7 @@ static inline void bfq_update_insert_stats(struct request_queue *q,
 					   struct bfq_queue *bfqq,
 					   bool idle_timer_disabled,
 					   unsigned int cmd_flags) {}
-#endif /* CONFIG_BFQ_CGROUP_DEBUG */
+#endif
 
 static void bfq_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
 			       bool at_head)
