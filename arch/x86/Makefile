@@ -141,6 +141,10 @@ else
                 $(call cc-option,-march=westmere,$(call cc-option,-mtune=westmere))
         cflags-$(CONFIG_MSILVERMONT) += \
                 $(call cc-option,-march=silvermont,$(call cc-option,-mtune=silvermont))
+        cflags-$(CONFIG_MGOLDMONT) += \
+                $(call cc-option,-march=goldmont,$(call cc-option,-mtune=goldmont))
+        cflags-$(CONFIG_MGOLDMONTPLUS) += \
+                $(call cc-option,-march=goldmont-plus,$(call cc-option,-mtune=goldmont-plus))
         cflags-$(CONFIG_MSANDYBRIDGE) += \
                 $(call cc-option,-march=sandybridge,$(call cc-option,-mtune=sandybridge))
         cflags-$(CONFIG_MIVYBRIDGE) += \
@@ -156,7 +160,9 @@ else
         cflags-$(CONFIG_MCANNONLAKE) += \
                 $(call cc-option,-march=cannonlake,$(call cc-option,-mtune=cannonlake))
         cflags-$(CONFIG_MICELAKE) += \
-                $(call cc-option,-march=icelake,$(call cc-option,-mtune=icelake))
+                $(call cc-option,-march=icelake-client,$(call cc-option,-mtune=icelake-client))
+        cflags-$(CONFIG_MCASCADELAKE) += \
+                $(call cc-option,-march=cascadelake,$(call cc-option,-mtune=cascadelake))
         cflags-$(CONFIG_MATOM) += $(call cc-option,-march=bonnell) \
                 $(call cc-option,-mtune=bonnell,$(call cc-option,-mtune=generic))
         cflags-$(CONFIG_GENERIC_CPU) += $(call cc-option,-mtune=generic)
