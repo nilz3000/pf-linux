@@ -2999,7 +2999,11 @@ static int ksm_open(struct inode *inode, struct file *file)
 	struct mm_struct *mm = ERR_PTR(-ESRCH);
 
 	if (task) {
-		mm = mm_access(task, PTRACE_MODE_ATTACH_FSCREDS);
+		if (unlikely(task->flags & PF_KTHREAD))
+			mm = ERR_PTR(-EINVAL);
+		else
+			mm = mm_access(task, PTRACE_MODE_ATTACH_FSCREDS);
+
 		put_task_struct(task);
 
 		if (!IS_ERR_OR_NULL(mm)) {
