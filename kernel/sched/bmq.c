@@ -68,7 +68,7 @@
 
 static inline void print_scheduler_version(void)
 {
-	printk(KERN_INFO "bmq: BMQ CPU Scheduler 5.3.1 by Alfred Chen.\n");
+	printk(KERN_INFO "bmq: BMQ CPU Scheduler 5.3-r2 by Alfred Chen.\n");
 }
 
 /**
@@ -123,9 +123,8 @@ enum {
 	NR_CPU_AFFINITY_CHK_LEVEL
 };
 
-DEFINE_PER_CPU(cpumask_t [NR_CPU_AFFINITY_CHK_LEVEL], sched_cpu_affinity_chk_masks);
-DEFINE_PER_CPU(cpumask_t *, sched_cpu_llc_start_mask);
-DEFINE_PER_CPU(cpumask_t *, sched_cpu_affinity_chk_end_masks);
+DEFINE_PER_CPU(cpumask_t [NR_CPU_AFFINITY_CHK_LEVEL], sched_cpu_affinity_masks);
+DEFINE_PER_CPU(cpumask_t *, sched_cpu_affinity_end_mask);
 
 #ifdef CONFIG_SCHED_SMT
 DEFINE_STATIC_KEY_FALSE(sched_smt_present);
@@ -162,18 +161,18 @@ static cpumask_t sched_sg_idle_mask ____cacheline_aligned_in_smp;
 static cpumask_t sched_rq_watermark[bmq_BITS] ____cacheline_aligned_in_smp;
 
 #if (bmq_BITS <= BITS_PER_LONG)
-#define bmq_find_first_bit(bm, size)		__ffs((bm[0]))
-#define bmq_find_next_bit(bm, size, start)	__ffs(BITMAP_FIRST_WORD_MASK(start) & bm[0])
+#define bmq_find_first_bit(bm)		__ffs((bm[0]))
+#define bmq_find_next_bit(bm, start)	__ffs(BITMAP_FIRST_WORD_MASK(start) & bm[0])
 #else
-#define bmq_find_first_bit(bm, size)		find_first_bit((bm), (size))
-#define bmq_find_next_bit(bm, size, start)	find_next_bit(bm, size, start)
+#define bmq_find_first_bit(bm)		find_first_bit((bm), bmq_BITS)
+#define bmq_find_next_bit(bm, start)	find_next_bit(bm, bmq_BITS, start)
 #endif
 
 static inline void update_sched_rq_watermark(struct rq *rq)
 {
-	unsigned long watermark = bmq_find_first_bit(rq->queue.bitmap, bmq_BITS);
+	unsigned long watermark = bmq_find_first_bit(rq->queue.bitmap);
 	unsigned long last_wm = rq->watermark;
-	unsigned long wm;
+	unsigned long i;
 	int cpu;
 
 	if (watermark == last_wm)
@@ -182,9 +181,9 @@ static inline void update_sched_rq_watermark(struct rq *rq)
 	rq->watermark = watermark;
 	cpu = cpu_of(rq);
 	if (watermark < last_wm) {
-		for (wm = watermark + 1; wm <= last_wm; wm++)
-			cpumask_andnot(&sched_rq_watermark[wm],
-				       &sched_rq_watermark[wm], cpumask_of(cpu));
+		for (i = watermark + 1; i <= last_wm; i++)
+			cpumask_andnot(&sched_rq_watermark[i],
+				       &sched_rq_watermark[i], cpumask_of(cpu));
 #ifdef CONFIG_SCHED_SMT
 		if (!static_branch_likely(&sched_smt_present))
 			return;
@@ -195,8 +194,8 @@ static inline void update_sched_rq_watermark(struct rq *rq)
 		return;
 	}
 	/* last_wm < watermark */
-	for (wm = last_wm + 1; wm <= watermark; wm++)
-		cpumask_set_cpu(cpu, &sched_rq_watermark[wm]);
+	for (i = last_wm + 1; i <= watermark; i++)
+		cpumask_set_cpu(cpu, &sched_rq_watermark[i]);
 #ifdef CONFIG_SCHED_SMT
 	if (!static_branch_likely(&sched_smt_present))
 		return;
@@ -251,7 +250,7 @@ static inline void bmq_add_task(struct task_struct *p, struct bmq *q, int idx)
  */
 static inline struct task_struct *rq_first_bmq_task(struct rq *rq)
 {
-	unsigned long idx = bmq_find_first_bit(rq->queue.bitmap, bmq_BITS);
+	unsigned long idx = bmq_find_first_bit(rq->queue.bitmap);
 	const struct list_head *head = &rq->queue.heads[idx];
 
 	return list_first_entry(head, struct task_struct, bmq_node);
@@ -264,7 +263,7 @@ rq_next_bmq_task(struct task_struct *p, struct rq *rq)
 	struct list_head *head = &rq->queue.heads[idx];
 
 	if (list_is_last(&p->bmq_node, head)) {
-		idx = bmq_find_next_bit(rq->queue.bitmap, bmq_BITS, idx + 1);
+		idx = bmq_find_next_bit(rq->queue.bitmap, idx + 1);
 		head = &rq->queue.heads[idx];
 
 		return list_first_entry(head, struct task_struct, bmq_node);
@@ -1329,7 +1328,7 @@ out:
 
 static inline int __best_mask_cpu(int cpu, cpumask_t *cpumask)
 {
-	cpumask_t *mask = &(per_cpu(sched_cpu_affinity_chk_masks, cpu)[0]);
+	cpumask_t *mask = &(per_cpu(sched_cpu_affinity_masks, cpu)[0]);
 	while ((cpu = cpumask_any_and(cpumask, mask)) >= nr_cpu_ids)
 		mask++;
 	return cpu;
@@ -2776,16 +2775,13 @@ static inline void check_curr(struct task_struct *p, struct rq *rq)
 static inline int
 migrate_pending_tasks(struct rq *rq, struct rq *dest_rq, const int dest_cpu)
 {
-	struct task_struct *p, *next;
+	struct task_struct *p, *skip = rq->curr;
 	int nr_migrated = 0;
-	int nr_tries = min((rq->nr_running + 1) / 2, SCHED_RQ_NR_MIGRATION);
+	int nr_tries = min(rq->nr_running / 2, SCHED_RQ_NR_MIGRATION);
 
-	for (p = rq_first_bmq_task(rq);
-	     nr_tries && p != rq->idle;
-	     p = rq_next_bmq_task(p, rq)) {
-		if (task_running(p))
-			continue;
-		next = rq_next_bmq_task(p, rq);
+	while (skip != rq->idle && nr_tries &&
+	       (p = rq_next_bmq_task(skip, rq)) != rq->idle) {
+		skip = rq_next_bmq_task(p, rq);
 		if (cpumask_test_cpu(dest_cpu, p->cpus_ptr)) {
 			dequeue_task(p, rq, 0);
 			set_task_cpu(p, dest_cpu);
@@ -2793,10 +2789,6 @@ migrate_pending_tasks(struct rq *rq, struct rq *dest_rq, const int dest_cpu)
 			nr_migrated++;
 		}
 		nr_tries--;
-		/* make a jump */
-		if (next == rq->idle)
-			break;
-		p = next;
 	}
 
 	return nr_migrated;
@@ -2809,8 +2801,8 @@ static inline int take_other_rq_tasks(struct rq *rq, int cpu)
 	if (cpumask_empty(&sched_rq_pending_mask))
 		return 0;
 
-	affinity_mask = per_cpu(sched_cpu_llc_start_mask, cpu);
-	end_mask = per_cpu(sched_cpu_affinity_chk_end_masks, cpu);
+	affinity_mask = &(per_cpu(sched_cpu_affinity_masks, cpu)[0]);
+	end_mask = per_cpu(sched_cpu_affinity_end_mask, cpu);
 	do {
 		int i;
 		for_each_cpu_and(i, &sched_rq_pending_mask, affinity_mask) {
@@ -5083,8 +5075,8 @@ int get_nohz_timer_target(void)
 	if (!idle_cpu(cpu) && housekeeping_cpu(cpu, HK_FLAG_TIMER))
 		return cpu;
 
-	for (mask = &(per_cpu(sched_cpu_affinity_chk_masks, cpu)[0]);
-	     mask < per_cpu(sched_cpu_affinity_chk_end_masks, cpu); mask++)
+	for (mask = &(per_cpu(sched_cpu_affinity_masks, cpu)[0]);
+	     mask < per_cpu(sched_cpu_affinity_end_mask, cpu); mask++)
 		for_each_cpu(i, mask)
 			if (!idle_cpu(i) && housekeeping_cpu(i, HK_FLAG_TIMER))
 				return i;
@@ -5521,14 +5513,12 @@ static void sched_init_topology_cpumask_early(void)
 
 	for_each_possible_cpu(cpu) {
 		for (level = 0; level < NR_CPU_AFFINITY_CHK_LEVEL; level++) {
-			tmp = &(per_cpu(sched_cpu_affinity_chk_masks, cpu)[level]);
+			tmp = &(per_cpu(sched_cpu_affinity_masks, cpu)[level]);
 			cpumask_copy(tmp, cpu_possible_mask);
 			cpumask_clear_cpu(cpu, tmp);
 		}
-		per_cpu(sched_cpu_llc_start_mask, cpu) =
-			&(per_cpu(sched_cpu_affinity_chk_masks, cpu)[0]);
-		per_cpu(sched_cpu_affinity_chk_end_masks, cpu) =
-			&(per_cpu(sched_cpu_affinity_chk_masks, cpu)[1]);
+		per_cpu(sched_cpu_affinity_end_mask, cpu) =
+			&(per_cpu(sched_cpu_affinity_masks, cpu)[1]);
 	}
 }
 
@@ -5538,7 +5528,7 @@ static void sched_init_topology_cpumask(void)
 	cpumask_t *chk;
 
 	for_each_online_cpu(cpu) {
-		chk = &(per_cpu(sched_cpu_affinity_chk_masks, cpu)[0]);
+		chk = &(per_cpu(sched_cpu_affinity_masks, cpu)[0]);
 
 #ifdef CONFIG_SCHED_SMT
 		cpumask_setall(chk);
@@ -5547,15 +5537,14 @@ static void sched_init_topology_cpumask(void)
 			printk(KERN_INFO "bmq: cpu #%d affinity check mask - smt 0x%08lx",
 			       cpu, (chk++)->bits[0]);
 		}
+		cpumask_complement(chk, topology_sibling_cpumask(cpu));
+#else
+		cpumask_clear_cpu(cpu, chk);
 #endif
 #ifdef CONFIG_SCHED_MC
-		cpumask_setall(chk);
-		cpumask_clear_cpu(cpu, chk);
-		if (cpumask_and(chk, chk, cpu_coregroup_mask(cpu))) {
-			per_cpu(sched_cpu_llc_start_mask, cpu) = chk;
+		if (cpumask_and(chk, chk, cpu_coregroup_mask(cpu)))
 			printk(KERN_INFO "bmq: cpu #%d affinity check mask - coregroup 0x%08lx",
 			       cpu, (chk++)->bits[0]);
-		}
 		cpumask_complement(chk, cpu_coregroup_mask(cpu));
 
 		/**
@@ -5566,8 +5555,6 @@ static void sched_init_topology_cpumask(void)
 #else
 		per_cpu(sd_llc_id, cpu) =
 			cpumask_first(topology_core_cpumask(cpu));
-
-		per_cpu(sched_cpu_llc_start_mask, cpu) = chk;
 
 		cpumask_setall(chk);
 		cpumask_clear_cpu(cpu, chk);
@@ -5581,7 +5568,7 @@ static void sched_init_topology_cpumask(void)
 			printk(KERN_INFO "bmq: cpu #%d affinity check mask - others 0x%08lx",
 			       cpu, (chk++)->bits[0]);
 
-		per_cpu(sched_cpu_affinity_chk_end_masks, cpu) = chk;
+		per_cpu(sched_cpu_affinity_end_mask, cpu) = chk;
 	}
 }
 #endif
