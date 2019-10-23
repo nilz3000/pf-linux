@@ -2995,31 +2995,42 @@ static int proc_stack_depth(struct seq_file *m, struct pid_namespace *ns,
 #ifdef CONFIG_KSM
 static int ksm_open(struct inode *inode, struct file *file)
 {
-	struct task_struct *task = get_proc_task(inode);
-	struct mm_struct *mm = ERR_PTR(-ESRCH);
+	struct task_struct *task;
+	struct mm_struct *mm;
+	int err;
 
-	if (task) {
-		if (unlikely(task->flags & PF_KTHREAD))
-			mm = ERR_PTR(-EINVAL);
-		else
-			mm = mm_access(task, PTRACE_MODE_ATTACH_FSCREDS);
-
+	task = get_proc_task(inode);
+	if (!task) {
+		err = -ESRCH;
+		goto out;
+	}
+	if (task->flags & PF_KTHREAD) {
 		put_task_struct(task);
-
-		if (!IS_ERR_OR_NULL(mm)) {
-			/* ensure this mm_struct can't be freed */
-			mmgrab(mm);
-			/* but do not pin its memory */
-			mmput(mm);
-		}
+		err = -EINVAL;
+		goto out;
 	}
 
-	if (IS_ERR(mm))
-		return PTR_ERR(mm);
+	mm = mm_access(task, PTRACE_MODE_ATTACH_FSCREDS);
+	put_task_struct(task);
+	if (!mm) {
+		err = -EINVAL;
+		goto out;
+	}
+	if (IS_ERR(mm)) {
+		err = PTR_ERR(mm);
+		goto out;
+	}
 
+	/* ensure this mm_struct can't be freed */
+	mmgrab(mm);
+    /* but do not pin its memory */
+	mmput(mm);
+
+	err = 0;
 	file->private_data = mm;
 
-	return 0;
+out:
+	return err;
 }
 
 static ssize_t ksm_write(struct file *file, const char __user *buf,
@@ -3030,25 +3041,29 @@ static ssize_t ksm_write(struct file *file, const char __user *buf,
 	int behaviour;
 	struct mm_struct *mm = file->private_data;
 	int err;
+	int last_err;
 	struct vm_area_struct *vma;
 
-	if (!mm)
-		return 0;
+	if (!mm) {
+		err = -EINVAL;
+		goto out;
+	}
 
 	/* Only allow a very narrow range of strings to be written */
-	err = -EINVAL;
-	if ((*ppos != 0) || (count >= sizeof(kbuf)))
+	if ((*ppos != 0) || (count >= sizeof(kbuf))) {
+		err = -EINVAL;
 		goto out;
+	}
 
 	/* What was written? */
-	err = -EFAULT;
-	if (copy_from_user(kbuf, buf, count))
+	if (copy_from_user(kbuf, buf, count)) {
+		err = -EFAULT;
 		goto out;
+	}
 	kbuf[count] = '\0';
 	pos = kbuf;
 
 	/* What is being requested? */
-	err = -EINVAL;
 	if (strncmp(pos, "merge", 5) == 0) {
 		pos += 5;
 		behaviour = MADV_MERGEABLE;
@@ -3057,29 +3072,39 @@ static ssize_t ksm_write(struct file *file, const char __user *buf,
 		pos += 7;
 		behaviour = MADV_UNMERGEABLE;
 	}
-	else
+	else {
+		err = -EINVAL;
 		goto out;
+	}
 
 	/* Verify there is not trailing junk on the line */
 	pos = skip_spaces(pos);
-	if (*pos != '\0')
+	if (*pos != '\0') {
+		err = -EINVAL;
 		goto out;
+	}
 
-	err = 0;
-
-	if (!mmget_not_zero(mm))
+	if (!mmget_not_zero(mm)) {
+		err = -EINVAL;
 		goto out;
+	}
 
 	down_write(&mm->mmap_sem);
-	if (!mmget_still_valid(mm))
+	if (!mmget_still_valid(mm)) {
+		err = -EINVAL;
 		goto skip_mm;
+	}
+
+	err = 0;
 
 	vma = mm->mmap;
 	while (vma) {
 		if (behaviour == MADV_MERGEABLE)
-			err = ksm_madvise_merge(vma->vm_mm, vma, &vma->vm_flags);
+			last_err = ksm_madvise_merge(vma->vm_mm, vma, &vma->vm_flags);
 		else
-			err = ksm_madvise_unmerge(vma, vma->vm_start, vma->vm_end, &vma->vm_flags);
+			last_err = ksm_madvise_unmerge(vma, vma->vm_start, vma->vm_end, &vma->vm_flags);
+		if (last_err)
+			err = last_err;
 		vma = vma->vm_next;
 	}
 
