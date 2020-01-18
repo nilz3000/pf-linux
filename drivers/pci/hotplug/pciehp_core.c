@@ -258,7 +258,7 @@ static bool pme_is_native(struct pcie_device *dev)
 	return pcie_ports_native || host->native_pme;
 }
 
-static void pciehp_disable_interrupt(struct pcie_device *dev)
+static int pciehp_suspend(struct pcie_device *dev)
 {
 	/*
 	 * Disable hotplug interrupt so that it does not trigger
@@ -266,19 +266,7 @@ static void pciehp_disable_interrupt(struct pcie_device *dev)
 	 */
 	if (pme_is_native(dev))
 		pcie_disable_interrupt(get_service_data(dev));
-}
 
-#ifdef CONFIG_PM_SLEEP
-static int pciehp_suspend(struct pcie_device *dev)
-{
-	/*
-	 * If the port is already runtime suspended we can keep it that
-	 * way.
-	 */
-	if (dev_pm_smart_suspend_and_suspended(&dev->port->dev))
-		return 0;
-
-	pciehp_disable_interrupt(dev);
 	return 0;
 }
 
@@ -296,7 +284,6 @@ static int pciehp_resume_noirq(struct pcie_device *dev)
 
 	return 0;
 }
-#endif
 
 static int pciehp_resume(struct pcie_device *dev)
 {
@@ -307,12 +294,6 @@ static int pciehp_resume(struct pcie_device *dev)
 
 	pciehp_check_presence(ctrl);
 
-	return 0;
-}
-
-static int pciehp_runtime_suspend(struct pcie_device *dev)
-{
-	pciehp_disable_interrupt(dev);
 	return 0;
 }
 
@@ -342,12 +323,10 @@ static struct pcie_port_service_driver hpdriver_portdrv = {
 	.remove		= pciehp_remove,
 
 #ifdef	CONFIG_PM
-#ifdef	CONFIG_PM_SLEEP
 	.suspend	= pciehp_suspend,
 	.resume_noirq	= pciehp_resume_noirq,
 	.resume		= pciehp_resume,
-#endif
-	.runtime_suspend = pciehp_runtime_suspend,
+	.runtime_suspend = pciehp_suspend,
 	.runtime_resume	= pciehp_runtime_resume,
 #endif	/* PM */
 };
