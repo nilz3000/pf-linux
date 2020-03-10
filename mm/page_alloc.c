@@ -8402,6 +8402,7 @@ int alloc_contig_range(unsigned long start, unsigned long end,
 		.ignore_skip_hint = true,
 		.no_set_skip_hint = true,
 		.gfp_mask = current_gfp_context(gfp_mask),
+		.proactive_compaction = false,
 	};
 	INIT_LIST_HEAD(&cc.migratepages);
 
