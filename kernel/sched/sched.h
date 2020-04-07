@@ -2488,4 +2488,18 @@ static inline int task_running_nice(struct task_struct *p)
 {
 	return (task_nice(p) > 0);
 }
+
+#ifdef CONFIG_SMP
+static inline bool is_per_cpu_kthread(struct task_struct *p)
+{
+	if (!(p->flags & PF_KTHREAD))
+		return false;
+
+	if (p->nr_cpus_allowed != 1)
+		return false;
+
+	return true;
+}
+#endif
+
 #endif /* !CONFIG_SCHED_BMQ */
