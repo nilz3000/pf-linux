@@ -70,7 +70,7 @@ early_param("bmq.timeslice", sched_timeslice);
 
 static inline void print_scheduler_version(void)
 {
-	printk(KERN_INFO "bmq: BMQ CPU Scheduler 5.6-r2 by Alfred Chen.\n");
+	printk(KERN_INFO "bmq: BMQ CPU Scheduler 5.6-r3 by Alfred Chen.\n");
 }
 
 /**
@@ -1956,7 +1956,7 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 		atomic_dec(&task_rq(p)->nr_iowait);
 	}
 
-	if(cpu_rq(smp_processor_id())->clock - p->last_ran > sched_timeslice_ns)
+	if(this_rq()->clock_task - p->last_ran > sched_timeslice_ns)
 		boost_task(p);
 
 	cpu = select_task_rq(p);
@@ -2035,8 +2035,7 @@ static inline void __sched_fork(unsigned long clone_flags, struct task_struct *p
 int sched_fork(unsigned long clone_flags, struct task_struct *p)
 {
 	unsigned long flags;
-	int cpu = get_cpu();
-	struct rq *rq = this_rq();
+	struct rq *rq;
 
 	__sched_fork(clone_flags, p);
 	/*
@@ -2074,11 +2073,20 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->boost_prio = (p->boost_prio < 0) ?
 		p->boost_prio + MAX_PRIORITY_ADJ : MAX_PRIORITY_ADJ;
 	/*
+	 * The child is not yet in the pid-hash so no cgroup attach races,
+	 * and the cgroup is pinned to this child due to cgroup_fork()
+	 * is ran before sched_fork().
+	 *
+	 * Silence PROVE_RCU.
+	 */
+	raw_spin_lock_irqsave(&p->pi_lock, flags);
+	/*
 	 * Share the timeslice between parent and child, thus the
 	 * total amount of pending timeslices in the system doesn't change,
 	 * resulting in more scheduling fairness.
 	 */
-	raw_spin_lock_irqsave(&rq->lock, flags);
+	rq = this_rq();
+	raw_spin_lock(&rq->lock);
 	rq->curr->time_slice /= 2;
 	p->time_slice = rq->curr->time_slice;
 #ifdef CONFIG_SCHED_HRTICK
@@ -2089,21 +2097,13 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 		p->time_slice = sched_timeslice_ns;
 		resched_curr(rq);
 	}
-	raw_spin_unlock_irqrestore(&rq->lock, flags);
+	raw_spin_unlock(&rq->lock);
 
-	/*
-	 * The child is not yet in the pid-hash so no cgroup attach races,
-	 * and the cgroup is pinned to this child due to cgroup_fork()
-	 * is ran before sched_fork().
-	 *
-	 * Silence PROVE_RCU.
-	 */
-	raw_spin_lock_irqsave(&p->pi_lock, flags);
 	/*
 	 * We're setting the CPU for the first time, we don't migrate,
 	 * so use __set_task_cpu().
 	 */
-	__set_task_cpu(p, cpu);
+	__set_task_cpu(p, cpu_of(rq));
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 
 #ifdef CONFIG_SCHED_INFO
@@ -2112,7 +2112,6 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 #endif
 	init_task_preempt_count(p);
 
-	put_cpu();
 	return 0;
 }
 
@@ -3273,7 +3272,7 @@ static inline int take_other_rq_tasks(struct rq *rq, int cpu)
  */
 static inline void check_curr(struct task_struct *p, struct rq *rq)
 {
-	if (rq->idle == p)
+	if (unlikely(rq->idle == p))
 		return;
 
 	update_curr(rq, p);
@@ -3309,21 +3308,6 @@ choose_next_task(struct rq *rq, int cpu, struct task_struct *prev)
 		return rq_first_bmq_task(rq);
 #endif
 	return next;
-}
-
-static inline void set_rq_task(struct rq *rq, struct task_struct *p)
-{
-	p->last_ran = rq->clock_task;
-
-	if (unlikely(sched_timeslice_ns == p->time_slice))
-		rq->last_ts_switch = rq->clock;
-
-	if (p == rq->idle)
-		schedstat_inc(rq->sched_goidle);
-#ifdef CONFIG_HIGH_RES_TIMERS
-	else
-		hrtick_start(rq, p->time_slice);
-#endif
 }
 
 /*
@@ -3421,9 +3405,17 @@ static void __sched notrace __schedule(bool preempt)
 
 	next = choose_next_task(rq, cpu, prev);
 
-	set_rq_task(rq, next);
+	if (next == rq->idle)
+		schedstat_inc(rq->sched_goidle);
+#ifdef CONFIG_HIGH_RES_TIMERS
+	else
+		hrtick_start(rq, next->time_slice);
+#endif
 
-	if (prev != next) {
+	if (likely(prev != next)) {
+		next->last_ran = rq->clock_task;
+		rq->last_ts_switch = rq->clock;
+
 		rq->nr_switches++;
 		/*
 		 * RCU users of rcu_dereference(rq->curr) may not see
@@ -3445,17 +3437,17 @@ static void __sched notrace __schedule(bool preempt)
 		 *   is a RELEASE barrier),
 		 */
 		++*switch_count;
-		rq->last_ts_switch = rq->clock;
 
 		trace_sched_switch(preempt, prev, next);
 
 		/* Also unlocks the rq: */
 		rq = context_switch(rq, prev, next);
-#ifdef CONFIG_SCHED_SMT
-		sg_balance_check(rq);
-#endif
 	} else
 		raw_spin_unlock_irq(&rq->lock);
+
+#ifdef CONFIG_SCHED_SMT
+	sg_balance_check(rq);
+#endif
 }
 
 void __noreturn do_task_dead(void)
