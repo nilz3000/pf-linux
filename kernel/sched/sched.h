@@ -2,10 +2,6 @@
 /*
  * Scheduler internal types and methods:
  */
-#ifdef CONFIG_SCHED_BMQ
-#include "bmq_sched.h"
-#else
-
 #include <linux/sched.h>
 
 #include <linux/sched/autogroup.h>
@@ -2502,9 +2498,3 @@ static inline bool is_per_cpu_kthread(struct task_struct *p)
 	return true;
 }
 #endif
-
-static inline int task_running_nice(struct task_struct *p)
-{
-	return (task_nice(p) > 0);
-}
-#endif /* !CONFIG_SCHED_BMQ */
