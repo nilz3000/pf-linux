@@ -26,6 +26,14 @@
 #include "internal.h"
 
 #ifdef CONFIG_COMPACTION
+/*
+ * Tunable for proactive compaction, exposed via sysfs:
+ *	/sys/kernel/mm/compaction/proactiveness
+ *
+ * This tunable determines how aggressively the kernel
+ * should compact memory in the background. It takes
+ * values in the range [0, 100].
+ */
 static unsigned int compaction_proactiveness = 20;
 
 static inline void count_compact_event(enum vm_event_item item)
@@ -52,6 +60,9 @@ static inline void count_compact_events(enum vm_event_item item, long delta)
 #define pageblock_start_pfn(pfn)	block_start_pfn(pfn, pageblock_order)
 #define pageblock_end_pfn(pfn)		block_end_pfn(pfn, pageblock_order)
 
+/*
+ * Fragmentation score check interval for proactive compaction purposes.
+ */
 static const int HPAGE_FRAG_CHECK_INTERVAL_MSEC = 500;
 
 static unsigned long release_freepages(struct list_head *freelist)
@@ -1855,7 +1866,17 @@ static bool kswapd_is_running(pg_data_t *pgdat)
 	return pgdat->kswapd && (pgdat->kswapd->state == TASK_RUNNING);
 }
 
-static int proactive_compaction_score_zone(struct zone *zone)
+/*
+ * A zone's fragmentation score is the external fragmentation wrt to the
+ * HUGETLB_PAGE_ORDER scaled by the zone's size. It returns a value in the
+ * range [0, 100].
+
+ * The scaling factor ensures that proactive compaction focuses on larger
+ * zones like ZONE_NORMAL, rather than smaller, specialized zones like
+ * ZONE_DMA32. For smaller zones, the score value remains close to zero,
+ * and thus never exceeds the high threshold for proactive compaction.
+ */
+static int fragmentation_score_zone(struct zone *zone)
 {
 	unsigned long score;
 
@@ -1866,7 +1887,14 @@ static int proactive_compaction_score_zone(struct zone *zone)
 	return score;
 }
 
-static int proactive_compaction_score_node(pg_data_t *pgdat)
+/*
+ * The per-node proactive (background) compaction process is started by its
+ * corresponding kcompactd thread when the node's fragmentation score
+ * exceeds the high threshold. The compaction process remains active till
+ * the node's score falls below the low threshold, or one of the back-off
+ * conditions is met.
+ */
+static int fragmentation_score_node(pg_data_t *pgdat)
 {
 	unsigned long score = 0;
 	int zoneid;
@@ -1875,13 +1903,13 @@ static int proactive_compaction_score_node(pg_data_t *pgdat)
 		struct zone *zone;
 
 		zone = &pgdat->node_zones[zoneid];
-		score += proactive_compaction_score_zone(zone);
+		score += fragmentation_score_zone(zone);
 	}
 
 	return score;
 }
 
-static int proactive_compaction_score_wmark(pg_data_t *pgdat, bool low)
+static int fragmentation_score_wmark(pg_data_t *pgdat, bool low)
 {
 	int wmark_low;
 
@@ -1896,8 +1924,8 @@ static bool should_proactive_compact_node(pg_data_t *pgdat)
 	if (!compaction_proactiveness || kswapd_is_running(pgdat))
 		return false;
 
-	wmark_high = proactive_compaction_score_wmark(pgdat, false);
-	return proactive_compaction_score_node(pgdat) > wmark_high;
+	wmark_high = fragmentation_score_wmark(pgdat, false);
+	return fragmentation_score_node(pgdat) > wmark_high;
 }
 
 static enum compact_result __compact_finished(struct compact_control *cc)
@@ -1934,8 +1962,8 @@ static enum compact_result __compact_finished(struct compact_control *cc)
 		if (kswapd_is_running(pgdat))
 			return COMPACT_PARTIAL_SKIPPED;
 
-		score = proactive_compaction_score_zone(cc->zone);
-		wmark_low = proactive_compaction_score_wmark(pgdat, true);
+		score = fragmentation_score_zone(cc->zone);
+		wmark_low = fragmentation_score_wmark(pgdat, true);
 
 		if (score > wmark_low)
 			ret = COMPACT_CONTINUE;
@@ -2479,7 +2507,15 @@ enum compact_result try_to_compact_pages(gfp_t gfp_mask, unsigned int order,
 	return rc;
 }
 
-/* Compact all zones within a node according to proactiveness */
+/*
+ * Compact all zones within a node till each zone's fragmentation score
+ * reaches within proactive compaction thresholds (as determined by the
+ * proactiveness tunable).
+ *
+ * It is possible that the function returns before reaching score targets
+ * due to various back-off conditions, such as, contention on per-node or
+ * per-zone locks.
+ */
 static void proactive_compact_node(pg_data_t *pgdat)
 {
 	int zoneid;
@@ -2818,6 +2854,7 @@ static int kcompactd(void *p)
 			continue;
 		}
 
+		/* kcompactd wait timeout */
 		if (should_proactive_compact_node(pgdat)) {
 			unsigned int prev_score, score;
 
@@ -2825,9 +2862,13 @@ static int kcompactd(void *p)
 				proactive_defer--;
 				continue;
 			}
-			prev_score = proactive_compaction_score_node(pgdat);
+			prev_score = fragmentation_score_node(pgdat);
 			proactive_compact_node(pgdat);
-			score = proactive_compaction_score_node(pgdat);
+			score = fragmentation_score_node(pgdat);
+			/*
+			 * Defer proactive compaction if the fragmentation
+			 * score did not go down i.e. no progress made.
+			 */
 			proactive_defer = score < prev_score ?
 					0 : 1 << COMPACT_MAX_DEFER_SHIFT;
 		}
