@@ -26,16 +26,6 @@
 #include "internal.h"
 
 #ifdef CONFIG_COMPACTION
-/*
- * Tunable for proactive compaction, exposed via sysfs:
- *	/sys/kernel/mm/compaction/proactiveness
- *
- * This tunable determines how aggressively the kernel
- * should compact memory in the background. It takes
- * values in the range [0, 100].
- */
-static unsigned int compaction_proactiveness = 20;
-
 static inline void count_compact_event(enum vm_event_item item)
 {
 	count_vm_event(item);
@@ -1881,10 +1871,8 @@ static int fragmentation_score_zone(struct zone *zone)
 	unsigned long score;
 
 	score = zone->present_pages *
-			extfrag_for_order(zone, HUGETLB_PAGE_ORDER);
-	score = div64_ul(score,
-			node_present_pages(zone->zone_pgdat->node_id) + 1);
-	return score;
+			extfrag_for_order(zone, HPAGE_PMD_ORDER);
+	return div64_ul(score, zone->zone_pgdat->node_present_pages + 1);
 }
 
 /*
@@ -1913,7 +1901,7 @@ static int fragmentation_score_wmark(pg_data_t *pgdat, bool low)
 {
 	int wmark_low;
 
-	wmark_low = 100 - compaction_proactiveness;
+	wmark_low = 100 - sysctl_compaction_proactiveness;
 	return low ? wmark_low : min(wmark_low + 10, 100);
 }
 
@@ -1921,7 +1909,7 @@ static bool should_proactive_compact_node(pg_data_t *pgdat)
 {
 	int wmark_high;
 
-	if (!compaction_proactiveness || kswapd_is_running(pgdat))
+	if (!sysctl_compaction_proactiveness || kswapd_is_running(pgdat))
 		return false;
 
 	wmark_high = fragmentation_score_wmark(pgdat, false);
@@ -2403,7 +2391,6 @@ static enum compact_result compact_zone_order(struct zone *zone, int order,
 		.alloc_flags = alloc_flags,
 		.classzone_idx = classzone_idx,
 		.direct_compaction = true,
-		.proactive_compaction = false,
 		.whole_zone = (prio == MIN_COMPACT_PRIORITY),
 		.ignore_skip_hint = (prio == MIN_COMPACT_PRIORITY),
 		.ignore_block_suitable = (prio == MIN_COMPACT_PRIORITY)
@@ -2526,7 +2513,6 @@ static void proactive_compact_node(pg_data_t *pgdat)
 		.ignore_skip_hint = true,
 		.whole_zone = true,
 		.gfp_mask = GFP_KERNEL,
-		.direct_compaction = false,
 		.proactive_compaction = true,
 	};
 
@@ -2556,9 +2542,8 @@ static void compact_node(int nid)
 		.ignore_skip_hint = true,
 		.whole_zone = true,
 		.gfp_mask = GFP_KERNEL,
-		.direct_compaction = false,
-		.proactive_compaction = false,
 	};
+
 
 	for (zoneid = 0; zoneid < MAX_NR_ZONES; zoneid++) {
 
@@ -2589,6 +2574,13 @@ static void compact_nodes(void)
 
 /* The written value is actually unused, all memory is compacted */
 int sysctl_compact_memory;
+
+/*
+ * Tunable for proactive compaction. It determines how
+ * aggressively the kernel should compact memory in the
+ * background. It takes values in the range [0, 100].
+ */
+int sysctl_compaction_proactiveness = 20;
 
 /*
  * This is the entry point for compacting all nodes via
@@ -2632,63 +2624,6 @@ void compaction_unregister_node(struct node *node)
 }
 #endif /* CONFIG_SYSFS && CONFIG_NUMA */
 
-#ifdef CONFIG_SYSFS
-
-#define COMPACTION_ATTR_RO(_name) \
-	static struct kobj_attribute _name##_attr = __ATTR_RO(_name)
-
-#define COMPACTION_ATTR(_name) \
-	static struct kobj_attribute _name##_attr = \
-		__ATTR(_name, 0644, _name##_show, _name##_store)
-
-static struct kobject *compaction_kobj;
-
-static ssize_t proactiveness_store(struct kobject *kobj,
-		struct kobj_attribute *attr, const char *buf, size_t count)
-{
-	int err;
-	unsigned long input;
-
-	err = kstrtoul(buf, 10, &input);
-	if (err)
-		return err;
-	if (input > 100)
-		return -EINVAL;
-
-	compaction_proactiveness = input;
-	return count;
-}
-
-static ssize_t proactiveness_show(struct kobject *kobj,
-		struct kobj_attribute *attr, char *buf)
-{
-	return sprintf(buf, "%u\n", compaction_proactiveness);
-}
-
-COMPACTION_ATTR(proactiveness);
-
-static struct attribute *compaction_attrs[] = {
-	&proactiveness_attr.attr,
-	NULL,
-};
-
-static const struct attribute_group compaction_attr_group = {
-	.attrs = compaction_attrs,
-};
-
-static void __init compaction_sysfs_init(void)
-{
-	compaction_kobj = kobject_create_and_add("compaction", mm_kobj);
-	if (!compaction_kobj)
-		return;
-
-	if (sysfs_create_group(compaction_kobj, &compaction_attr_group)) {
-		kobject_put(compaction_kobj);
-		compaction_kobj = NULL;
-	}
-}
-#endif
-
 static inline bool kcompactd_work_requested(pg_data_t *pgdat)
 {
 	return pgdat->kcompactd_max_order > 0 || kthread_should_stop();
@@ -2729,8 +2664,6 @@ static void kcompactd_do_work(pg_data_t *pgdat)
 		.mode = MIGRATE_SYNC_LIGHT,
 		.ignore_skip_hint = false,
 		.gfp_mask = GFP_KERNEL,
-		.direct_compaction = false,
-		.proactive_compaction = false,
 	};
 	trace_mm_compaction_kcompactd_wake(pgdat->node_id, cc.order,
 							cc.classzone_idx);
@@ -2947,8 +2880,6 @@ static int __init kcompactd_init(void)
 		pr_err("kcompactd: failed to register hotplug callbacks.\n");
 		return ret;
 	}
-
-	compaction_sysfs_init();
 
 	for_each_node_state(nid, N_MEMORY)
 		kcompactd_run(nid);
