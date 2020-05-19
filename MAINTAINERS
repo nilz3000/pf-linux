@@ -18547,12 +18547,6 @@ L:	linux-mm@kvack.org
 S:	Maintained
 F:	mm/zswap.c
 
-PROACTIVE COMPACTION
-M:	Nitin Gupta <nigupta@nvidia.com>
-L:	linux-mm@kvack.org
-S:	Maintained
-F:	Documentation/admin-guide/mm/proactive-compaction.rst
-
 THE REST
 M:	Linus Torvalds <torvalds@linux-foundation.org>
 L:	linux-kernel@vger.kernel.org
