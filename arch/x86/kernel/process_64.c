@@ -146,18 +146,123 @@ void release_thread(struct task_struct *dead_task)
 	WARN_ON(dead_task->mm);
 }
 
-#if IS_ENABLED(CONFIG_KVM)
+enum which_selector {
+	FS,
+	GS
+};
+
+/*
+ * Out of line to be protected from kprobes. It is not used on Xen
+ * paravirt. When paravirt support is needed, it needs to be renamed
+ * with native_ prefix.
+ */
+static noinline unsigned long __rdgsbase_inactive(void)
+{
+	unsigned long gsbase;
+
+	lockdep_assert_irqs_disabled();
+
+	native_swapgs();
+	gsbase = rdgsbase();
+	native_swapgs();
+
+	return gsbase;
+}
+NOKPROBE_SYMBOL(__rdgsbase_inactive);
+
+/*
+ * Out of line to be protected from kprobes. It is not used on Xen
+ * paravirt. When paravirt support is needed, it needs to be renamed
+ * with native_ prefix.
+ */
+static noinline void __wrgsbase_inactive(unsigned long gsbase)
+{
+	lockdep_assert_irqs_disabled();
+
+	native_swapgs();
+	wrgsbase(gsbase);
+	native_swapgs();
+}
+NOKPROBE_SYMBOL(__wrgsbase_inactive);
+
+/*
+ * Saves the FS or GS base for an outgoing thread if FSGSBASE extensions are
+ * not available.  The goal is to be reasonably fast on non-FSGSBASE systems.
+ * It's forcibly inlined because it'll generate better code and this function
+ * is hot.
+ */
+static __always_inline void save_base_legacy(struct task_struct *prev_p,
+					     unsigned short selector,
+					     enum which_selector which)
+{
+	if (likely(selector == 0)) {
+		/*
+		 * On Intel (without X86_BUG_NULL_SEG), the segment base could
+		 * be the pre-existing saved base or it could be zero.  On AMD
+		 * (with X86_BUG_NULL_SEG), the segment base could be almost
+		 * anything.
+		 *
+		 * This branch is very hot (it's hit twice on almost every
+		 * context switch between 64-bit programs), and avoiding
+		 * the RDMSR helps a lot, so we just assume that whatever
+		 * value is already saved is correct.  This matches historical
+		 * Linux behavior, so it won't break existing applications.
+		 *
+		 * To avoid leaking state, on non-X86_BUG_NULL_SEG CPUs, if we
+		 * report that the base is zero, it needs to actually be zero:
+		 * see the corresponding logic in load_seg_legacy.
+		 */
+	} else {
+		/*
+		 * If the selector is 1, 2, or 3, then the base is zero on
+		 * !X86_BUG_NULL_SEG CPUs and could be anything on
+		 * X86_BUG_NULL_SEG CPUs.  In the latter case, Linux
+		 * has never attempted to preserve the base across context
+		 * switches.
+		 *
+		 * If selector > 3, then it refers to a real segment, and
+		 * saving the base isn't necessary.
+		 */
+		if (which == FS)
+			prev_p->thread.fsbase = 0;
+		else
+			prev_p->thread.gsbase = 0;
+	}
+}
+
+static __always_inline void save_fsgs(struct task_struct *task)
+{
+	savesegment(fs, task->thread.fsindex);
+	savesegment(gs, task->thread.gsindex);
+	if (static_cpu_has(X86_FEATURE_FSGSBASE)) {
+		/*
+		 * If FSGSBASE is enabled, we can't make any useful guesses
+		 * about the base, and user code expects us to save the current
+		 * value.  Fortunately, reading the base directly is efficient.
+		 */
+		task->thread.fsbase = rdfsbase();
+		task->thread.gsbase = __rdgsbase_inactive();
+	} else {
+		save_base_legacy(task, task->thread.fsindex, FS);
+		save_base_legacy(task, task->thread.gsindex, GS);
+	}
+}
+
 /*
  * While a process is running,current->thread.fsbase and current->thread.gsbase
- * may not match the corresponding CPU registers (see save_base_legacy()). KVM
- * wants an efficient way to save and restore FSBASE and GSBASE.
- * When FSGSBASE extensions are enabled, this will have to use RD{FS,GS}BASE.
+ * may not match the corresponding CPU registers (see save_base_legacy()).
  */
-void save_fsgs_for_kvm(void)
+void current_save_fsgs(void)
 {
+	unsigned long flags;
+
+	/* Interrupts need to be off for FSGSBASE */
+	local_irq_save(flags);
 	save_fsgs(current);
+	local_irq_restore(flags);
 }
-EXPORT_SYMBOL_GPL(save_fsgs_for_kvm);
+#if IS_ENABLED(CONFIG_KVM)
+EXPORT_SYMBOL_GPL(current_save_fsgs);
 #endif
 
 static __always_inline void loadseg(enum which_selector which,
@@ -231,7 +336,7 @@ static __always_inline void x86_fsgsbase_load(struct thread_struct *prev,
 
 		/* Update the bases. */
 		wrfsbase(next->fsbase);
-		x86_gsbase_write_cpu_inactive(next->gsbase);
+		__wrgsbase_inactive(next->gsbase);
 	} else {
 		load_seg_legacy(prev->fsindex, prev->fsbase,
 				next->fsindex, next->fsbase, FS);
@@ -288,25 +393,11 @@ unsigned long x86_gsbase_read_cpu_inactive(void)
 	unsigned long gsbase;
 
 	if (static_cpu_has(X86_FEATURE_FSGSBASE)) {
-		bool need_restore = false;
 		unsigned long flags;
 
-		/*
-		 * We read the inactive GS base value by swapping
-		 * to make it the active one. But we cannot allow
-		 * an interrupt while we switch to and from.
-		 */
-		if (!irqs_disabled()) {
-			local_irq_save(flags);
-			need_restore = true;
-		}
-
-		native_swapgs();
-		gsbase = rdgsbase();
-		native_swapgs();
-
-		if (need_restore)
-			local_irq_restore(flags);
+		local_irq_save(flags);
+		gsbase = __rdgsbase_inactive();
+		local_irq_restore(flags);
 	} else {
 		rdmsrl(MSR_KERNEL_GS_BASE, gsbase);
 	}
@@ -317,25 +408,11 @@ unsigned long x86_gsbase_read_cpu_inactive(void)
 void x86_gsbase_write_cpu_inactive(unsigned long gsbase)
 {
 	if (static_cpu_has(X86_FEATURE_FSGSBASE)) {
-		bool need_restore = false;
 		unsigned long flags;
 
-		/*
-		 * We write the inactive GS base value by swapping
-		 * to make it the active one. But we cannot allow
-		 * an interrupt while we switch to and from.
-		 */
-		if (!irqs_disabled()) {
-			local_irq_save(flags);
-			need_restore = true;
-		}
-
-		native_swapgs();
-		wrgsbase(gsbase);
-		native_swapgs();
-
-		if (need_restore)
-			local_irq_restore(flags);
+		local_irq_save(flags);
+		__wrgsbase_inactive(gsbase);
+		local_irq_restore(flags);
 	} else {
 		wrmsrl(MSR_KERNEL_GS_BASE, gsbase);
 	}

@@ -368,7 +368,7 @@ For 32-bit we have the following conventions - kernel is built with
 .endm
 
 /*
- * Fetch the per-CPU GS base value for this processor and put it in @reg.
+ * Fetch the per-CPU GSBASE value for this processor and put it in @reg.
  * We normally use %gs for accessing per-CPU data, but we are setting up
  * %gs here and obviously can not use %gs itself to access per-CPU data.
  */
