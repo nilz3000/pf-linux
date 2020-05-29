@@ -922,7 +922,6 @@ apicinterrupt IRQ_WORK_VECTOR			irq_work_interrupt		smp_irq_work_interrupt
 	.endif
 
 	.if \paranoid
-	/* this procedure expect "no swapgs" flag in ebx */
 	jmp	paranoid_exit
 	.else
 	jmp	error_exit
@@ -1212,14 +1211,14 @@ idtentry machine_check		do_mce			has_error_code=0	paranoid=1
 #endif
 
 /*
- * Save all registers in pt_regs. Return GS base related information
+ * Save all registers in pt_regs. Return GSBASE related information
  * in EBX depending on the availability of the FSGSBASE instructions:
  *
  * FSGSBASE	R/EBX
  *     N        0 -> SWAPGS on exit
  *              1 -> no SWAPGS on exit
  *
- *     Y        GS base value at entry, must be restored in paranoid_exit
+ *     Y        GSBASE value at entry, must be restored in paranoid_exit
  */
 SYM_CODE_START_LOCAL(paranoid_entry)
 	UNWIND_HINT_FUNC
@@ -1237,39 +1236,39 @@ SYM_CODE_START_LOCAL(paranoid_entry)
 	 * hardware at entry) can not be used: this may be a return
 	 * to kernel code, but with a user CR3 value.
 	 *
-	 * Switching CR3 does not depend on kernel GS base so it can
-	 * be done before switching to the kernel GS base. This is
-	 * required for FSGSBASE because the kernel GS base has to
+	 * Switching CR3 does not depend on kernel GSBASE so it can
+	 * be done before switching to the kernel GSBASE. This is
+	 * required for FSGSBASE because the kernel GSBASE has to
 	 * be retrieved from a kernel internal table.
 	 */
 	SAVE_AND_SWITCH_TO_KERNEL_CR3 scratch_reg=%rax save_reg=%r14
 
 	/*
-	 * Handling GS base depends on the availability of FSGSBASE.
+	 * Handling GSBASE depends on the availability of FSGSBASE.
 	 *
-	 * Without FSGSBASE the kernel enforces that negative GS base
-	 * values indicate kernel GS base. With FSGSBASE no assumptions
-	 * can be made about the GS base value when entering from user
+	 * Without FSGSBASE the kernel enforces that negative GSBASE
+	 * values indicate kernel GSBASE. With FSGSBASE no assumptions
+	 * can be made about the GSBASE value when entering from user
 	 * space.
-	*/
+	 */
 	ALTERNATIVE "jmp .Lparanoid_entry_checkgs", "", X86_FEATURE_FSGSBASE
 
 	/*
-	 * Read the current GS base and store it in %rbx unconditionally,
-	 * retrieve and set the current CPUs kernel GS base. The stored value
+	 * Read the current GSBASE and store it in %rbx unconditionally,
+	 * retrieve and set the current CPUs kernel GSBASE. The stored value
 	 * has to be restored in paranoid_exit unconditionally.
 	 *
-	 * This unconditional write of GS base ensures no subsequent load
-	 * based on a mispredicted GS base.
+	 * The MSR write ensures that no subsequent load is based on a
+	 * mispredicted GSBASE. No extra FENCE required.
 	 */
 	SAVE_AND_SET_GSBASE scratch_reg=%rax save_reg=%rbx
 	ret
 
 .Lparanoid_entry_checkgs:
-	/* EBX = 1 -> kernel GS base active, no restore required */
+	/* EBX = 1 -> kernel GSBASE active, no restore required */
 	movl	$1, %ebx
 	/*
-	 * The kernel-enforced convention is a negative GS base indicates
+	 * The kernel-enforced convention is a negative GSBASE indicates
 	 * a kernel value. No SWAPGS needed on entry and exit.
 	 */
 	movl	$MSR_GS_BASE, %ecx
@@ -1280,7 +1279,14 @@ SYM_CODE_START_LOCAL(paranoid_entry)
 
 .Lparanoid_entry_swapgs:
 	SWAPGS
+
+	/*
+	 * The above SAVE_AND_SWITCH_TO_KERNEL_CR3 macro doesn't do an
+	 * unconditional CR3 write, even in the PTI case.  So do an lfence
+	 * to prevent GS speculation, regardless of whether PTI is enabled.
+	 */
 	FENCE_SWAPGS_KERNEL_ENTRY
+
 	/* EBX = 0 -> SWAPGS required on exit */
 	xorl	%ebx, %ebx
 	ret
@@ -1296,45 +1302,45 @@ SYM_CODE_END(paranoid_entry)
  * be complicated.  Fortunately, there's no good reason to try
  * to handle preemption here.
  *
- * R/EBX contains the GS base related information depending on the
+ * R/EBX contains the GSBASE related information depending on the
  * availability of the FSGSBASE instructions:
  *
  * FSGSBASE	R/EBX
  *     N        0 -> SWAPGS on exit
  *              1 -> no SWAPGS on exit
  *
- *     Y        User space GS base, must be restored unconditionally
+ *     Y        User space GSBASE, must be restored unconditionally
  */
 SYM_CODE_START_LOCAL(paranoid_exit)
 	UNWIND_HINT_REGS
 	DISABLE_INTERRUPTS(CLBR_ANY)
-
 	/*
 	 * The order of operations is important. IRQ tracing requires
-	 * kernel GS base and CR3. RESTORE_CR3 requires kernel GS base.
+	 * kernel GSBASE and CR3. RESTORE_CR3 requires kernel GSBASE.
 	 *
 	 * NB to anyone to try to optimize this code: this code does
 	 * not execute at all for exceptions from user mode. Those
 	 * exceptions go through error_exit instead.
 	 */
-	TRACE_IRQS_OFF_DEBUG
+	TRACE_IRQS_IRETQ_DEBUG
+
 	RESTORE_CR3	scratch_reg=%rax save_reg=%r14
 
-	/* Handle the three GS base cases */
+	/* Handle the three GSBASE cases */
 	ALTERNATIVE "jmp .Lparanoid_exit_checkgs", "", X86_FEATURE_FSGSBASE
 
-	/* With FSGSBASE enabled, unconditionally resotre GS base */
+	/* With FSGSBASE enabled, unconditionally restore GSBASE */
 	wrgsbase	%rbx
-	jmp	restore_regs_and_return_to_kernel
+	jmp		restore_regs_and_return_to_kernel
 
 .Lparanoid_exit_checkgs:
 	/* On non-FSGSBASE systems, conditionally do SWAPGS */
-	testl	%ebx, %ebx
-	jnz	restore_regs_and_return_to_kernel
+	testl		%ebx, %ebx
+	jnz		restore_regs_and_return_to_kernel
 
-	/* We are returning to a context with user GS base */
+	/* We are returning to a context with user GSBASE */
 	SWAPGS_UNSAFE_STACK
-	jmp	restore_regs_and_return_to_kernel
+	jmp		restore_regs_and_return_to_kernel
 SYM_CODE_END(paranoid_exit)
 
 /*
@@ -1743,11 +1749,11 @@ end_repeat_nmi:
 	RESTORE_CR3 scratch_reg=%r15 save_reg=%r14
 
 	/*
-	 * The above invocation of paranoid_entry stored the GS base
+	 * The above invocation of paranoid_entry stored the GSBASE
 	 * related information in R/EBX depending on the availability
 	 * of FSGSBASE.
 	 *
-	 * If FSGSBASE is enabled, restore the saved GS base value
+	 * If FSGSBASE is enabled, restore the saved GSBASE value
 	 * unconditionally, otherwise take the conditional SWAPGS path.
 	 */
 	ALTERNATIVE "jmp nmi_no_fsgsbase", "", X86_FEATURE_FSGSBASE
