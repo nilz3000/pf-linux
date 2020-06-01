@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0
 VERSION = 5
 PATCHLEVEL = 7
-SUBLEVEL = 1
-EXTRAVERSION =
+SUBLEVEL = 0
+EXTRAVERSION = -pf1
 NAME = Kleptomaniac Octopus
 
 # *DOCUMENTATION*
