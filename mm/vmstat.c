@@ -1087,8 +1087,9 @@ int extfrag_for_order(struct zone *zone, unsigned int order)
 	if (info.free_pages == 0)
 		return 0;
 
-	return (info.free_pages - (info.free_blocks_suitable << order)) * 100
-							/ info.free_pages;
+	return div_u64((info.free_pages -
+			(info.free_blocks_suitable << order)) * 100,
+			info.free_pages);
 }
 
 /* Same as __fragmentation index but allocs contig_page_info on stack */

@@ -55,6 +55,19 @@ static inline void count_compact_events(enum vm_event_item item, long delta)
  */
 static const int HPAGE_FRAG_CHECK_INTERVAL_MSEC = 500;
 
+/*
+ * Page order with-respect-to which proactive compaction
+ * calculates external fragmentation, which is used as
+ * the "fragmentation score" of a node/zone.
+ */
+#if defined HPAGE_PMD_ORDER
+#define COMPACTION_HPAGE_ORDER	HPAGE_PMD_ORDER
+#elif defined HUGETLB_PAGE_ORDER
+#define COMPACTION_HPAGE_ORDER	HUGETLB_PAGE_ORDER
+#else
+#define COMPACTION_HPAGE_ORDER	(PMD_SHIFT - PAGE_SHIFT)
+#endif
+
 static unsigned long release_freepages(struct list_head *freelist)
 {
 	struct page *page, *next;
@@ -1867,9 +1880,9 @@ static bool kswapd_is_running(pg_data_t *pgdat)
 
 /*
  * A zone's fragmentation score is the external fragmentation wrt to the
- * HUGETLB_PAGE_ORDER scaled by the zone's size. It returns a value in the
- * range [0, 100].
-
+ * COMPACTION_HPAGE_ORDER scaled by the zone's size. It returns a value
+ * in the range [0, 100].
+ *
  * The scaling factor ensures that proactive compaction focuses on larger
  * zones like ZONE_NORMAL, rather than smaller, specialized zones like
  * ZONE_DMA32. For smaller zones, the score value remains close to zero,
@@ -1880,7 +1893,7 @@ static int fragmentation_score_zone(struct zone *zone)
 	unsigned long score;
 
 	score = zone->present_pages *
-			extfrag_for_order(zone, HPAGE_PMD_ORDER);
+			extfrag_for_order(zone, COMPACTION_HPAGE_ORDER);
 	return div64_ul(score, zone->zone_pgdat->node_present_pages + 1);
 }
 
@@ -1910,7 +1923,12 @@ static int fragmentation_score_wmark(pg_data_t *pgdat, bool low)
 {
 	int wmark_low;
 
-	wmark_low = 100 - sysctl_compaction_proactiveness;
+	/*
+	 * Cap the low watermak to avoid excessive compaction
+	 * activity in case a user sets the proactivess tunable
+	 * close to 100 (maximum).
+	 */
+	wmark_low = max(100 - sysctl_compaction_proactiveness, 5);
 	return low ? wmark_low : min(wmark_low + 10, 100);
 }
 
@@ -2588,7 +2606,7 @@ int sysctl_compact_memory;
  * aggressively the kernel should compact memory in the
  * background. It takes values in the range [0, 100].
  */
-int sysctl_compaction_proactiveness = 20;
+int __read_mostly sysctl_compaction_proactiveness = 20;
 
 /*
  * This is the entry point for compacting all nodes via
