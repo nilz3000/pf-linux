@@ -46,7 +46,6 @@
 #define APPLESMC_MIN_WAIT	0x0010
 #define APPLESMC_RETRY_WAIT	0x0100
 #define APPLESMC_MAX_WAIT	0x20000
-#define APPLESMC_UDELAY_MAX	20000
 
 #define APPLESMC_READ_CMD	0x10
 #define APPLESMC_WRITE_CMD	0x11
@@ -157,23 +156,19 @@ static struct workqueue_struct *applesmc_led_wq;
  */
 static int wait_read(void)
 {
+	unsigned long end = jiffies + (APPLESMC_MAX_WAIT * HZ) / USEC_PER_SEC;
 	u8 status;
-	unsigned int us;
+	int us;
 
-	for (us = APPLESMC_MIN_WAIT; us < APPLESMC_UDELAY_MAX; us <<= 1) {
-		udelay(us);
+	for (us = APPLESMC_MIN_WAIT; us < APPLESMC_MAX_WAIT; us <<= 1) {
+		usleep_range(us, us * 16);
 		status = inb(APPLESMC_CMD_PORT);
 		/* read: wait for smc to settle */
 		if (status & 0x01)
 			return 0;
-	}
-	/* switch to mdelay for longer sleeps */
-	for (; us < APPLESMC_MAX_WAIT; us <<= 1) {
-		mdelay(us);
-		status = inb(APPLESMC_CMD_PORT);
-		/* read: wait for smc to settle */
-		if (status & 0x01)
-			return 0;
+		/* timeout: give up */
+		if (time_after(jiffies, end))
+			break;
 	}
 
 	pr_warn("wait_read() fail: 0x%02x\n", status);
@@ -187,11 +182,12 @@ static int wait_read(void)
 static int send_byte(u8 cmd, u16 port)
 {
 	u8 status;
-	unsigned int us;
+	int us;
+	unsigned long end = jiffies + (APPLESMC_MAX_WAIT * HZ) / USEC_PER_SEC;
 
 	outb(cmd, port);
-	for (us = APPLESMC_MIN_WAIT; us < APPLESMC_UDELAY_MAX; us <<= 1) {
-		udelay(us);
+	for (us = APPLESMC_MIN_WAIT; us < APPLESMC_MAX_WAIT; us <<= 1) {
+		usleep_range(us, us * 16);
 		status = inb(APPLESMC_CMD_PORT);
 		/* write: wait for smc to settle */
 		if (status & 0x02)
@@ -200,24 +196,7 @@ static int send_byte(u8 cmd, u16 port)
 		if (status & 0x04)
 			return 0;
 		/* timeout: give up */
-		if (us << 1 == APPLESMC_UDELAY_MAX)
-			break;
-		/* busy: long wait and resend */
-		udelay(APPLESMC_RETRY_WAIT);
-		outb(cmd, port);
-	}
-	/* switch to mdelay for longer sleeps */
-	for (; us < APPLESMC_MAX_WAIT; us <<= 1) {
-		mdelay(us);
-		status = inb(APPLESMC_CMD_PORT);
-		/* write: wait for smc to settle */
-		if (status & 0x02)
-			continue;
-		/* ready: cmd accepted, return */
-		if (status & 0x04)
-			return 0;
-		/* timeout: give up */
-		if (us << 1 == APPLESMC_MAX_WAIT)
+		if (time_after(jiffies, end))
 			break;
 		/* busy: long wait and resend */
 		udelay(APPLESMC_RETRY_WAIT);
