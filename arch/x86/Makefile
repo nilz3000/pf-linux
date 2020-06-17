@@ -128,8 +128,11 @@ else
         cflags-$(CONFIG_MJAGUAR) += $(call cc-option,-march=btver2)
         cflags-$(CONFIG_MBULLDOZER) += $(call cc-option,-march=bdver1)
         cflags-$(CONFIG_MPILEDRIVER) += $(call cc-option,-march=bdver2)
+        cflags-$(CONFIG_MPILEDRIVER) += $(call cc-option,-mno-tbm)
         cflags-$(CONFIG_MSTEAMROLLER) += $(call cc-option,-march=bdver3)
+        cflags-$(CONFIG_MSTEAMROLLER) += $(call cc-option,-mno-tbm)
         cflags-$(CONFIG_MEXCAVATOR) += $(call cc-option,-march=bdver4)
+        cflags-$(CONFIG_MEXCAVATOR) += $(call cc-option,-mno-tbm)
         cflags-$(CONFIG_MZEN) += $(call cc-option,-march=znver1)
         cflags-$(CONFIG_MZEN2) += $(call cc-option,-march=znver2)
         cflags-$(CONFIG_MPSC) += $(call cc-option,-march=nocona)
@@ -164,6 +167,10 @@ else
                 $(call cc-option,-march=icelake-client,$(call cc-option,-mtune=icelake-client))
         cflags-$(CONFIG_MCASCADELAKE) += \
                 $(call cc-option,-march=cascadelake,$(call cc-option,-mtune=cascadelake))
+        cflags-$(CONFIG_MCOOPERLAKE) += \
+                $(call cc-option,-march=cooperlake,$(call cc-option,-mtune=cooperlake))
+        cflags-$(CONFIG_MTIGERLAKE) += \
+                $(call cc-option,-march=tigerlake,$(call cc-option,-mtune=tigerlake))
         cflags-$(CONFIG_MATOM) += $(call cc-option,-march=bonnell) \
                 $(call cc-option,-mtune=bonnell,$(call cc-option,-mtune=generic))
         cflags-$(CONFIG_GENERIC_CPU) += $(call cc-option,-mtune=generic)
