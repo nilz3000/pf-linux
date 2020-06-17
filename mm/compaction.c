@@ -60,7 +60,7 @@ static const int HPAGE_FRAG_CHECK_INTERVAL_MSEC = 500;
  * calculates external fragmentation, which is used as
  * the "fragmentation score" of a node/zone.
  */
-#if defined HPAGE_PMD_ORDER
+#if defined CONFIG_TRANSPARENT_HUGEPAGE
 #define COMPACTION_HPAGE_ORDER	HPAGE_PMD_ORDER
 #elif defined HUGETLB_PAGE_ORDER
 #define COMPACTION_HPAGE_ORDER	HUGETLB_PAGE_ORDER
