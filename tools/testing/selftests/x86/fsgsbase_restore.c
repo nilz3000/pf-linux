@@ -70,7 +70,7 @@ static void init_seg(void)
 		.seg_not_present = 0,
 		.useable         = 0
 	};
-	if (false && syscall(SYS_modify_ldt, 1, &desc, sizeof(desc)) == 0) {
+	if (syscall(SYS_modify_ldt, 1, &desc, sizeof(desc)) == 0) {
 		printf("\tusing LDT slot 0\n");
 		asm volatile ("mov %0, %" SEG :: "rm" ((unsigned short)0x7));
 	} else {
