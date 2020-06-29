@@ -107,7 +107,6 @@ static int __maybe_unused
 mt76x2e_suspend(struct pci_dev *pdev, pm_message_t state)
 {
 	struct mt76_dev *mdev = pci_get_drvdata(pdev);
-	struct mt76x02_dev *dev = container_of(mdev, struct mt76x02_dev, mt76);
 	int i, err;
 
 	napi_disable(&mdev->tx_napi);
