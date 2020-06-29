@@ -117,8 +117,6 @@ mt76x2e_suspend(struct pci_dev *pdev, pm_message_t state)
 	mt76_for_each_q_rx(mdev, i)
 		napi_disable(&mdev->napi[i]);
 
-	mt76x02_dma_reset(dev);
-
 	pci_enable_wake(pdev, pci_choose_state(pdev, state), true);
 	pci_save_state(pdev);
 	err = pci_set_power_state(pdev, pci_choose_state(pdev, state));
