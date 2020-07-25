@@ -62,12 +62,11 @@
  * When UNZSTD_PREBOOT is defined we declare __decompress(), which is
  * used for kernel decompression, instead of unzstd().
  *
- * __DISABLE_EXPORTS stops zstd and xxhash from declaring themselves
- * as modules by disabling the EXPORT_SYMBOL macro.
+ * Define __DISABLE_EXPORTS in preboot environments to prevent symbols
+ * from xxhash and zstd from being exported by the EXPORT_SYMBOL macro.
  */
 #ifdef STATIC
 # define UNZSTD_PREBOOT
-# define __DISABLE_EXPORTS
 # include "xxhash.c"
 # include "zstd/entropy_common.c"
 # include "zstd/fse_decompress.c"
