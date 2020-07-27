@@ -632,10 +632,14 @@ static void bfq_idle_insert(struct bfq_service_tree *st,
  * @entity: the entity being removed.
  * @is_in_service: true if entity is currently the in-service entity.
  *
- * Forget everything about @entity. If entity is not in service, then release
- * the service reference to the entity (the one taken through  bfq_get_entity).
- * If the entity is in service, then __bfq_bfqd_reset_in_service will take care
- * of putting the reference when the entity finally stops being served.
+ * Forget everything about @entity. In addition, if entity represents
+ * a queue, and the latter is not in service, then release the service
+ * reference to the queue (the one taken through bfq_get_entity). In
+ * fact, in this case, there is really no more service reference to
+ * the queue, as the latter is also outside any service tree. If,
+ * instead, the queue is in service, then __bfq_bfqd_reset_in_service
+ * will take care of putting the reference when the queue finally
+ * stops being served.
  */
 static void bfq_forget_entity(struct bfq_service_tree *st,
 			      struct bfq_entity *entity,
@@ -1608,7 +1612,6 @@ bool __bfq_bfqd_reset_in_service(struct bfq_data *bfqd)
 	struct bfq_queue *in_serv_bfqq = bfqd->in_service_queue;
 	struct bfq_entity *in_serv_entity = &in_serv_bfqq->entity;
 	struct bfq_entity *entity = in_serv_entity;
-	struct bfq_entity *parent = NULL;
 
 	bfq_clear_bfqq_wait_request(in_serv_bfqq);
 	hrtimer_try_to_cancel(&bfqd->idle_slice_timer);
@@ -1620,16 +1623,9 @@ bool __bfq_bfqd_reset_in_service(struct bfq_data *bfqd)
 	 * execute the final step: reset in_service_entity along the
 	 * path from entity to the root.
 	 */
-	for_each_entity_safe(entity, parent) {
+	for_each_entity(entity)
 		entity->sched_data->in_service_entity = NULL;
-		/*
-		 * Release bfq_groups reference if it was not released in
-		 * bfq_forget_entity, which was taken in bfq_get_entity.
-		 */
-		if (!bfq_entity_to_bfqq(entity) && !entity->on_st_or_in_serv)
-			bfqg_and_blkg_put(container_of(entity, struct bfq_group,
-						       entity));
-	}
+
 	/*
 	 * in_serv_entity is no longer in service, so, if it is in no
 	 * service tree either, then release the service reference to
