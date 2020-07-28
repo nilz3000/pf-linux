@@ -81,10 +81,11 @@
 
 /* 128MB is the maximum window size supported by zstd. */
 #define ZSTD_WINDOWSIZE_MAX	(1 << ZSTD_WINDOWLOG_MAX)
-/* Size of the input and output buffers in multi-call mode.
+/*
+ * Size of the input and output buffers in multi-call mode.
  * Pick a larger size because it isn't used during kernel decompression,
  * since that is single pass, and we have to allocate a large buffer for
- * zstd's window anyways. The larger size speeds up initramfs decompression.
+ * zstd's window anyway. The larger size speeds up initramfs decompression.
  */
 #define ZSTD_IOBUF_SIZE		(1 << 17)
 

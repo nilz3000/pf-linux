@@ -12,11 +12,6 @@
  * High loaded stuff by Hans Lermen & Werner Almesberger, Feb. 1996
  */
 
-/* decompressors bring in EXPORT_SYMBOL which is meaningless and will
- * cause compiler errors in some cases.
- */
-#define __DISABLE_EXPORTS
-
 #include "misc.h"
 #include "error.h"
 #include "pgtable.h"
