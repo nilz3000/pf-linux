@@ -168,7 +168,9 @@ static noinstr unsigned long __rdgsbase_inactive(void)
 		gsbase = rdgsbase();
 		native_swapgs();
 	} else {
+		instrumentation_begin();
 		rdmsrl(MSR_KERNEL_GS_BASE, gsbase);
+		instrumentation_end();
 	}
 
 	return gsbase;
@@ -191,7 +193,9 @@ static noinstr void __wrgsbase_inactive(unsigned long gsbase)
 		wrgsbase(gsbase);
 		native_swapgs();
 	} else {
+		instrumentation_begin();
 		wrmsrl(MSR_KERNEL_GS_BASE, gsbase);
+		instrumentation_end();
 	}
 }
 
