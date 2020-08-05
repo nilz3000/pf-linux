@@ -881,7 +881,7 @@ static int putreg32(struct task_struct *child, unsigned regno, u32 value)
 		if (ret == 0)
 			child->thread.fsbase =
 				x86_fsgsbase_read_task(child, value);
-		break;
+		return ret;
 
 	case offsetof(struct user32, regs.gs):
 		ret = set_segment_reg(child,
@@ -890,7 +890,7 @@ static int putreg32(struct task_struct *child, unsigned regno, u32 value)
 		if (ret == 0)
 			child->thread.gsbase =
 				x86_fsgsbase_read_task(child, value);
-		break;
+		return ret;
 
 	SEG32(ss);
 
