@@ -71,7 +71,6 @@
 #include <linux/coredump.h>
 #include <linux/latencytop.h>
 #include <linux/pid.h>
-#include <linux/user_namespace.h>
 
 #include "../lib/kstrtox.h"
 
@@ -103,6 +102,9 @@
 #endif
 #ifdef CONFIG_LOCKUP_DETECTOR
 #include <linux/nmi.h>
+#endif
+#ifdef CONFIG_USER_NS
+#include <linux/user_namespace.h>
 #endif
 
 #if defined(CONFIG_SYSCTL)
