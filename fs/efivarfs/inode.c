@@ -9,6 +9,7 @@
 #include <linux/ctype.h>
 #include <linux/slab.h>
 #include <linux/uuid.h>
+#include <linux/kmemleak.h>
 
 #include "internal.h"
 
