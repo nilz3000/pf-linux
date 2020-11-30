@@ -7,9 +7,9 @@
 #include <linux/efi.h>
 #include <linux/fs.h>
 #include <linux/ctype.h>
+#include <linux/kmemleak.h>
 #include <linux/slab.h>
 #include <linux/uuid.h>
-#include <linux/kmemleak.h>
 
 #include "internal.h"
 
