@@ -114,6 +114,25 @@
 static int sixty = 60;
 #endif
 
+#if defined(CONFIG_UNEVICTABLE_ACTIVEFILE)
+unsigned long sysctl_unevictable_activefile_kbytes __read_mostly =
+#if CONFIG_UNEVICTABLE_ACTIVEFILE_KBYTES < 0
+#error "CONFIG_UNEVICTABLE_ACTIVEFILE_KBYTES should be >= 0"
+#else
+	CONFIG_UNEVICTABLE_ACTIVEFILE_KBYTES
+#endif
+;
+#endif
+#if defined(CONFIG_UNEVICTABLE_INACTIVEFILE)
+unsigned long sysctl_unevictable_inactivefile_kbytes __read_mostly =
+#if CONFIG_UNEVICTABLE_INACTIVEFILE_KBYTES < 0
+#error "CONFIG_UNEVICTABLE_INACTIVEFILE_KBYTES should be >= 0"
+#else
+	CONFIG_UNEVICTABLE_INACTIVEFILE_KBYTES
+#endif
+;
+#endif
+
 static int __maybe_unused neg_one = -1;
 static int __maybe_unused two = 2;
 static int __maybe_unused four = 4;
@@ -3092,6 +3111,24 @@ static struct ctl_table vm_table[] = {
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_ONE,
+	},
+#endif
+#if defined(CONFIG_UNEVICTABLE_ACTIVEFILE)
+	{
+		.procname	= "unevictable_activefile_kbytes",
+		.data		= &sysctl_unevictable_activefile_kbytes,
+		.maxlen		= sizeof(sysctl_unevictable_activefile_kbytes),
+		.mode		= 0644,
+		.proc_handler	= proc_doulongvec_minmax,
+	},
+#endif
+#if defined(CONFIG_UNEVICTABLE_INACTIVEFILE)
+	{
+		.procname	= "unevictable_inactivefile_kbytes",
+		.data		= &sysctl_unevictable_inactivefile_kbytes,
+		.maxlen		= sizeof(sysctl_unevictable_inactivefile_kbytes),
+		.mode		= 0644,
+		.proc_handler	= proc_doulongvec_minmax,
 	},
 #endif
 	{
