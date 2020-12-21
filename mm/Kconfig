@@ -105,7 +105,7 @@ config UNEVICTABLE_INACTIVEFILE
 	  See also: Documentation/admin-guide/sysctl/vm.rst
 
 config UNEVICTABLE_INACTIVEFILE_KBYTES
-	int "Set default value for vm.unevictable_inactivefile_kbytes"
+	int "Default value for vm.unevictable_inactivefile_kbytes"
 	depends on UNEVICTABLE_INACTIVEFILE
 	default "0"
 

@@ -167,11 +167,11 @@ struct scan_control {
 #endif
 
 #if defined(CONFIG_UNEVICTABLE_ACTIVEFILE)
-extern unsigned int sysctl_unevictable_activefile_kbytes;
+extern unsigned long sysctl_unevictable_activefile_kbytes;
 #endif
 
 #if defined(CONFIG_UNEVICTABLE_INACTIVEFILE)
-extern unsigned int sysctl_unevictable_inactivefile_kbytes;
+extern unsigned long sysctl_unevictable_inactivefile_kbytes;
 #endif
 
 /*
