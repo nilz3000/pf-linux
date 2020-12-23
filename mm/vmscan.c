@@ -167,11 +167,8 @@ struct scan_control {
 #endif
 
 #if defined(CONFIG_UNEVICTABLE_ACTIVEFILE)
-extern unsigned long sysctl_unevictable_activefile_kbytes;
-#endif
-
-#if defined(CONFIG_UNEVICTABLE_INACTIVEFILE)
-extern unsigned long sysctl_unevictable_inactivefile_kbytes;
+extern unsigned long sysctl_unevictable_activefile_kbytes_low;
+extern unsigned long sysctl_unevictable_activefile_kbytes_min;
 #endif
 
 /*
@@ -2233,8 +2230,7 @@ enum scan_balance {
 	SCAN_FILE,
 };
 
-#if defined(CONFIG_UNEVICTABLE_ACTIVEFILE) || \
-	defined(CONFIG_UNEVICTABLE_INACTIVEFILE)
+#if defined(CONFIG_UNEVICTABLE_ACTIVEFILE)
 #define K(x) ((x) << (PAGE_SHIFT - 10))
 #endif
 
@@ -2434,23 +2430,19 @@ out:
 #if defined(CONFIG_UNEVICTABLE_ACTIVEFILE)
 		if (lru == LRU_ACTIVE_FILE) {
 			unsigned long kib_active_file_now = K(global_node_page_state(NR_ACTIVE_FILE));
-			if (kib_active_file_now <= sysctl_unevictable_activefile_kbytes) {
+			if (kib_active_file_now < sysctl_unevictable_activefile_kbytes_low &&
+				kib_active_file_now > sysctl_unevictable_activefile_kbytes_min) {
+				nr[lru] = scan *
+					(kib_active_file_now -
+					 sysctl_unevictable_activefile_kbytes_min) /
+					(sysctl_unevictable_activefile_kbytes_low -
+					 sysctl_unevictable_activefile_kbytes_min);
+			} else if (kib_active_file_now <= sysctl_unevictable_activefile_kbytes_min) {
 				nr[lru] = 0;
 				continue;
 			}
 		}
 #endif
-
-#if defined(CONFIG_UNEVICTABLE_INACTIVEFILE)
-		if (lru == LRU_INACTIVE_FILE) {
-			unsigned long kib_inactive_file_now = K(global_node_page_state(NR_INACTIVE_FILE));
-			if (kib_inactive_file_now <= sysctl_unevictable_inactivefile_kbytes) {
-				nr[lru] = 0;
-				continue;
-			}
-		}
-#endif
-
 		nr[lru] = scan;
 	}
 }
