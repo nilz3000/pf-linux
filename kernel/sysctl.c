@@ -112,22 +112,19 @@ static int sixty = 60;
 #endif
 
 #if defined(CONFIG_UNEVICTABLE_ACTIVEFILE)
-unsigned long sysctl_unevictable_activefile_kbytes __read_mostly =
-#if CONFIG_UNEVICTABLE_ACTIVEFILE_KBYTES < 0
-#error "CONFIG_UNEVICTABLE_ACTIVEFILE_KBYTES should be >= 0"
-#else
-	CONFIG_UNEVICTABLE_ACTIVEFILE_KBYTES
+#if CONFIG_UNEVICTABLE_ACTIVEFILE_KBYTES_LOW < 0
+#error "CONFIG_UNEVICTABLE_ACTIVEFILE_KBYTES_LOW should be >= 0"
 #endif
-;
+#if CONFIG_UNEVICTABLE_ACTIVEFILE_KBYTES_MIN < 0
+#error "CONFIG_UNEVICTABLE_ACTIVEFILE_KBYTES_MIN should be >= 0"
 #endif
-#if defined(CONFIG_UNEVICTABLE_INACTIVEFILE)
-unsigned long sysctl_unevictable_inactivefile_kbytes __read_mostly =
-#if CONFIG_UNEVICTABLE_INACTIVEFILE_KBYTES < 0
-#error "CONFIG_UNEVICTABLE_INACTIVEFILE_KBYTES should be >= 0"
-#else
-	CONFIG_UNEVICTABLE_INACTIVEFILE_KBYTES
+#if CONFIG_UNEVICTABLE_ACTIVEFILE_KBYTES_LOW < CONFIG_UNEVICTABLE_ACTIVEFILE_KBYTES_MIN
+#error "CONFIG_UNEVICTABLE_ACTIVEFILE_KBYTES_LOW should be >= CONFIG_UNEVICTABLE_ACTIVEFILE_KBYTES_MIN"
 #endif
-;
+unsigned long sysctl_unevictable_activefile_kbytes_low __read_mostly =
+	CONFIG_UNEVICTABLE_ACTIVEFILE_KBYTES_LOW;
+unsigned long sysctl_unevictable_activefile_kbytes_min __read_mostly =
+	CONFIG_UNEVICTABLE_ACTIVEFILE_KBYTES_MIN;
 #endif
 
 static int __maybe_unused neg_one = -1;
@@ -3103,20 +3100,21 @@ static struct ctl_table vm_table[] = {
 #endif
 #if defined(CONFIG_UNEVICTABLE_ACTIVEFILE)
 	{
-		.procname	= "unevictable_activefile_kbytes",
-		.data		= &sysctl_unevictable_activefile_kbytes,
-		.maxlen		= sizeof(sysctl_unevictable_activefile_kbytes),
+		.procname	= "unevictable_activefile_kbytes_low",
+		.data		= &sysctl_unevictable_activefile_kbytes_low,
+		.maxlen		= sizeof(sysctl_unevictable_activefile_kbytes_low),
 		.mode		= 0644,
 		.proc_handler	= proc_doulongvec_minmax,
+		.extra1		= &sysctl_unevictable_activefile_kbytes_min,
 	},
-#endif
-#if defined(CONFIG_UNEVICTABLE_INACTIVEFILE)
 	{
-		.procname	= "unevictable_inactivefile_kbytes",
-		.data		= &sysctl_unevictable_inactivefile_kbytes,
-		.maxlen		= sizeof(sysctl_unevictable_inactivefile_kbytes),
+		.procname	= "unevictable_activefile_kbytes_min",
+		.data		= &sysctl_unevictable_activefile_kbytes_min,
+		.maxlen		= sizeof(sysctl_unevictable_activefile_kbytes_min),
 		.mode		= 0644,
 		.proc_handler	= proc_doulongvec_minmax,
+		.extra1		= &zero_ul,
+		.extra2		= &sysctl_unevictable_activefile_kbytes_low,
 	},
 #endif
 	{
