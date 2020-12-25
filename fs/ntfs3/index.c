@@ -238,8 +238,8 @@ static int bmp_buf_get(struct ntfs_index *indx, struct ntfs_inode *ni,
 	}
 
 	data_size = le64_to_cpu(b->nres.data_size);
-	if (off >= data_size) {
-		WARN_ON(1);
+	if (WARN_ON(off >= data_size)) {
+		/* looks like filesystem error */
 		return -EINVAL;
 	}
 

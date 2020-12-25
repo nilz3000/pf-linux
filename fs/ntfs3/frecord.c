@@ -274,14 +274,17 @@ out:
  * enumerates attributes in ntfs_inode
  */
 struct ATTRIB *ni_enum_attr_ex(struct ntfs_inode *ni, struct ATTRIB *attr,
-			       struct ATTR_LIST_ENTRY **le)
+			       struct ATTR_LIST_ENTRY **le,
+			       struct mft_inode **mi)
 {
-	struct mft_inode *mi;
+	struct mft_inode *mi2;
 	struct ATTR_LIST_ENTRY *le2;
 
 	/* Do we have an attribute list? */
 	if (!ni->attr_list.size) {
 		*le = NULL;
+		if (mi)
+			*mi = &ni->mi;
 		/* Enum attributes in primary record */
 		return mi_enum_attr(&ni->mi, attr);
 	}
@@ -292,12 +295,14 @@ struct ATTRIB *ni_enum_attr_ex(struct ntfs_inode *ni, struct ATTRIB *attr,
 		return NULL;
 
 	/* Load record that contains the required attribute */
-	if (ni_load_mi(ni, le2, &mi))
+	if (ni_load_mi(ni, le2, &mi2))
 		return NULL;
 
+	if (mi)
+		*mi = mi2;
+
 	/* Find attribute in loaded record */
-	attr = rec_find_attr_le(mi, le2);
-	return attr;
+	return rec_find_attr_le(mi2, le2);
 }
 
 /*
@@ -561,14 +566,9 @@ static int ni_repack(struct ntfs_inode *ni)
 
 	run_init(&run);
 
-	while ((attr = ni_enum_attr_ex(ni, attr, &le))) {
+	while ((attr = ni_enum_attr_ex(ni, attr, &le, &mi))) {
 		if (!attr->non_res)
 			continue;
-
-		if (ni_load_mi(ni, le, &mi)) {
-			err = -EINVAL;
-			break;
-		}
 
 		svcn = le64_to_cpu(attr->nres.svcn);
 		if (svcn != le64_to_cpu(le->vcn)) {
@@ -1541,7 +1541,7 @@ int ni_delete_all(struct ntfs_inode *ni)
 	bool nt3 = is_ntfs3(sbi);
 	struct MFT_REF ref;
 
-	while ((attr = ni_enum_attr_ex(ni, attr, &le))) {
+	while ((attr = ni_enum_attr_ex(ni, attr, &le, NULL))) {
 		if (!nt3 || attr->name_len) {
 			;
 		} else if (attr->type == ATTR_REPARSE) {
@@ -2224,7 +2224,7 @@ remove_wof:
 	 */
 	attr = NULL;
 	le = NULL;
-	while ((attr = ni_enum_attr_ex(ni, attr, &le))) {
+	while ((attr = ni_enum_attr_ex(ni, attr, &le, NULL))) {
 		CLST svcn, evcn;
 		u32 asize, roff;
 
@@ -2336,57 +2336,49 @@ static int decompress_lzx_xpress(struct ntfs_sb_info *sbi, const char *cmpr,
 	}
 
 	err = 0;
-	ctx = NULL;
-	spin_lock(&sbi->compress.lock);
 	if (frame_size == 0x8000) {
+		mutex_lock(&sbi->compress.mtx_lzx);
 		/* LZX: frame compressed */
-		if (!sbi->compress.lzx) {
+		ctx = sbi->compress.lzx;
+		if (!ctx) {
 			/* Lazy initialize lzx decompress context */
-			spin_unlock(&sbi->compress.lock);
-			ctx = lzx_allocate_decompressor(0x8000);
-			if (!ctx)
-				return -ENOMEM;
-			if (IS_ERR(ctx)) {
-				/* should never failed */
-				err = PTR_ERR(ctx);
-				goto out;
+			ctx = lzx_allocate_decompressor();
+			if (!ctx) {
+				err = -ENOMEM;
+				goto out1;
 			}
 
-			spin_lock(&sbi->compress.lock);
-			if (!sbi->compress.lzx) {
-				sbi->compress.lzx = ctx;
-				ctx = NULL;
-			}
+			sbi->compress.lzx = ctx;
 		}
 
-		if (lzx_decompress(sbi->compress.lzx, cmpr, cmpr_size, unc,
-				   unc_size)) {
+		if (lzx_decompress(ctx, cmpr, cmpr_size, unc, unc_size)) {
+			/* treat all errors as "invalid argument" */
 			err = -EINVAL;
 		}
+out1:
+		mutex_unlock(&sbi->compress.mtx_lzx);
 	} else {
 		/* XPRESS: frame compressed */
-		if (!sbi->compress.xpress) {
+		mutex_lock(&sbi->compress.mtx_xpress);
+		ctx = sbi->compress.xpress;
+		if (!ctx) {
 			/* Lazy initialize xpress decompress context */
-			spin_unlock(&sbi->compress.lock);
 			ctx = xpress_allocate_decompressor();
-			if (!ctx)
-				return -ENOMEM;
-
-			spin_lock(&sbi->compress.lock);
-			if (!sbi->compress.xpress) {
-				sbi->compress.xpress = ctx;
-				ctx = NULL;
+			if (!ctx) {
+				err = -ENOMEM;
+				goto out2;
 			}
+
+			sbi->compress.xpress = ctx;
 		}
 
-		if (xpress_decompress(sbi->compress.xpress, cmpr, cmpr_size,
-				      unc, unc_size)) {
+		if (xpress_decompress(ctx, cmpr, cmpr_size, unc, unc_size)) {
+			/* treat all errors as "invalid argument" */
 			err = -EINVAL;
 		}
+out2:
+		mutex_unlock(&sbi->compress.mtx_xpress);
 	}
-	spin_unlock(&sbi->compress.lock);
-out:
-	ntfs_free(ctx);
 	return err;
 }
 #endif
@@ -2705,8 +2697,7 @@ int ni_write_frame(struct ntfs_inode *ni, struct page **pages,
 		goto out;
 	}
 
-	if (!is_attr_compressed(attr)) {
-		WARN_ON(1);
+	if (WARN_ON(!is_attr_compressed(attr))) {
 		err = -EINVAL;
 		goto out;
 	}
@@ -2767,10 +2758,9 @@ int ni_write_frame(struct ntfs_inode *ni, struct page **pages,
 		goto out2;
 	}
 
-	spin_lock(&sbi->compress.lock);
+	mutex_lock(&sbi->compress.mtx_lznt);
 	lznt = NULL;
 	if (!sbi->compress.lznt) {
-		spin_unlock(&sbi->compress.lock);
 		/*
 		 * lznt implements two levels of compression:
 		 * 0 - standard compression
@@ -2779,21 +2769,19 @@ int ni_write_frame(struct ntfs_inode *ni, struct page **pages,
 		 */
 		lznt = get_lznt_ctx(0);
 		if (!lznt) {
+			mutex_unlock(&sbi->compress.mtx_lznt);
 			err = -ENOMEM;
 			goto out3;
 		}
 
-		spin_lock(&sbi->compress.lock);
-		if (!sbi->compress.lznt) {
-			sbi->compress.lznt = lznt;
-			lznt = NULL;
-		}
+		sbi->compress.lznt = lznt;
+		lznt = NULL;
 	}
 
 	/* compress: frame_mem -> frame_ondisk */
 	compr_size = compress_lznt(frame_mem, frame_size, frame_ondisk,
 				   frame_size, sbi->compress.lznt);
-	spin_unlock(&sbi->compress.lock);
+	mutex_unlock(&sbi->compress.mtx_lznt);
 	ntfs_free(lznt);
 
 	if (compr_size + sbi->cluster_size > frame_size) {

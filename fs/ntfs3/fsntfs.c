@@ -1537,8 +1537,7 @@ new_bio:
 
 			if (add + off == PAGE_SIZE) {
 				page_idx += 1;
-				if (page_idx >= nr_pages) {
-					WARN_ON(1);
+				if (WARN_ON(page_idx >= nr_pages)) {
 					err = -EINVAL;
 					goto out;
 				}

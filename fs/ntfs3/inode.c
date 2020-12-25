@@ -108,12 +108,12 @@ static struct inode *ntfs_read_mft(struct inode *inode,
 
 	/*
 	 * to reduce tab pressure use goto instead of
-	 * while( (attr = ni_enum_attr_ex(ni, attr, &le) ))
+	 * while( (attr = ni_enum_attr_ex(ni, attr, &le, NULL) ))
 	 */
 next_attr:
 	run = NULL;
 	err = -EINVAL;
-	attr = ni_enum_attr_ex(ni, attr, &le);
+	attr = ni_enum_attr_ex(ni, attr, &le, NULL);
 	if (!attr)
 		goto end_enum;
 
@@ -1585,11 +1585,14 @@ int ntfs_create_inode(struct inode *dir, struct dentry *dentry,
 
 	inode->i_mode = mode;
 
+#ifdef CONFIG_NTFS3_FS_POSIX_ACL
 	if (!is_link && (sb->s_flags & SB_POSIXACL)) {
 		err = ntfs_init_acl(inode, dir);
 		if (err)
 			goto out6;
-	} else {
+	} else
+#endif
+	{
 		inode->i_flags |= S_NOSEC;
 	}
 
@@ -1963,8 +1966,10 @@ static noinline int ntfs_readlink_hlp(struct inode *inode, char *buffer,
 		goto out;
 
 	default:
-		if (IsReparseTagMicrosoft(rp->ReparseTag))
+		if (IsReparseTagMicrosoft(rp->ReparseTag)) {
+			/* unknown Microsoft Tag */
 			goto out;
+		}
 		if (!IsReparseTagNameSurrogate(rp->ReparseTag) ||
 		    i_size <= sizeof(struct REPARSE_POINT)) {
 			goto out;

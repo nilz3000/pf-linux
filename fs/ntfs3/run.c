@@ -481,6 +481,68 @@ requires_new_range:
 	return true;
 }
 
+/*helper for attr_collapse_range, which is helper for fallocate(collapse_range)*/
+bool run_collapse_range(struct runs_tree *run, CLST vcn, CLST len)
+{
+	size_t index, eat;
+	struct ntfs_run *r, *e, *eat_start, *eat_end;
+	CLST end;
+
+	if (WARN_ON(!run_lookup(run, vcn, &index)))
+		return true; /* should never be here */
+
+	e = run->runs_ + run->count;
+	r = run->runs_ + index;
+	end = vcn + len;
+
+	if (vcn > r->vcn) {
+		if (r->vcn + r->len <= end) {
+			/* collapse tail of run */
+			r->len = vcn - r->vcn;
+		} else if (r->lcn == SPARSE_LCN) {
+			/* collapse a middle part of sparsed run */
+			r->len -= len;
+		} else {
+			/* collapse a middle part of normal run, split */
+			if (!run_add_entry(run, vcn, SPARSE_LCN, len, false))
+				return false;
+			return run_collapse_range(run, vcn, len);
+		}
+
+		r += 1;
+	}
+
+	eat_start = r;
+	eat_end = r;
+
+	for (; r < e; r++) {
+		CLST d;
+
+		if (r->vcn >= end) {
+			r->vcn -= len;
+			continue;
+		}
+
+		if (r->vcn + r->len <= end) {
+			/* eat this run */
+			eat_end = r + 1;
+			continue;
+		}
+
+		d = end - r->vcn;
+		if (r->lcn != SPARSE_LCN)
+			r->lcn += d;
+		r->len -= d;
+		r->vcn -= len - d;
+	}
+
+	eat = eat_end - eat_start;
+	memmove(eat_start, eat_end, (e - eat_end) * sizeof(*r));
+	run->count -= eat;
+
+	return true;
+}
+
 /*
  * run_get_entry
  *
