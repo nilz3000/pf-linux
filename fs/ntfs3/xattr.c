@@ -472,6 +472,7 @@ out:
 	return err;
 }
 
+#ifdef CONFIG_NTFS3_FS_POSIX_ACL
 static inline void ntfs_posix_acl_release(struct posix_acl *acl)
 {
 	if (acl && refcount_dec_and_test(&acl->a_refcount))
@@ -670,14 +671,71 @@ release_and_out:
 }
 
 /*
+ * Initialize the ACLs of a new inode. Called from ntfs_create_inode.
+ */
+int ntfs_init_acl(struct inode *inode, struct inode *dir)
+{
+	struct posix_acl *default_acl, *acl;
+	int err;
+
+	/*
+	 * TODO refactoring lock
+	 * ni_lock(dir) ... -> posix_acl_create(dir,...) -> ntfs_get_acl -> ni_lock(dir)
+	 */
+	inode->i_default_acl = NULL;
+
+	default_acl = ntfs_get_acl_ex(dir, ACL_TYPE_DEFAULT, 1);
+
+	if (!default_acl || default_acl == ERR_PTR(-EOPNOTSUPP)) {
+		inode->i_mode &= ~current_umask();
+		err = 0;
+		goto out;
+	}
+
+	if (IS_ERR(default_acl)) {
+		err = PTR_ERR(default_acl);
+		goto out;
+	}
+
+	acl = default_acl;
+	err = __posix_acl_create(&acl, GFP_NOFS, &inode->i_mode);
+	if (err < 0)
+		goto out1;
+	if (!err) {
+		posix_acl_release(acl);
+		acl = NULL;
+	}
+
+	if (!S_ISDIR(inode->i_mode)) {
+		posix_acl_release(default_acl);
+		default_acl = NULL;
+	}
+
+	if (default_acl)
+		err = ntfs_set_acl_ex(inode, default_acl, ACL_TYPE_DEFAULT, 1);
+
+	if (!acl)
+		inode->i_acl = NULL;
+	else if (!err)
+		err = ntfs_set_acl_ex(inode, acl, ACL_TYPE_ACCESS, 1);
+
+	posix_acl_release(acl);
+out1:
+	posix_acl_release(default_acl);
+
+out:
+	return err;
+}
+#endif
+
+/*
  * ntfs_acl_chmod
  *
- * helper for 'ntfs_setattr'
+ * helper for 'ntfs3_setattr'
  */
 int ntfs_acl_chmod(struct inode *inode)
 {
 	struct super_block *sb = inode->i_sb;
-	int err;
 
 	if (!(sb->s_flags & SB_POSIXACL))
 		return 0;
@@ -685,9 +743,7 @@ int ntfs_acl_chmod(struct inode *inode)
 	if (S_ISLNK(inode->i_mode))
 		return -EOPNOTSUPP;
 
-	err = posix_acl_chmod(inode, inode->i_mode);
-
-	return err;
+	return posix_acl_chmod(inode, inode->i_mode);
 }
 
 /*
@@ -697,18 +753,12 @@ int ntfs_acl_chmod(struct inode *inode)
  */
 int ntfs_permission(struct inode *inode, int mask)
 {
-	struct super_block *sb = inode->i_sb;
-	struct ntfs_sb_info *sbi = sb->s_fs_info;
-	int err;
-
-	if (sbi->options.no_acs_rules) {
+	if (ntfs_sb(inode->i_sb)->options.no_acs_rules) {
 		/* "no access rules" mode - allow all changes */
 		return 0;
 	}
 
-	err = generic_permission(inode, mask);
-
-	return err;
+	return generic_permission(inode, mask);
 }
 
 /*
@@ -833,6 +883,7 @@ static int ntfs_getxattr(const struct xattr_handler *handler, struct dentry *de,
 		goto out;
 	}
 
+#ifdef CONFIG_NTFS3_FS_POSIX_ACL
 	if ((name_len == sizeof(XATTR_NAME_POSIX_ACL_ACCESS) - 1 &&
 	     !memcmp(name, XATTR_NAME_POSIX_ACL_ACCESS,
 		     sizeof(XATTR_NAME_POSIX_ACL_ACCESS))) ||
@@ -845,9 +896,11 @@ static int ntfs_getxattr(const struct xattr_handler *handler, struct dentry *de,
 				ACL_TYPE_ACCESS :
 				ACL_TYPE_DEFAULT,
 			buffer, size);
-	} else {
-		err = ntfs_getxattr_hlp(inode, name, buffer, size, NULL);
+		goto out;
 	}
+#endif
+	/* deal with ntfs extended attribute */
+	err = ntfs_getxattr_hlp(inode, name, buffer, size, NULL);
 
 out:
 	return err;
@@ -978,6 +1031,7 @@ set_new_fa:
 		goto out;
 	}
 
+#ifdef CONFIG_NTFS3_FS_POSIX_ACL
 	if ((name_len == sizeof(XATTR_NAME_POSIX_ACL_ACCESS) - 1 &&
 	     !memcmp(name, XATTR_NAME_POSIX_ACL_ACCESS,
 		     sizeof(XATTR_NAME_POSIX_ACL_ACCESS))) ||
@@ -990,66 +1044,11 @@ set_new_fa:
 				ACL_TYPE_ACCESS :
 				ACL_TYPE_DEFAULT,
 			value, size);
-	} else {
-		err = ntfs_set_ea(inode, name, value, size, flags, 0);
-	}
-
-out:
-	return err;
-}
-
-/*
- * Initialize the ACLs of a new inode. Called from ntfs_create_inode.
- */
-int ntfs_init_acl(struct inode *inode, struct inode *dir)
-{
-	struct posix_acl *default_acl, *acl;
-	int err;
-
-	/*
-	 * TODO refactoring lock
-	 * ni_lock(dir) ... -> posix_acl_create(dir,...) -> ntfs_get_acl -> ni_lock(dir)
-	 */
-	inode->i_default_acl = NULL;
-
-	default_acl = ntfs_get_acl_ex(dir, ACL_TYPE_DEFAULT, 1);
-
-	if (!default_acl || default_acl == ERR_PTR(-EOPNOTSUPP)) {
-		inode->i_mode &= ~current_umask();
-		err = 0;
 		goto out;
 	}
-
-	if (IS_ERR(default_acl)) {
-		err = PTR_ERR(default_acl);
-		goto out;
-	}
-
-	acl = default_acl;
-	err = __posix_acl_create(&acl, GFP_NOFS, &inode->i_mode);
-	if (err < 0)
-		goto out1;
-	if (!err) {
-		posix_acl_release(acl);
-		acl = NULL;
-	}
-
-	if (!S_ISDIR(inode->i_mode)) {
-		posix_acl_release(default_acl);
-		default_acl = NULL;
-	}
-
-	if (default_acl)
-		err = ntfs_set_acl_ex(inode, default_acl, ACL_TYPE_DEFAULT, 1);
-
-	if (!acl)
-		inode->i_acl = NULL;
-	else if (!err)
-		err = ntfs_set_acl_ex(inode, acl, ACL_TYPE_ACCESS, 1);
-
-	posix_acl_release(acl);
-out1:
-	posix_acl_release(default_acl);
+#endif
+	/* deal with ntfs extended attribute */
+	err = ntfs_set_ea(inode, name, value, size, flags, 0);
 
 out:
 	return err;

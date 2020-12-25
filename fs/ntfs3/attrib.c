@@ -168,7 +168,7 @@ failed:
 
 out:
 	if (done)
-		*done = dn;
+		*done += dn;
 
 	return err;
 }
@@ -686,6 +686,7 @@ pack_runs:
 		vcn = max(svcn, new_alen);
 		new_alloc_tmp = (u64)vcn << cluster_bits;
 
+		alen = 0;
 		err = run_deallocate_ex(sbi, run, vcn, evcn - vcn + 1, &alen,
 					true);
 		if (err)
@@ -1677,6 +1678,403 @@ out:
 		attr_b->nres.valid_size = cpu_to_le64(valid_size);
 		mi_b->dirty = true;
 	}
+
+	return err;
+}
+
+/* Collapse range in file */
+int attr_collapse_range(struct ntfs_inode *ni, u64 vbo, u64 bytes)
+{
+	int err = 0;
+	struct runs_tree *run = &ni->file.run;
+	struct ntfs_sb_info *sbi = ni->mi.sbi;
+	struct ATTRIB *attr, *attr_b;
+	struct ATTR_LIST_ENTRY *le, *le_b;
+	struct mft_inode *mi, *mi_b;
+	CLST svcn, evcn1, len, dealloc, alen;
+	CLST vcn, end;
+	u64 valid_size, data_size, alloc_size, total_size;
+	u32 mask;
+	__le16 a_flags;
+
+	if (!bytes)
+		return 0;
+
+	le_b = NULL;
+	attr_b = ni_find_attr(ni, NULL, &le_b, ATTR_DATA, NULL, 0, NULL, &mi_b);
+	if (!attr_b)
+		return -ENOENT;
+
+	if (!attr_b->non_res) {
+		/* Attribute is resident. Nothing to do? */
+		return 0;
+	}
+
+	data_size = le64_to_cpu(attr_b->nres.data_size);
+	valid_size = le64_to_cpu(attr_b->nres.valid_size);
+	alloc_size = le64_to_cpu(attr_b->nres.alloc_size);
+	a_flags = attr_b->flags;
+
+	if (is_attr_ext(attr_b)) {
+		total_size = le64_to_cpu(attr_b->nres.total_size);
+		mask = (1u << (attr_b->nres.c_unit + sbi->cluster_bits)) - 1;
+	} else {
+		total_size = alloc_size;
+		mask = sbi->cluster_mask;
+	}
+
+	if (vbo & mask)
+		return -EINVAL;
+
+	if (bytes & mask)
+		return -EINVAL;
+
+	if (vbo > data_size)
+		return -EINVAL;
+
+	down_write(&ni->file.run_lock);
+
+	if (vbo + bytes >= data_size) {
+		u64 new_valid = min(ni->i_valid, vbo);
+
+		/* Simple truncate file at 'vbo' */
+		truncate_setsize(&ni->vfs_inode, vbo);
+		err = attr_set_size(ni, ATTR_DATA, NULL, 0, &ni->file.run, vbo,
+				    &new_valid, true, NULL);
+
+		if (!err && new_valid < ni->i_valid)
+			ni->i_valid = new_valid;
+
+		goto out;
+	}
+
+	/*
+	 * Enumerate all attribute segments and collapse
+	 */
+	alen = alloc_size >> sbi->cluster_bits;
+	vcn = vbo >> sbi->cluster_bits;
+	len = bytes >> sbi->cluster_bits;
+	end = vcn + len;
+	dealloc = 0;
+
+	svcn = le64_to_cpu(attr_b->nres.svcn);
+	evcn1 = le64_to_cpu(attr_b->nres.evcn) + 1;
+
+	if (svcn <= vcn && vcn < evcn1) {
+		attr = attr_b;
+		le = le_b;
+		mi = mi_b;
+	} else if (!le_b) {
+		err = -EINVAL;
+		goto out;
+	} else {
+		le = le_b;
+		attr = ni_find_attr(ni, attr_b, &le, ATTR_DATA, NULL, 0, &vcn,
+				    &mi);
+		if (!attr) {
+			err = -EINVAL;
+			goto out;
+		}
+
+		svcn = le64_to_cpu(attr->nres.svcn);
+		evcn1 = le64_to_cpu(attr->nres.evcn) + 1;
+	}
+
+	for (;;) {
+		if (svcn >= end) {
+			/* shift vcn */
+			attr->nres.svcn = cpu_to_le64(svcn - len);
+			attr->nres.evcn = cpu_to_le64(evcn1 - 1 - len);
+			if (le) {
+				le->vcn = attr->nres.svcn;
+				ni->attr_list.dirty = true;
+			}
+			mi->dirty = true;
+		} else if (svcn < vcn || end < evcn1) {
+			CLST vcn1, eat, next_svcn;
+
+			/* collapse a part of this attribute segment */
+			err = attr_load_runs(attr, ni, run, &svcn);
+			if (err)
+				goto out;
+			vcn1 = max(vcn, svcn);
+			eat = min(end, evcn1) - vcn1;
+
+			err = run_deallocate_ex(sbi, run, vcn1, eat, &dealloc,
+						true);
+			if (err)
+				goto out;
+
+			if (!run_collapse_range(run, vcn1, eat)) {
+				err = -ENOMEM;
+				goto out;
+			}
+
+			if (svcn >= vcn) {
+				/* shift vcn */
+				attr->nres.svcn = cpu_to_le64(vcn);
+				if (le) {
+					le->vcn = attr->nres.svcn;
+					ni->attr_list.dirty = true;
+				}
+			}
+
+			err = mi_pack_runs(mi, attr, run, evcn1 - svcn - eat);
+			if (err)
+				goto out;
+
+			next_svcn = le64_to_cpu(attr->nres.evcn) + 1;
+			if (next_svcn + eat < evcn1) {
+				err = ni_insert_nonresident(
+					ni, ATTR_DATA, NULL, 0, run, next_svcn,
+					evcn1 - eat - next_svcn, a_flags, &attr,
+					&mi);
+				if (err)
+					goto out;
+
+				/* layout of records maybe changed */
+				attr_b = NULL;
+				le = al_find_ex(ni, NULL, ATTR_DATA, NULL, 0,
+						&next_svcn);
+				if (!le) {
+					err = -EINVAL;
+					goto out;
+				}
+			}
+
+			/* free all allocated memory */
+			run_truncate(run, 0);
+		} else {
+			u16 le_sz;
+			u16 roff = le16_to_cpu(attr->nres.run_off);
+
+			/*run==1 means unpack and deallocate*/
+			run_unpack_ex(RUN_DEALLOCATE, sbi, ni->mi.rno, svcn,
+				      evcn1 - 1, svcn, Add2Ptr(attr, roff),
+				      le32_to_cpu(attr->size) - roff);
+
+			/* delete this attribute segment */
+			mi_remove_attr(mi, attr);
+			if (!le)
+				break;
+
+			le_sz = le16_to_cpu(le->size);
+			if (!al_remove_le(ni, le)) {
+				err = -EINVAL;
+				goto out;
+			}
+
+			if (evcn1 >= alen)
+				break;
+
+			if (!svcn) {
+				/* Load next record that contains this attribute */
+				if (ni_load_mi(ni, le, &mi)) {
+					err = -EINVAL;
+					goto out;
+				}
+
+				/* Look for required attribute */
+				attr = mi_find_attr(mi, NULL, ATTR_DATA, NULL,
+						    0, &le->id);
+				if (!attr) {
+					err = -EINVAL;
+					goto out;
+				}
+				goto next_attr;
+			}
+			le = (struct ATTR_LIST_ENTRY *)((u8 *)le - le_sz);
+		}
+
+		if (evcn1 >= alen)
+			break;
+
+		attr = ni_enum_attr_ex(ni, attr, &le, &mi);
+		if (!attr) {
+			err = -EINVAL;
+			goto out;
+		}
+
+next_attr:
+		svcn = le64_to_cpu(attr->nres.svcn);
+		evcn1 = le64_to_cpu(attr->nres.evcn) + 1;
+	}
+
+	if (vbo + bytes <= valid_size)
+		valid_size -= bytes;
+	else if (vbo < valid_size)
+		valid_size = vbo;
+
+	if (!attr_b) {
+		le_b = NULL;
+		attr_b = ni_find_attr(ni, NULL, &le_b, ATTR_DATA, NULL, 0, NULL,
+				      &mi_b);
+		if (!attr_b) {
+			err = -ENOENT;
+			goto out;
+		}
+	}
+
+	attr_b->nres.alloc_size = cpu_to_le64(alloc_size - bytes);
+	attr_b->nres.data_size = cpu_to_le64(data_size - bytes);
+	attr_b->nres.valid_size = cpu_to_le64(valid_size);
+	total_size -= (u64)dealloc << sbi->cluster_bits;
+	if (is_attr_ext(attr_b))
+		attr_b->nres.total_size = cpu_to_le64(total_size);
+	mi_b->dirty = true;
+
+	/*update inode size*/
+	ni->i_valid = valid_size;
+	ni->vfs_inode.i_size = data_size - bytes;
+	inode_set_bytes(&ni->vfs_inode, total_size);
+	ni->ni_flags |= NI_FLAG_UPDATE_PARENT;
+	mark_inode_dirty(&ni->vfs_inode);
+
+out:
+	up_write(&ni->file.run_lock);
+	if (err)
+		make_bad_inode(&ni->vfs_inode);
+
+	return err;
+}
+
+/* not for normal files */
+int attr_punch_hole(struct ntfs_inode *ni, u64 vbo, u64 bytes)
+{
+	int err = 0;
+	struct runs_tree *run = &ni->file.run;
+	struct ntfs_sb_info *sbi = ni->mi.sbi;
+	struct ATTRIB *attr, *attr_b;
+	struct ATTR_LIST_ENTRY *le, *le_b;
+	struct mft_inode *mi, *mi_b;
+	CLST svcn, evcn1, vcn, len, end, alen, dealloc;
+	u64 total_size, alloc_size;
+
+	if (!bytes)
+		return 0;
+
+	le_b = NULL;
+	attr_b = ni_find_attr(ni, NULL, &le_b, ATTR_DATA, NULL, 0, NULL, &mi_b);
+	if (!attr_b)
+		return -ENOENT;
+
+	if (!attr_b->non_res) {
+		u32 data_size = le32_to_cpu(attr->res.data_size);
+		u32 from, to;
+
+		if (vbo > data_size)
+			return 0;
+
+		from = vbo;
+		to = (vbo + bytes) < data_size ? (vbo + bytes) : data_size;
+		memset(Add2Ptr(resident_data(attr_b), from), 0, to - from);
+		return 0;
+	}
+
+	/* TODO: add support for normal files too */
+	if (!is_attr_ext(attr_b))
+		return -EOPNOTSUPP;
+
+	alloc_size = le64_to_cpu(attr_b->nres.alloc_size);
+	total_size = le64_to_cpu(attr_b->nres.total_size);
+
+	if (vbo >= alloc_size) {
+		// NOTE: it is allowed
+		return 0;
+	}
+
+	if (vbo + bytes > alloc_size)
+		bytes = alloc_size - vbo;
+
+	down_write(&ni->file.run_lock);
+	/*
+	 * Enumerate all attribute segments and punch hole where necessary
+	 */
+	alen = alloc_size >> sbi->cluster_bits;
+	vcn = vbo >> sbi->cluster_bits;
+	len = bytes >> sbi->cluster_bits;
+	end = vcn + len;
+	dealloc = 0;
+
+	svcn = le64_to_cpu(attr_b->nres.svcn);
+	evcn1 = le64_to_cpu(attr_b->nres.evcn) + 1;
+
+	if (svcn <= vcn && vcn < evcn1) {
+		attr = attr_b;
+		le = le_b;
+		mi = mi_b;
+	} else if (!le_b) {
+		err = -EINVAL;
+		goto out;
+	} else {
+		le = le_b;
+		attr = ni_find_attr(ni, attr_b, &le, ATTR_DATA, NULL, 0, &vcn,
+				    &mi);
+		if (!attr) {
+			err = -EINVAL;
+			goto out;
+		}
+
+		svcn = le64_to_cpu(attr->nres.svcn);
+		evcn1 = le64_to_cpu(attr->nres.evcn) + 1;
+	}
+
+	while (svcn < end) {
+		CLST vcn1, zero, dealloc2;
+
+		err = attr_load_runs(attr, ni, run, &svcn);
+		if (err)
+			goto out;
+		vcn1 = max(vcn, svcn);
+		zero = min(end, evcn1) - vcn1;
+
+		dealloc2 = dealloc;
+		err = run_deallocate_ex(sbi, run, vcn1, zero, &dealloc, true);
+		if (err)
+			goto out;
+
+		if (dealloc2 == dealloc) {
+			/* looks like  the required range is already sparsed */
+		} else {
+			if (!run_add_entry(run, vcn1, SPARSE_LCN, zero,
+					   false)) {
+				err = -ENOMEM;
+				goto out;
+			}
+
+			err = mi_pack_runs(mi, attr, run, evcn1 - svcn);
+			if (err)
+				goto out;
+		}
+		/* free all allocated memory */
+		run_truncate(run, 0);
+
+		if (evcn1 >= alen)
+			break;
+
+		attr = ni_enum_attr_ex(ni, attr, &le, &mi);
+		if (!attr) {
+			err = -EINVAL;
+			goto out;
+		}
+
+		svcn = le64_to_cpu(attr->nres.svcn);
+		evcn1 = le64_to_cpu(attr->nres.evcn) + 1;
+	}
+
+	total_size -= (u64)dealloc << sbi->cluster_bits;
+	attr_b->nres.total_size = cpu_to_le64(total_size);
+	mi_b->dirty = true;
+
+	/*update inode size*/
+	inode_set_bytes(&ni->vfs_inode, total_size);
+	ni->ni_flags |= NI_FLAG_UPDATE_PARENT;
+	mark_inode_dirty(&ni->vfs_inode);
+
+out:
+	up_write(&ni->file.run_lock);
+	if (err)
+		make_bad_inode(&ni->vfs_inode);
 
 	return err;
 }

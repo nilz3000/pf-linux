@@ -350,8 +350,8 @@ int ntfs_file_fsync(struct file *filp, loff_t start, loff_t end, int datasync)
 	return generic_file_fsync(filp, start, end, datasync);
 }
 
-static int ntfs_extend_ex(struct inode *inode, loff_t pos, size_t count,
-			  struct file *file)
+static int ntfs_extend(struct inode *inode, loff_t pos, size_t count,
+		       struct file *file)
 {
 	struct ntfs_inode *ni = ntfs_i(inode);
 	struct address_space *mapping = inode->i_mapping;
@@ -401,124 +401,7 @@ out:
 	return err;
 }
 
-/*
- * Preallocate space for a file. This implements ntfs's fallocate file
- * operation, which gets called from sys_fallocate system call. User
- * space requests 'len' bytes at 'vbo'. If FALLOC_FL_KEEP_SIZE is set
- * we just allocate clusters without zeroing them out. Otherwise we
- * allocate and zero out clusters via an expanding truncate.
- */
-static long ntfs_fallocate(struct file *file, int mode, loff_t vbo, loff_t len)
-{
-	struct inode *inode = file->f_mapping->host;
-	struct super_block *sb = inode->i_sb;
-	struct ntfs_sb_info *sbi = sb->s_fs_info;
-	struct ntfs_inode *ni = ntfs_i(inode);
-	loff_t i_size;
-	loff_t end;
-	int err;
-
-	/* No support for dir */
-	if (!S_ISREG(inode->i_mode))
-		return -EOPNOTSUPP;
-
-	/* Return error if mode is not supported */
-	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE |
-		     FALLOC_FL_COLLAPSE_RANGE))
-		return -EOPNOTSUPP;
-
-	inode_lock(inode);
-	i_size = inode->i_size;
-
-	if (mode & FALLOC_FL_PUNCH_HOLE) {
-		if (!(mode & FALLOC_FL_KEEP_SIZE)) {
-			err = -EINVAL;
-			goto out;
-		}
-		/*TODO: add support*/
-		err = -EOPNOTSUPP;
-		goto out;
-	}
-
-	if (mode & FALLOC_FL_COLLAPSE_RANGE) {
-		if (mode & ~FALLOC_FL_COLLAPSE_RANGE) {
-			err = -EINVAL;
-			goto out;
-		}
-
-		/*TODO: add support*/
-		err = -EOPNOTSUPP;
-		goto out;
-	}
-
-	end = vbo + len;
-
-	ntfs_set_state(sbi, NTFS_DIRTY_DIRTY);
-
-	/*
-	 * normal file: allocate clusters, do not change 'valid' size
-	 */
-	err = ntfs_set_size(inode, max(end, i_size));
-	if (err)
-		goto out;
-
-	if (is_sparsed(ni) || is_compressed(ni)) {
-		CLST vcn_v = ni->i_valid >> sbi->cluster_bits;
-		CLST vcn = vbo >> sbi->cluster_bits;
-		CLST cend = bytes_to_cluster(sbi, end);
-		CLST lcn, clen;
-		bool new;
-
-		/*
-		 * allocate but not zero new clusters (see below comments)
-		 * this breaks security (one can read unused on-disk areas)
-		 * zeroing these clusters may be too long
-		 * may be we should check here for root rights?
-		 */
-		for (; vcn < cend; vcn += clen) {
-			err = attr_data_get_block(ni, vcn, cend - vcn, &lcn,
-						  &clen, &new);
-			if (err)
-				goto out;
-			if (!new || vcn >= vcn_v)
-				continue;
-
-			/*
-			 * This variant zeroes new allocated clusters inside valid size
-			 * Dangerous in case:
-			 * 1G of sparsed clusters + 1 cluster of data =>
-			 * valid_size == 1G + 1 cluster
-			 * fallocate(1G) will zero 1G and this can be very long
-			 * xfstest 086 will fail if below function is not called
-			 */
-			/*ntfs_sparse_cluster(inode, NULL, vcn,
-			 *		    min(vcn_v - vcn, clen));
-			 */
-		}
-	}
-
-	if (mode & FALLOC_FL_KEEP_SIZE) {
-		ni_lock(ni);
-		/*true - keep preallocated*/
-		err = attr_set_size(ni, ATTR_DATA, NULL, 0, &ni->file.run,
-				    i_size, &ni->i_valid, true, NULL);
-		ni_unlock(ni);
-		if (err)
-			goto out;
-	}
-
-	inode->i_ctime = inode->i_mtime = current_time(inode);
-	mark_inode_dirty(inode);
-
-out:
-	if (err == -EFBIG)
-		err = -ENOSPC;
-
-	inode_unlock(inode);
-	return err;
-}
-
-void ntfs_truncate_blocks(struct inode *inode, loff_t new_size)
+static int ntfs_truncate(struct inode *inode, loff_t new_size)
 {
 	struct super_block *sb = inode->i_sb;
 	struct ntfs_sb_info *sbi = sb->s_fs_info;
@@ -528,10 +411,20 @@ void ntfs_truncate_blocks(struct inode *inode, loff_t new_size)
 	u64 new_valid;
 
 	if (!S_ISREG(inode->i_mode))
-		return;
+		return 0;
+
+	if (is_compressed(ni)) {
+		if (ni->i_valid > new_size)
+			ni->i_valid = new_size;
+	} else {
+		err = block_truncate_page(inode->i_mapping, new_size,
+					  ntfs_get_block);
+		if (err)
+			return err;
+	}
 
 	vcn = bytes_to_cluster(sbi, new_size);
-	new_valid = ntfs_up_block(sb, min(ni->i_valid, new_size));
+	new_valid = ntfs_up_block(sb, min_t(u64, ni->i_valid, new_size));
 
 	ni_lock(ni);
 
@@ -554,13 +447,179 @@ void ntfs_truncate_blocks(struct inode *inode, loff_t new_size)
 	} else {
 		err = ntfs_sync_inode(inode);
 		if (err)
-			return;
+			return err;
 	}
 
 	if (dirty)
 		mark_inode_dirty(inode);
 
 	/*ntfs_flush_inodes(inode->i_sb, inode, NULL);*/
+
+	return 0;
+}
+
+/*
+ * Preallocate space for a file. This implements ntfs's fallocate file
+ * operation, which gets called from sys_fallocate system call. User
+ * space requests 'len' bytes at 'vbo'. If FALLOC_FL_KEEP_SIZE is set
+ * we just allocate clusters without zeroing them out. Otherwise we
+ * allocate and zero out clusters via an expanding truncate.
+ */
+static long ntfs_fallocate(struct file *file, int mode, loff_t vbo, loff_t len)
+{
+	struct inode *inode = file->f_mapping->host;
+	struct super_block *sb = inode->i_sb;
+	struct ntfs_sb_info *sbi = sb->s_fs_info;
+	struct ntfs_inode *ni = ntfs_i(inode);
+	loff_t end = vbo + len;
+	loff_t vbo_down = round_down(vbo, PAGE_SIZE);
+	loff_t i_size;
+	int err;
+
+	/* No support for dir */
+	if (!S_ISREG(inode->i_mode))
+		return -EOPNOTSUPP;
+
+	/* Return error if mode is not supported */
+	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE |
+		     FALLOC_FL_COLLAPSE_RANGE))
+		return -EOPNOTSUPP;
+
+	ntfs_set_state(sbi, NTFS_DIRTY_DIRTY);
+
+	inode_lock(inode);
+	i_size = inode->i_size;
+
+	if (WARN_ON(ni->ni_flags & NI_FLAG_COMPRESSED_MASK)) {
+		/* should never be here, see ntfs_file_open*/
+		err = -EOPNOTSUPP;
+		goto out;
+	}
+
+	if (mode & FALLOC_FL_PUNCH_HOLE) {
+		if (!(mode & FALLOC_FL_KEEP_SIZE)) {
+			err = -EINVAL;
+			goto out;
+		}
+
+		if (!is_sparsed(ni) && !is_compressed(ni)) {
+			ntfs_inode_warn(
+				inode,
+				"punch_hole only for sparsed/compressed files");
+			err = -EOPNOTSUPP;
+			goto out;
+		}
+
+		err = filemap_write_and_wait_range(inode->i_mapping, vbo,
+						   end - 1);
+		if (err)
+			goto out;
+
+		err = filemap_write_and_wait_range(inode->i_mapping, end,
+						   LLONG_MAX);
+		if (err)
+			goto out;
+
+		truncate_pagecache(inode, vbo_down);
+
+		ni_lock(ni);
+		err = attr_punch_hole(ni, vbo, len);
+		ni_unlock(ni);
+	} else if (mode & FALLOC_FL_COLLAPSE_RANGE) {
+		if (mode & ~FALLOC_FL_COLLAPSE_RANGE) {
+			err = -EINVAL;
+			goto out;
+		}
+
+		/*
+		 * Write tail of the last page before removed range since
+		 * it will get removed from the page cache below.
+		 */
+		err = filemap_write_and_wait_range(inode->i_mapping, vbo_down,
+						   vbo);
+		if (err)
+			goto out;
+
+		/*
+		 * Write data that will be shifted to preserve them
+		 * when discarding page cache below
+		 */
+		err = filemap_write_and_wait_range(inode->i_mapping, end,
+						   LLONG_MAX);
+		if (err)
+			goto out;
+
+		truncate_pagecache(inode, vbo_down);
+
+		ni_lock(ni);
+		err = attr_collapse_range(ni, vbo, len);
+		ni_unlock(ni);
+	} else {
+		/*
+		 * normal file: allocate clusters, do not change 'valid' size
+		 */
+		err = ntfs_set_size(inode, max(end, i_size));
+		if (err)
+			goto out;
+
+		if (is_sparsed(ni) || is_compressed(ni)) {
+			CLST vcn_v = ni->i_valid >> sbi->cluster_bits;
+			CLST vcn = vbo >> sbi->cluster_bits;
+			CLST cend = bytes_to_cluster(sbi, end);
+			CLST lcn, clen;
+			bool new;
+
+			/*
+			 * allocate but not zero new clusters (see below comments)
+			 * this breaks security (one can read unused on-disk areas)
+			 * zeroing these clusters may be too long
+			 * may be we should check here for root rights?
+			 */
+			for (; vcn < cend; vcn += clen) {
+				err = attr_data_get_block(ni, vcn, cend - vcn,
+							  &lcn, &clen, &new);
+				if (err)
+					goto out;
+				if (!new || vcn >= vcn_v)
+					continue;
+
+				/*
+				 * Unwritten area
+				 * NTFS is not able to store several unwritten areas
+				 * Activate 'ntfs_sparse_cluster' to zero new allocated clusters
+				 *
+				 * Dangerous in case:
+				 * 1G of sparsed clusters + 1 cluster of data =>
+				 * valid_size == 1G + 1 cluster
+				 * fallocate(1G) will zero 1G and this can be very long
+				 * xfstest 016/086 will fail whithout 'ntfs_sparse_cluster'
+				 */
+				/*ntfs_sparse_cluster(inode, NULL, vcn,
+				 *		    min(vcn_v - vcn, clen));
+				 */
+			}
+		}
+
+		if (mode & FALLOC_FL_KEEP_SIZE) {
+			ni_lock(ni);
+			/*true - keep preallocated*/
+			err = attr_set_size(ni, ATTR_DATA, NULL, 0,
+					    &ni->file.run, i_size, &ni->i_valid,
+					    true, NULL);
+			ni_unlock(ni);
+		}
+	}
+
+	if (!err) {
+		inode->i_ctime = inode->i_mtime = current_time(inode);
+		mark_inode_dirty(inode);
+	}
+out:
+	if (err == -EFBIG)
+		err = -ENOSPC;
+
+	inode_unlock(inode);
+	return err;
 }
 
 /*
@@ -591,38 +650,20 @@ int ntfs3_setattr(struct dentry *dentry, struct iattr *attr)
 	if (ia_valid & ATTR_SIZE) {
 		loff_t oldsize = inode->i_size;
 
-		if (ni->ni_flags & NI_FLAG_COMPRESSED_MASK) {
-#ifdef CONFIG_NTFS3_LZX_XPRESS
-			err = ni_decompress_file(ni);
-			if (err)
-				goto out;
-#else
-			ntfs_inode_warn(
-				inode,
-				"activate CONFIG_NTFS3_LZX_XPRESS to truncate external compressed files");
+		if (WARN_ON(ni->ni_flags & NI_FLAG_COMPRESSED_MASK)) {
+			/* should never be here, see ntfs_file_open*/
 			err = -EOPNOTSUPP;
 			goto out;
-#endif
 		}
 		inode_dio_wait(inode);
 
-		if (attr->ia_size < oldsize) {
-			if (is_compressed(ni)) {
-				if (ni->i_valid > attr->ia_size)
-					ni->i_valid = attr->ia_size;
-			} else {
-				err = block_truncate_page(inode->i_mapping,
-							  attr->ia_size,
-							  ntfs_get_block);
-				if (err)
-					goto out;
-			}
-			ntfs_truncate_blocks(inode, attr->ia_size);
-		} else if (attr->ia_size > oldsize) {
-			err = ntfs_extend_ex(inode, attr->ia_size, 0, NULL);
-			if (err)
-				goto out;
-		}
+		if (attr->ia_size < oldsize)
+			err = ntfs_truncate(inode, attr->ia_size);
+		else if (attr->ia_size > oldsize)
+			err = ntfs_extend(inode, attr->ia_size, 0, NULL);
+
+		if (err)
+			goto out;
 
 		ni->ni_flags |= NI_FLAG_UPDATE_PARENT;
 	}
@@ -975,24 +1016,13 @@ static ssize_t ntfs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	if (ret <= 0)
 		goto out;
 
-	if (ni->ni_flags & NI_FLAG_COMPRESSED_MASK) {
-#ifdef CONFIG_NTFS3_LZX_XPRESS
-		int err = ni_decompress_file(ni);
-
-		if (err) {
-			ret = err;
-			goto out;
-		}
-#else
-		ntfs_inode_warn(
-			inode,
-			"activate CONFIG_NTFS3_LZX_XPRESS to read external compressed files");
+	if (WARN_ON(ni->ni_flags & NI_FLAG_COMPRESSED_MASK)) {
+		/* should never be here, see ntfs_file_open*/
 		ret = -EOPNOTSUPP;
 		goto out;
-#endif
 	}
 
-	ret = ntfs_extend_ex(inode, iocb->ki_pos, ret, file);
+	ret = ntfs_extend(inode, iocb->ki_pos, ret, file);
 	if (ret)
 		goto out;
 
@@ -1018,6 +1048,22 @@ int ntfs_file_open(struct inode *inode, struct file *file)
 	if (unlikely((is_compressed(ni) || is_encrypted(ni)) &&
 		     (file->f_flags & O_DIRECT))) {
 		return -EOPNOTSUPP;
+	}
+
+	/* Decompress "external compressed" file if opened for rw */
+	if ((ni->ni_flags & NI_FLAG_COMPRESSED_MASK) &&
+	    (file->f_flags & (O_WRONLY | O_RDWR | O_TRUNC))) {
+#ifdef CONFIG_NTFS3_LZX_XPRESS
+		int err = ni_decompress_file(ni);
+
+		if (err)
+			return err;
+#else
+		ntfs_inode_warn(
+			inode,
+			"activate CONFIG_NTFS3_LZX_XPRESS to write external compressed files");
+		return -EOPNOTSUPP;
+#endif
 	}
 
 	return generic_file_open(inode, file);

@@ -259,14 +259,12 @@ struct ntfs_sb_info {
 	} objid;
 
 	struct {
-		/*
-		 * protect 'lznt/xpress/lzx'
-		 * Should we use different spinlocks for each ctx?
-		 */
-		spinlock_t lock;
+		struct mutex mtx_lznt;
 		struct lznt *lznt;
 #ifdef CONFIG_NTFS3_LZX_XPRESS
+		struct mutex mtx_xpress;
 		struct xpress_decompressor *xpress;
+		struct mutex mtx_lzx;
 		struct lzx_decompressor *lzx;
 #endif
 	} compress;
@@ -310,7 +308,7 @@ struct ntfs_inode {
 	 * Range [i_valid - inode->i_size) - contains 0
 	 * Usually i_valid <= inode->i_size
 	 */
-	loff_t i_valid;
+	u64 i_valid;
 	struct timespec64 i_crtime;
 
 	struct mutex ni_lock;
@@ -399,6 +397,8 @@ int attr_is_frame_compressed(struct ntfs_inode *ni, struct ATTRIB *attr,
 			     CLST frame, CLST *clst_data);
 int attr_allocate_frame(struct ntfs_inode *ni, CLST frame, size_t compr_size,
 			u64 new_valid);
+int attr_collapse_range(struct ntfs_inode *ni, u64 vbo, u64 bytes);
+int attr_punch_hole(struct ntfs_inode *ni, u64 vbo, u64 bytes);
 
 /* functions from attrlist.c*/
 void al_destroy(struct ntfs_inode *ni);
@@ -448,7 +448,6 @@ int ntfs_getattr(const struct path *path, struct kstat *stat, u32 request_mask,
 void ntfs_sparse_cluster(struct inode *inode, struct page *page0, CLST vcn,
 			 CLST len);
 int ntfs_file_fsync(struct file *filp, loff_t start, loff_t end, int datasync);
-void ntfs_truncate_blocks(struct inode *inode, loff_t offset);
 int ntfs3_setattr(struct dentry *dentry, struct iattr *attr);
 int ntfs_file_open(struct inode *inode, struct file *file);
 int ntfs_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
@@ -471,7 +470,8 @@ struct ATTRIB *ni_find_attr(struct ntfs_inode *ni, struct ATTRIB *attr,
 			    u8 name_len, const CLST *vcn,
 			    struct mft_inode **mi);
 struct ATTRIB *ni_enum_attr_ex(struct ntfs_inode *ni, struct ATTRIB *attr,
-			       struct ATTR_LIST_ENTRY **le);
+			       struct ATTR_LIST_ENTRY **le,
+			       struct mft_inode **mi);
 struct ATTRIB *ni_load_attr(struct ntfs_inode *ni, enum ATTR_TYPE type,
 			    const __le16 *name, u8 name_len, CLST vcn,
 			    struct mft_inode **pmi);
@@ -499,7 +499,6 @@ struct ATTR_FILE_NAME *ni_fname_name(struct ntfs_inode *ni,
 				     struct ATTR_LIST_ENTRY **entry);
 struct ATTR_FILE_NAME *ni_fname_type(struct ntfs_inode *ni, u8 name_type,
 				     struct ATTR_LIST_ENTRY **entry);
-u16 ni_fnames_count(struct ntfs_inode *ni);
 int ni_new_attr_flags(struct ntfs_inode *ni, enum FILE_ATTRIBUTE new_fa);
 enum REPARSE_SIGN ni_parse_reparse(struct ntfs_inode *ni, struct ATTRIB *attr,
 				   void *buffer);
@@ -696,6 +695,7 @@ void run_truncate_around(struct runs_tree *run, CLST vcn);
 bool run_lookup(const struct runs_tree *run, CLST vcn, size_t *Index);
 bool run_add_entry(struct runs_tree *run, CLST vcn, CLST lcn, CLST len,
 		   bool is_mft);
+bool run_collapse_range(struct runs_tree *run, CLST vcn, CLST len);
 bool run_get_entry(const struct runs_tree *run, size_t index, CLST *vcn,
 		   CLST *lcn, CLST *len);
 bool run_is_mapped_full(const struct runs_tree *run, CLST svcn, CLST evcn);
@@ -727,13 +727,11 @@ static inline size_t wnd_zeroes(const struct wnd_bitmap *wnd)
 {
 	return wnd->total_zeroes;
 }
-void wnd_trace(struct wnd_bitmap *wnd);
-void wnd_trace_tree(struct wnd_bitmap *wnd, u32 nExtents, const char *Hint);
-int wnd_init(struct wnd_bitmap *wnd, struct super_block *sb, size_t nBits);
-int wnd_set_free(struct wnd_bitmap *wnd, size_t FirstBit, size_t Bits);
-int wnd_set_used(struct wnd_bitmap *wnd, size_t FirstBit, size_t Bits);
-bool wnd_is_free(struct wnd_bitmap *wnd, size_t FirstBit, size_t Bits);
-bool wnd_is_used(struct wnd_bitmap *wnd, size_t FirstBit, size_t Bits);
+int wnd_init(struct wnd_bitmap *wnd, struct super_block *sb, size_t nbits);
+int wnd_set_free(struct wnd_bitmap *wnd, size_t bit, size_t bits);
+int wnd_set_used(struct wnd_bitmap *wnd, size_t bit, size_t bits);
+bool wnd_is_free(struct wnd_bitmap *wnd, size_t bit, size_t bits);
+bool wnd_is_used(struct wnd_bitmap *wnd, size_t bit, size_t bits);
 
 /* Possible values for 'flags' 'wnd_find' */
 #define BITMAP_FIND_MARK_AS_USED 0x01
@@ -751,12 +749,18 @@ int ntfs_cmp_names_cpu(const struct cpu_str *uni1, const struct le_str *uni2,
 		       const u16 *upcase);
 
 /* globals from xattr.c */
+#ifdef CONFIG_NTFS3_FS_POSIX_ACL
 struct posix_acl *ntfs_get_acl(struct inode *inode, int type);
 int ntfs_set_acl(struct inode *inode, struct posix_acl *acl, int type);
+int ntfs_init_acl(struct inode *inode, struct inode *dir);
+#else
+#define ntfs_get_acl NULL
+#define ntfs_set_acl NULL
+#endif
+
 int ntfs_acl_chmod(struct inode *inode);
 int ntfs_permission(struct inode *inode, int mask);
 ssize_t ntfs_listxattr(struct dentry *dentry, char *buffer, size_t size);
-int ntfs_init_acl(struct inode *inode, struct inode *dir);
 extern const struct xattr_handler *ntfs_xattr_handlers[];
 
 /* globals from lznt.c */
@@ -1044,4 +1048,3 @@ static inline void le64_sub_cpu(__le64 *var, u64 val)
 {
 	*var = cpu_to_le64(le64_to_cpu(*var) - val);
 }
-

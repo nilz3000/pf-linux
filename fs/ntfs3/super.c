@@ -314,8 +314,13 @@ static noinline int ntfs_parse_options(struct super_block *sb, char *options,
 			opts->nohidden = 1;
 			break;
 		case Opt_acl:
+#ifdef CONFIG_NTFS3_FS_POSIX_ACL
 			sb->s_flags |= SB_POSIXACL;
 			break;
+#else
+			ntfs_err(sb, "support for ACL not compiled in!");
+			return -EINVAL;
+#endif
 		case Opt_noatime:
 			sb->s_flags |= SB_NOATIME;
 			break;
@@ -733,6 +738,7 @@ static int ntfs_init_from_boot(struct super_block *sb, u32 sector_size,
 		goto out;
 	}
 
+	/* cluster size: 512, 1K, 2K, 4K, ... 2M */
 	sct_per_clst = true_sectors_per_clst(boot);
 	if (!is_power_of2(sct_per_clst))
 		goto out;
@@ -946,7 +952,11 @@ static int ntfs_fill_super(struct super_block *sb, void *data, int silent)
 	if (err)
 		goto out;
 
-	spin_lock_init(&sbi->compress.lock);
+	mutex_init(&sbi->compress.mtx_lznt);
+#ifdef CONFIG_NTFS3_LZX_XPRESS
+	mutex_init(&sbi->compress.mtx_xpress);
+	mutex_init(&sbi->compress.mtx_lzx);
+#endif
 
 	/*
 	 * Load $Volume. This should be done before $LogFile

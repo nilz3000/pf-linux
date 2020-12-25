@@ -26,7 +26,6 @@ ntfs3-y :=	attrib.o \
 
 ntfs3-$(CONFIG_NTFS3_LZX_XPRESS) += $(addprefix lib/,\
 		decompress_common.o \
-		lzx_common.o \
 		lzx_decompress.o \
 		xpress_decompress.o \
 		)
