@@ -2429,18 +2429,15 @@ out:
 
 #if defined(CONFIG_UNEVICTABLE_ACTIVEFILE)
 		if (lru == LRU_ACTIVE_FILE) {
-			unsigned long kib_active_file_now = K(global_node_page_state(NR_ACTIVE_FILE));
-			if (kib_active_file_now < sysctl_unevictable_activefile_kbytes_low &&
-				kib_active_file_now > sysctl_unevictable_activefile_kbytes_min) {
-				nr[lru] = scan *
-					(kib_active_file_now -
-					 sysctl_unevictable_activefile_kbytes_min) /
-					(sysctl_unevictable_activefile_kbytes_low -
-					 sysctl_unevictable_activefile_kbytes_min);
-			} else if (kib_active_file_now <= sysctl_unevictable_activefile_kbytes_min) {
-				nr[lru] = 0;
-				continue;
-			}
+			unsigned long activefile_kbytes_now = K(global_node_page_state(NR_ACTIVE_FILE));
+			unsigned long low_scan_granularity = SWAP_CLUSTER_MAX >> sc->priority;
+
+			if (activefile_kbytes_now < sysctl_unevictable_activefile_kbytes_low &&
+				activefile_kbytes_now > sysctl_unevictable_activefile_kbytes_min &&
+				scan > low_scan_granularity)
+				scan = low_scan_granularity;
+			else if (activefile_kbytes_now <= sysctl_unevictable_activefile_kbytes_min)
+				scan = 0;
 		}
 #endif
 		nr[lru] = scan;
