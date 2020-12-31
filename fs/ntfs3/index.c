@@ -1946,7 +1946,6 @@ int indx_insert_entry(struct ntfs_index *indx, struct ntfs_inode *ni,
 	}
 
 out:
-	indx->changed = true;
 	fnd_put(fnd_a);
 out1:
 	return err;
@@ -2591,9 +2590,7 @@ int indx_delete_entry(struct ntfs_index *indx, struct ntfs_inode *ni,
 out:
 	fnd_put(fnd2);
 out1:
-	indx->changed = true;
 	fnd_put(fnd);
-
 out2:
 	return err;
 }

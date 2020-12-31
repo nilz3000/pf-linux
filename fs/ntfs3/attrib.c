@@ -425,7 +425,7 @@ int attr_set_size(struct ntfs_inode *ni, enum ATTR_TYPE type,
 	bool is_mft =
 		ni->mi.rno == MFT_REC_MFT && type == ATTR_DATA && !name_len;
 	u64 old_valid, old_size, old_alloc, new_alloc, new_alloc_tmp;
-	struct ATTRIB *attr, *attr_b;
+	struct ATTRIB *attr = NULL, *attr_b;
 	struct ATTR_LIST_ENTRY *le, *le_b;
 	struct mft_inode *mi, *mi_b;
 	CLST alen, vcn, lcn, new_alen, old_alen, svcn, evcn;
@@ -825,7 +825,7 @@ int attr_data_get_block(struct ntfs_inode *ni, CLST vcn, CLST clen, CLST *lcn,
 	struct runs_tree *run = &ni->file.run;
 	struct ntfs_sb_info *sbi;
 	u8 cluster_bits;
-	struct ATTRIB *attr, *attr_b;
+	struct ATTRIB *attr = NULL, *attr_b;
 	struct ATTR_LIST_ENTRY *le, *le_b;
 	struct mft_inode *mi, *mi_b;
 	CLST hint, svcn, to_alloc, evcn1, next_svcn, asize, end;
@@ -1468,7 +1468,7 @@ int attr_allocate_frame(struct ntfs_inode *ni, CLST frame, size_t compr_size,
 	int err = 0;
 	struct runs_tree *run = &ni->file.run;
 	struct ntfs_sb_info *sbi = ni->mi.sbi;
-	struct ATTRIB *attr, *attr_b;
+	struct ATTRIB *attr = NULL, *attr_b;
 	struct ATTR_LIST_ENTRY *le, *le_b;
 	struct mft_inode *mi, *mi_b;
 	CLST svcn, evcn1, next_svcn, lcn, len;
@@ -1538,7 +1538,7 @@ int attr_allocate_frame(struct ntfs_inode *ni, CLST frame, size_t compr_size,
 		end = vcn + clst_data;
 		/* run contains updated range [vcn + len : end) */
 	} else {
-		CLST alen, hint;
+		CLST alen, hint = 0;
 		/* Get the last lcn to allocate from */
 		if (vcn + clst_data &&
 		    !run_lookup_entry(run, vcn + clst_data - 1, &hint, NULL,
@@ -1688,7 +1688,7 @@ int attr_collapse_range(struct ntfs_inode *ni, u64 vbo, u64 bytes)
 	int err = 0;
 	struct runs_tree *run = &ni->file.run;
 	struct ntfs_sb_info *sbi = ni->mi.sbi;
-	struct ATTRIB *attr, *attr_b;
+	struct ATTRIB *attr = NULL, *attr_b;
 	struct ATTR_LIST_ENTRY *le, *le_b;
 	struct mft_inode *mi, *mi_b;
 	CLST svcn, evcn1, len, dealloc, alen;
@@ -1711,7 +1711,6 @@ int attr_collapse_range(struct ntfs_inode *ni, u64 vbo, u64 bytes)
 	}
 
 	data_size = le64_to_cpu(attr_b->nres.data_size);
-	valid_size = le64_to_cpu(attr_b->nres.valid_size);
 	alloc_size = le64_to_cpu(attr_b->nres.alloc_size);
 	a_flags = attr_b->flags;
 
@@ -1900,11 +1899,6 @@ next_attr:
 		evcn1 = le64_to_cpu(attr->nres.evcn) + 1;
 	}
 
-	if (vbo + bytes <= valid_size)
-		valid_size -= bytes;
-	else if (vbo < valid_size)
-		valid_size = vbo;
-
 	if (!attr_b) {
 		le_b = NULL;
 		attr_b = ni_find_attr(ni, NULL, &le_b, ATTR_DATA, NULL, 0, NULL,
@@ -1915,9 +1909,16 @@ next_attr:
 		}
 	}
 
+	data_size -= bytes;
+	valid_size = ni->i_valid;
+	if (vbo + bytes <= valid_size)
+		valid_size -= bytes;
+	else if (vbo < valid_size)
+		valid_size = vbo;
+
 	attr_b->nres.alloc_size = cpu_to_le64(alloc_size - bytes);
-	attr_b->nres.data_size = cpu_to_le64(data_size - bytes);
-	attr_b->nres.valid_size = cpu_to_le64(valid_size);
+	attr_b->nres.data_size = cpu_to_le64(data_size);
+	attr_b->nres.valid_size = cpu_to_le64(min(valid_size, data_size));
 	total_size -= (u64)dealloc << sbi->cluster_bits;
 	if (is_attr_ext(attr_b))
 		attr_b->nres.total_size = cpu_to_le64(total_size);
@@ -1925,7 +1926,7 @@ next_attr:
 
 	/*update inode size*/
 	ni->i_valid = valid_size;
-	ni->vfs_inode.i_size = data_size - bytes;
+	ni->vfs_inode.i_size = data_size;
 	inode_set_bytes(&ni->vfs_inode, total_size);
 	ni->ni_flags |= NI_FLAG_UPDATE_PARENT;
 	mark_inode_dirty(&ni->vfs_inode);
@@ -1944,7 +1945,7 @@ int attr_punch_hole(struct ntfs_inode *ni, u64 vbo, u64 bytes)
 	int err = 0;
 	struct runs_tree *run = &ni->file.run;
 	struct ntfs_sb_info *sbi = ni->mi.sbi;
-	struct ATTRIB *attr, *attr_b;
+	struct ATTRIB *attr = NULL, *attr_b;
 	struct ATTR_LIST_ENTRY *le, *le_b;
 	struct mft_inode *mi, *mi_b;
 	CLST svcn, evcn1, vcn, len, end, alen, dealloc;
