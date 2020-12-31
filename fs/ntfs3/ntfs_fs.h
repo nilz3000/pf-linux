@@ -151,7 +151,6 @@ struct ntfs_index {
 	u8 index_bits; // log2(root->index_block_size)
 	u8 idx2vbn_bits; // log2(root->index_block_clst)
 	u8 vbn2vbo_bits; // index_block_size < cluster? 9 : cluster_bits
-	u8 changed; // set when tree is changed
 	u8 type; // index_mutex_classed
 };
 

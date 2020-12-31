@@ -365,7 +365,7 @@ static int ntfs_readdir(struct file *file, struct dir_context *ctx)
 	struct ntfs_inode *ni = ntfs_i(dir);
 	struct super_block *sb = dir->i_sb;
 	struct ntfs_sb_info *sbi = sb->s_fs_info;
-	loff_t i_size = dir->i_size;
+	loff_t i_size = i_size_read(dir);
 	u32 pos = ctx->pos;
 	u8 *name = NULL;
 	struct indx_node *node = NULL;
@@ -373,11 +373,6 @@ static int ntfs_readdir(struct file *file, struct dir_context *ctx)
 
 	/* name is a buffer of PATH_MAX length */
 	static_assert(NTFS_NAME_LEN * 4 < PATH_MAX);
-
-	if (ni->dir.changed) {
-		ni->dir.changed = false;
-		pos = 0;
-	}
 
 	eod = i_size + sbi->record_size;
 
@@ -569,7 +564,7 @@ bool dir_is_empty(struct inode *dir)
 const struct file_operations ntfs_dir_operations = {
 	.llseek = generic_file_llseek,
 	.read = generic_read_dir,
-	.iterate = ntfs_readdir,
+	.iterate_shared = ntfs_readdir,
 	.fsync = ntfs_file_fsync,
 	.open = ntfs_file_open,
 };

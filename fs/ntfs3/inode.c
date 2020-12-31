@@ -591,16 +591,6 @@ static noinline int ntfs_get_block_vbo(struct inode *inode, u64 vbo,
 		/*ntfs_direct_IO will update ni->i_valid */
 		if (vbo >= valid)
 			set_buffer_new(bh);
-	} else if (create && ctx == GET_BLOCK_WRITE_BEGIN &&
-		   vbo + bh->b_size > valid) {
-		u32 voff = valid > vbo ? (valid - vbo) : 0;
-
-		off = vbo & (PAGE_SIZE - 1);
-		zero_user_segment(page, off + voff, off + bh->b_size);
-		set_buffer_uptodate(bh);
-		ni->i_valid = vbo + bh->b_size;
-
-		/* ntfs_write_end will update ni->i_valid*/
 	} else if (create) {
 		/*normal write*/
 		if (vbo >= valid) {
