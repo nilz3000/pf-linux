@@ -671,6 +671,7 @@ int generic_dispatch_irq(unsigned int irq)
 	local_irq_restore(flags);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(generic_dispatch_irq);
 
 #ifdef CONFIG_HANDLE_DOMAIN_IRQ
 /**
