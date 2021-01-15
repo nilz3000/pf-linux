@@ -43,10 +43,12 @@ struct batch_vals {
 static inline int num_primitives(const struct batch_vals *bv)
 {
 	/*
-	 * We need to oversaturate the GPU with work in order to dispatch
-	 * a shader on every HW thread.
+	 * We need to saturate the GPU with work in order to dispatch
+	 * a shader on every HW thread, and clear the thread-local registers.
+	 * In short, we have to dispatch work faster than the shaders can
+	 * run in order to fill the EU and occupy each HW thread.
 	 */
-	return bv->max_threads + 2;
+	return bv->max_threads;
 }
 
 static void
@@ -232,9 +234,9 @@ static void
 gen7_emit_state_base_address(struct batch_chunk *batch,
 			     u32 surface_state_base)
 {
-	u32 *cs = batch_alloc_items(batch, 0, 12);
+	u32 *cs = batch_alloc_items(batch, 0, 10);
 
-	*cs++ = STATE_BASE_ADDRESS | (12 - 2);
+	*cs++ = STATE_BASE_ADDRESS | (10 - 2);
 	/* general */
 	*cs++ = batch_addr(batch) | BASE_ADDRESS_MODIFY;
 	/* surface */
@@ -251,8 +253,6 @@ gen7_emit_state_base_address(struct batch_chunk *batch,
 	*cs++ = BASE_ADDRESS_MODIFY;
 	*cs++ = 0;
 	*cs++ = BASE_ADDRESS_MODIFY;
-	*cs++ = 0;
-	*cs++ = 0;
 	batch_advance(batch, cs);
 }
 
@@ -329,7 +329,7 @@ gen7_emit_media_object(struct batch_chunk *batch,
 	*cs++ = 0;
 
 	/* inline */
-	*cs++ = (y_offset << 16) | (x_offset);
+	*cs++ = y_offset << 16 | x_offset;
 	*cs++ = 0;
 	*cs++ = GT3_INLINE_DATA_DELAYS;
 
@@ -338,14 +338,35 @@ gen7_emit_media_object(struct batch_chunk *batch,
 
 static void gen7_emit_pipeline_flush(struct batch_chunk *batch)
 {
-	u32 *cs = batch_alloc_items(batch, 0, 5);
+	u32 *cs = batch_alloc_items(batch, 0, 4);
 
-	*cs++ = GFX_OP_PIPE_CONTROL(5);
-	*cs++ = PIPE_CONTROL_STATE_CACHE_INVALIDATE |
-		PIPE_CONTROL_GLOBAL_GTT_IVB;
+	*cs++ = GFX_OP_PIPE_CONTROL(4);
+	*cs++ = PIPE_CONTROL_RENDER_TARGET_CACHE_FLUSH |
+		PIPE_CONTROL_DEPTH_CACHE_FLUSH |
+		PIPE_CONTROL_DC_FLUSH_ENABLE |
+		PIPE_CONTROL_CS_STALL;
 	*cs++ = 0;
 	*cs++ = 0;
+
+	batch_advance(batch, cs);
+}
+
+static void gen7_emit_pipeline_invalidate(struct batch_chunk *batch)
+{
+	u32 *cs = batch_alloc_items(batch, 0, 8);
+
+	/* ivb: Stall before STATE_CACHE_INVALIDATE */
+	*cs++ = GFX_OP_PIPE_CONTROL(4);
+	*cs++ = PIPE_CONTROL_STALL_AT_SCOREBOARD |
+		PIPE_CONTROL_CS_STALL;
 	*cs++ = 0;
+	*cs++ = 0;
+
+	*cs++ = GFX_OP_PIPE_CONTROL(4);
+	*cs++ = PIPE_CONTROL_STATE_CACHE_INVALIDATE;
+	*cs++ = 0;
+	*cs++ = 0;
+
 	batch_advance(batch, cs);
 }
 
@@ -354,29 +375,32 @@ static void emit_batch(struct i915_vma * const vma,
 		       const struct batch_vals *bv)
 {
 	struct drm_i915_private *i915 = vma->vm->i915;
-	unsigned int desc_count = 64;
-	const u32 urb_size = 112;
+	const unsigned int desc_count = 1;
+	const unsigned int urb_size = 1;
 	struct batch_chunk cmds, state;
-	u32 interface_descriptor;
+	u32 descriptors;
 	unsigned int i;
 
 	batch_init(&cmds, vma, start, 0, bv->state_start);
 	batch_init(&state, vma, start, bv->state_start, SZ_4K);
 
-	interface_descriptor =
-		gen7_fill_interface_descriptor(&state, bv,
-					       IS_HASWELL(i915) ?
-					       &cb_kernel_hsw :
-					       &cb_kernel_ivb,
-					       desc_count);
+	descriptors = gen7_fill_interface_descriptor(&state, bv,
+						     IS_HASWELL(i915) ?
+						     &cb_kernel_hsw :
+						     &cb_kernel_ivb,
+						     desc_count);
+
+	gen7_emit_pipeline_invalidate(&cmds);
 	batch_add(&cmds, PIPELINE_SELECT | PIPELINE_SELECT_MEDIA);
-	gen7_emit_state_base_address(&cmds, interface_descriptor);
+	batch_add(&cmds, MI_NOOP);
+	gen7_emit_pipeline_invalidate(&cmds);
+
 	gen7_emit_pipeline_flush(&cmds);
+	gen7_emit_state_base_address(&cmds, descriptors);
+	gen7_emit_pipeline_invalidate(&cmds);
 
 	gen7_emit_vfe_state(&cmds, bv, urb_size - 1, 0, 0);
-	gen7_emit_interface_descriptor_load(&cmds,
-					    interface_descriptor,
-					    desc_count);
+	gen7_emit_interface_descriptor_load(&cmds, descriptors, desc_count);
 
 	for (i = 0; i < num_primitives(bv); i++)
 		gen7_emit_media_object(&cmds, i);

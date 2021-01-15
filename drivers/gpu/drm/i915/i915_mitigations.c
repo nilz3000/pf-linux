@@ -8,12 +8,17 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 
+#include "i915_drv.h"
 #include "i915_mitigations.h"
 
-static unsigned long mitigations = ~0UL;
+static unsigned long mitigations __read_mostly = ~0UL;
 
 enum {
 	CLEAR_RESIDUALS = 0,
+};
+
+static const char * const names[] = {
+	[CLEAR_RESIDUALS] = "residuals",
 };
 
 bool i915_mitigate_clear_residuals(void)
@@ -21,27 +26,31 @@ bool i915_mitigate_clear_residuals(void)
 	return READ_ONCE(mitigations) & BIT(CLEAR_RESIDUALS);
 }
 
-static int mitigations_parse(const char *arg)
+static int mitigations_set(const char *val, const struct kernel_param *kp)
 {
 	unsigned long new = ~0UL;
 	char *str, *sep, *tok;
 	bool first = true;
 	int err = 0;
 
-	str = kstrdup(arg, GFP_KERNEL);
+	BUILD_BUG_ON(ARRAY_SIZE(names) >= BITS_PER_TYPE(mitigations));
+
+	str = kstrdup(val, GFP_KERNEL);
 	if (!str)
 		return -ENOMEM;
 
-	for (sep = strim(str); (tok = strsep(&sep, ","));) {
+	for (sep = str; (tok = strsep(&sep, ","));) {
 		bool enable = true;
+		int i;
+
+		/* Be tolerant of leading/trailing whitespace */
+		tok = strim(tok);
 
 		if (first) {
 			first = false;
 
-			if (!strcmp(tok, "auto")) {
-				new = ~0UL;
+			if (!strcmp(tok, "auto"))
 				continue;
-			}
 
 			new = 0;
 			if (!strcmp(tok, "off"))
@@ -61,12 +70,18 @@ static int mitigations_parse(const char *arg)
 		if (*tok == '\0')
 			continue;
 
-		if (!strcmp(tok, "residuals")) {
-			if (enable)
-				new |= BIT(CLEAR_RESIDUALS);
-			else
-				new &= ~BIT(CLEAR_RESIDUALS);
-		} else {
+		for (i = 0; i < ARRAY_SIZE(names); i++) {
+			if (!strcmp(tok, names[i])) {
+				if (enable)
+					new |= BIT(i);
+				else
+					new &= ~BIT(i);
+				break;
+			}
+		}
+		if (i == ARRAY_SIZE(names)) {
+			pr_err("Bad \"%s.mitigations=%s\", '%s' is unknown\n",
+			       DRIVER_NAME, val, tok);
 			err = -EINVAL;
 			break;
 		}
@@ -79,31 +94,43 @@ static int mitigations_parse(const char *arg)
 	return 0;
 }
 
-static int mitigations_set(const char *val, const struct kernel_param *kp)
+static int mitigations_get(char *buffer, const struct kernel_param *kp)
 {
-	int err;
+	unsigned long local = READ_ONCE(mitigations);
+	int count, i;
+	bool enable;
 
-	err = mitigations_parse(val);
-	if (err)
-		return err;
+	if (!local)
+		return scnprintf(buffer, PAGE_SIZE, "%s\n", "off");
 
-	err = param_set_charp(val, kp);
-	if (err)
-		return err;
+	if (local & BIT(BITS_PER_LONG - 1)) {
+		count = scnprintf(buffer, PAGE_SIZE, "%s,", "auto");
+		enable = false;
+	} else {
+		enable = true;
+		count = 0;
+	}
 
-	return 0;
+	for (i = 0; i < ARRAY_SIZE(names); i++) {
+		if ((local & BIT(i)) != enable)
+			continue;
+
+		count += scnprintf(buffer + count, PAGE_SIZE - count,
+				   "%s%s,", enable ? "" : "!", names[i]);
+	}
+
+	buffer[count - 1] = '\n';
+	return count;
 }
 
 static const struct kernel_param_ops ops = {
 	.set = mitigations_set,
-	.get = param_get_charp,
-	.free = param_free_charp
+	.get = mitigations_get,
 };
 
-static char *param;
-module_param_cb_unsafe(mitigations, &ops, &param, 0400);
+module_param_cb_unsafe(mitigations, &ops, NULL, 0600);
 MODULE_PARM_DESC(mitigations,
-"Selectively enable security mitigations for all Intel® GPUs.\n"
+"Selectively enable security mitigations for all Intel® GPUs in the system.\n"
 "\n"
 "  auto -- enables all mitigations required for the platform [default]\n"
 "  off  -- disables all mitigations\n"
