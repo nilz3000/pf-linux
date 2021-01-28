@@ -31,7 +31,7 @@ config NTFS3_LZX_XPRESS
 
 	  It is recommended to say Y here.
 
-config NTFS3_POSIX_ACL
+config NTFS3_FS_POSIX_ACL
 	bool "NTFS POSIX Access Control Lists"
 	depends on NTFS3_FS
 	select FS_POSIX_ACL
