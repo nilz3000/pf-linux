@@ -2434,19 +2434,21 @@ out:
 			/* Scan one type exclusively */
 			if ((scan_balance == SCAN_FILE) != file)
 				scan = 0;
-#if defined(CONFIG_UNEVICTABLE_FILE)
-			else if (scan_balance == SCAN_FILE && file) {
-				if (sc->file_is_low)
-					scan = SWAP_CLUSTER_MAX >> sc->priority;
-				else if (sc->file_is_min)
-					scan = 0;
-			}
-#endif
 			break;
 		default:
 			/* Look ma, no brain */
 			BUG();
 		}
+
+#if defined(CONFIG_UNEVICTABLE_FILE)
+		if (file && scan) {
+			unsigned long low_scan_granularity = SWAP_CLUSTER_MAX >> sc->priority;
+			if (sc->file_is_low && scan > low_scan_granularity)
+				scan = low_scan_granularity;
+			else if (sc->file_is_min)
+				scan = 0;
+		}
+#endif
 
 		nr[lru] = scan;
 	}
