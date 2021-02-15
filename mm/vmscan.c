@@ -2805,7 +2805,7 @@ again:
 		sc->file_is_low = K(file) < sysctl_unevictable_file_kbytes_low &&
 				  K(file) > sysctl_unevictable_file_kbytes_min;
 
-		sc->file_is_min = K(file) < sysctl_unevictable_file_kbytes_min;
+		sc->file_is_min = K(file) <= sysctl_unevictable_file_kbytes_min;
 #endif
 	}
 
