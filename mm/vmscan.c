@@ -2442,9 +2442,8 @@ out:
 
 #if defined(CONFIG_UNEVICTABLE_FILE)
 		if (file && scan) {
-			unsigned long low_scan_granularity = SWAP_CLUSTER_MAX >> sc->priority;
-			if (sc->file_is_low && scan > low_scan_granularity)
-				scan = low_scan_granularity;
+			if (sc->file_is_low)
+				scan = min(scan, SWAP_CLUSTER_MAX >> sc->priority);
 			else if (sc->file_is_min)
 				scan = 0;
 		}
