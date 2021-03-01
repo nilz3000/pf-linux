@@ -98,8 +98,8 @@ struct ATTR_STD_INFO *ni_std(struct ntfs_inode *ni)
 	const struct ATTRIB *attr;
 
 	attr = mi_find_attr(&ni->mi, NULL, ATTR_STD, NULL, 0, NULL);
-	return attr ? resident_data_ex(attr, sizeof(struct ATTR_STD_INFO)) :
-		      NULL;
+	return attr ? resident_data_ex(attr, sizeof(struct ATTR_STD_INFO))
+		    : NULL;
 }
 
 /*
@@ -113,8 +113,8 @@ struct ATTR_STD_INFO5 *ni_std5(struct ntfs_inode *ni)
 
 	attr = mi_find_attr(&ni->mi, NULL, ATTR_STD, NULL, 0, NULL);
 
-	return attr ? resident_data_ex(attr, sizeof(struct ATTR_STD_INFO5)) :
-		      NULL;
+	return attr ? resident_data_ex(attr, sizeof(struct ATTR_STD_INFO5))
+		    : NULL;
 }
 
 /*
@@ -1716,9 +1716,9 @@ int ni_new_attr_flags(struct ntfs_inode *ni, enum FILE_ATTRIBUTE new_fa)
 	}
 
 	/* resize nonresident empty attribute in-place only*/
-	new_asize = (new_aflags & (ATTR_FLAG_COMPRESSED | ATTR_FLAG_SPARSED)) ?
-			    (SIZEOF_NONRESIDENT_EX + 8) :
-			    (SIZEOF_NONRESIDENT + 8);
+	new_asize = (new_aflags & (ATTR_FLAG_COMPRESSED | ATTR_FLAG_SPARSED))
+			    ? (SIZEOF_NONRESIDENT_EX + 8)
+			    : (SIZEOF_NONRESIDENT + 8);
 
 	if (!mi_resize_attr(mi, attr, new_asize - le32_to_cpu(attr->size)))
 		return -EOPNOTSUPP;
@@ -2868,9 +2868,9 @@ static bool ni_update_parent(struct ntfs_inode *ni, struct NTFS_DUP_INFO *dup,
 			u64 data_size = le64_to_cpu(attr->nres.data_size);
 			__le64 valid_le;
 
-			dup->alloc_size = is_attr_ext(attr) ?
-						  attr->nres.total_size :
-						  attr->nres.alloc_size;
+			dup->alloc_size = is_attr_ext(attr)
+						  ? attr->nres.total_size
+						  : attr->nres.alloc_size;
 			dup->data_size = attr->nres.data_size;
 
 			if (new_valid > data_size)
