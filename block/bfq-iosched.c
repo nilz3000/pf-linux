@@ -2837,6 +2837,17 @@ static void bfq_bfqq_save_state(struct bfq_queue *bfqq)
 	}
 }
 
+
+static void
+bfq_reassign_last_bfqq(struct bfq_queue *cur_bfqq, struct bfq_queue *new_bfqq)
+{
+	if (cur_bfqq->entity.parent &&
+	    cur_bfqq->entity.parent->last_bfqq_created == cur_bfqq)
+		cur_bfqq->entity.parent->last_bfqq_created = new_bfqq;
+	else if (cur_bfqq->bfqd && cur_bfqq->bfqd->last_bfqq_created == cur_bfqq)
+		cur_bfqq->bfqd->last_bfqq_created = new_bfqq;
+}
+
 void bfq_release_process_ref(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 {
 	/*
@@ -2854,11 +2865,7 @@ void bfq_release_process_ref(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	    bfqq != bfqd->in_service_queue)
 		bfq_del_bfqq_busy(bfqd, bfqq, false);
 
-	if (bfqq->entity.parent &&
-	    bfqq->entity.parent->last_bfqq_created == bfqq)
-		bfqq->entity.parent->last_bfqq_created = NULL;
-	else if (bfqq->bfqd && bfqq->bfqd->last_bfqq_created == bfqq)
-		bfqq->bfqd->last_bfqq_created = NULL;
+	bfq_reassign_last_bfqq(bfqq, NULL);
 
 	bfq_put_queue(bfqq);
 }
@@ -2957,11 +2964,7 @@ bfq_merge_bfqqs(struct bfq_data *bfqd, struct bfq_io_cq *bic,
 	new_bfqq->pid = -1;
 	bfqq->bic = NULL;
 
-	if (bfqq->entity.parent &&
-	    bfqq->entity.parent->last_bfqq_created == bfqq)
-		bfqq->entity.parent->last_bfqq_created = new_bfqq;
-	else if (bfqq->bfqd && bfqq->bfqd->last_bfqq_created == bfqq)
-		bfqq->bfqd->last_bfqq_created = new_bfqq;
+	bfq_reassign_last_bfqq(bfqq, new_bfqq);
 
 	bfq_release_process_ref(bfqd, bfqq);
 }
@@ -5152,14 +5155,21 @@ static void bfq_exit_icq(struct io_cq *icq)
 	struct bfq_io_cq *bic = icq_to_bic(icq);
 
 	if (bic->stable_merge_bfqq) {
-		unsigned long flags;
 		struct bfq_data *bfqd = bic->stable_merge_bfqq->bfqd;
 
-		if (bfqd)
+		/*
+		 * bfqd is NULL if scheduler already exited, and in
+		 * that case this is the last time bfqq is accessed.
+		 */
+		if (bfqd) {
+			unsigned long flags;
+
 			spin_lock_irqsave(&bfqd->lock, flags);
-		bfq_put_stable_ref(bic->stable_merge_bfqq);
-		if (bfqd)
+			bfq_put_stable_ref(bic->stable_merge_bfqq);
 			spin_unlock_irqrestore(&bfqd->lock, flags);
+		} else {
+			bfq_put_stable_ref(bic->stable_merge_bfqq);
+		}
 	}
 
 	bfq_exit_icq_bfqq(bic, true);
@@ -5337,7 +5347,7 @@ static struct bfq_queue **bfq_async_queue_prio(struct bfq_data *bfqd,
 	}
 }
 
-struct bfq_queue *
+static struct bfq_queue *
 bfq_do_early_stable_merge(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 			  struct bfq_io_cq *bic,
 			  struct bfq_queue *last_bfqq_created)
@@ -5906,12 +5916,39 @@ static void bfq_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
 	bfqq = bfq_init_rq(rq);
 
 	/*
-	 * Additional case for putting rq directly into the dispatch
-	 * queue: the only active bfq_queues are bfqq and either its
-	 * waker bfq_queue or one of its woken bfq_queues. In this
-	 * case, there is no point in queueing rq in bfqq for
-	 * service. In fact, the in-service queue and bfqq agree on
-	 * serving this new I/O request as soon as possible.
+	 * Reqs with at_head or passthrough flags set are to be put
+	 * directly into dispatch list. Additional case for putting rq
+	 * directly into the dispatch queue: the only active
+	 * bfq_queues are bfqq and either its waker bfq_queue or one
+	 * of its woken bfq_queues. The rationale behind this
+	 * additional condition is as follows:
+	 * - consider a bfq_queue, say Q1, detected as a waker of
+	 *   another bfq_queue, say Q2
+	 * - by definition of a waker, Q1 blocks the I/O of Q2, i.e.,
+	 *   some I/O of Q1 needs to be completed for new I/O of Q2
+	 *   to arrive.  A notable example of waker is journald
+	 * - so, Q1 and Q2 are in any respect the queues of two
+	 *   cooperating processes (or of two cooperating sets of
+	 *   processes): the goal of Q1's I/O is doing what needs to
+	 *   be done so that new Q2's I/O can finally be
+	 *   issued. Therefore, if the service of Q1's I/O is delayed,
+	 *   then Q2's I/O is delayed too.  Conversely, if Q2's I/O is
+	 *   delayed, the goal of Q1's I/O is hindered.
+	 * - as a consequence, if some I/O of Q1/Q2 arrives while
+	 *   Q2/Q1 is the only queue in service, there is absolutely
+	 *   no point in delaying the service of such an I/O. The
+	 *   only possible result is a throughput loss
+	 * - so, when the above condition holds, the best option is to
+	 *   have the new I/O dispatched as soon as possible
+	 * - the most effective and efficient way to attain the above
+	 *   goal is to put the new I/O directly in the dispatch
+	 *   list
+	 * - as an additional restriction, Q1 and Q2 must be the only
+	 *   busy queues for this commit to put the I/O of Q2/Q1 in
+	 *   the dispatch list.  This is necessary, because, if also
+	 *   other queues are waiting for service, then putting new
+	 *   I/O directly in the dispatch list may evidently cause a
+	 *   violation of service guarantees for the other queues
 	 */
 	if (!bfqq ||
 	    (bfqq != bfqd->in_service_queue &&
