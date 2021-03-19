@@ -1056,7 +1056,7 @@ ifdef CONFIG_MODULE_COMPRESS
     mod_compress_cmd = $(XZ) -f
   endif # CONFIG_MODULE_COMPRESS_XZ
   ifdef CONFIG_MODULE_COMPRESS_ZSTD
-    mod_compress_cmd = $(ZSTD) -T0 -10 --rm -f
+    mod_compress_cmd = $(ZSTD) -T0 --rm -f -q
   endif # CONFIG_MODULE_COMPRESS_ZSTD
 endif # CONFIG_MODULE_COMPRESS
 export mod_compress_cmd
