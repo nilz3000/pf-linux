@@ -3,6 +3,9 @@
 # Makefile for the ntfs3 filesystem support.
 #
 
+# to check robot warnings
+ccflags-y += -Wunused-but-set-variable -Wold-style-declaration -Wint-to-pointer-cast
+
 obj-$(CONFIG_NTFS3_FS) += ntfs3.o
 
 ntfs3-y :=	attrib.o \
