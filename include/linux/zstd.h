@@ -73,7 +73,7 @@ const char *zstd_get_error_name(size_t code);
 /**
  * enum zstd_strategy - zstd compression search strategy
  *
- * From faster to stronger. See zstdlib.h.
+ * From faster to stronger. See zstd_lib.h.
  */
 typedef ZSTD_strategy zstd_strategy;
 
@@ -92,7 +92,7 @@ typedef ZSTD_strategy zstd_strategy;
  *                more compression, and slower.
  * @strategy:     The zstd compression strategy.
  *
- * See zstdlib.h.
+ * See zstd_lib.h.
  */
 typedef ZSTD_compressionParameters zstd_compression_parameters;
 
@@ -105,7 +105,7 @@ typedef ZSTD_compressionParameters zstd_compression_parameters;
  * @noDictIDFlag:    Controls whether dictID will be saved into the frame
  *                   header when using dictionary compression.
  *
- * The default value is all fields set to 0. See zstdlib.h.
+ * The default value is all fields set to 0. See zstd_lib.h.
  */
 typedef ZSTD_frameParameters zstd_frame_parameters;
 
@@ -220,7 +220,7 @@ size_t zstd_decompress_dctx(zstd_dctx *dctx, void *dst, size_t dst_capacity,
  * @pos:  Position where reading stopped. Will be updated.
  *        Necessarily 0 <= pos <= size.
  *
- * See zstdlib.h.
+ * See zstd_lib.h.
  */
 typedef ZSTD_inBuffer zstd_in_buffer;
 
@@ -231,7 +231,7 @@ typedef ZSTD_inBuffer zstd_in_buffer;
  * @pos:  Position where writing stopped. Will be updated.
  *        Necessarily 0 <= pos <= size.
  *
- * See zstdlib.h.
+ * See zstd_lib.h.
  */
 typedef ZSTD_outBuffer zstd_out_buffer;
 
@@ -417,6 +417,8 @@ size_t zstd_find_frame_compressed_size(const void *src, size_t src_size);
  * @headerSize:       The size of the frame header.
  * @dictID:           The dictionary id, or 0 if not present.
  * @checksumFlag:     Whether a checksum was used.
+ *
+ * See zstd_lib.h.
  */
 typedef ZSTD_frameHeader zstd_frame_header;
 

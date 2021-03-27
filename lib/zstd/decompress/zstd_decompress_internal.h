@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2020, Yann Collet, Facebook, Inc.
+ * Copyright (c) 2016-2021, Yann Collet, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under both the BSD-style license (found in the
@@ -99,10 +99,12 @@ typedef enum {
     ZSTD_use_once = 1            /* Use the dictionary once and set to ZSTD_dont_use */
 } ZSTD_dictUses_e;
 
-typedef enum {
-    ZSTD_obm_buffered = 0,  /* Buffer the output */
-    ZSTD_obm_stable = 1     /* ZSTD_outBuffer is stable */
-} ZSTD_outBufferMode_e;
+/* Hashset for storing references to multiple ZSTD_DDict within ZSTD_DCtx */
+typedef struct {
+    const ZSTD_DDict** ddictPtrTable;
+    size_t ddictPtrTableSize;
+    size_t ddictPtrCount;
+} ZSTD_DDictHashSet;
 
 struct ZSTD_DCtx_s
 {
@@ -118,6 +120,7 @@ struct ZSTD_DCtx_s
     const void* dictEnd;          /* end of previous segment */
     size_t expected;
     ZSTD_frameHeader fParams;
+    U64 processedCSize;
     U64 decodedSize;
     blockType_e bType;            /* used in ZSTD_decompressContinue(), store blockType between block header decoding and block decompression stages */
     ZSTD_dStage stage;
@@ -141,6 +144,8 @@ struct ZSTD_DCtx_s
     U32 dictID;
     int ddictIsCold;             /* if == 1 : dictionary is "new" for working context, and presumed "cold" (not in cpu cache) */
     ZSTD_dictUses_e dictUses;
+    ZSTD_DDictHashSet* ddictSet;                    /* Hash set for multiple ddicts */
+    ZSTD_refMultipleDDicts_e refMultipleDDicts;     /* User specified: if == 1, will allow references to multiple DDicts. Default == 0 (disabled) */
 
     /* streaming */
     ZSTD_dStreamStage streamStage;
@@ -158,7 +163,7 @@ struct ZSTD_DCtx_s
     U32 legacyVersion;
     U32 hostageByte;
     int noForwardProgress;
-    ZSTD_outBufferMode_e outBufferMode;
+    ZSTD_bufferMode_e outBufferMode;
     ZSTD_outBuffer expectedOutBuffer;
 
     /* workspace */
@@ -171,6 +176,8 @@ struct ZSTD_DCtx_s
     void const* dictContentBeginForFuzzing;
     void const* dictContentEndForFuzzing;
 #endif
+
+    /* Tracing */
 };  /* typedef'd to ZSTD_DCtx within "zstd.h" */
 
 
@@ -189,7 +196,7 @@ size_t ZSTD_loadDEntropy(ZSTD_entropyDTables_t* entropy,
  *  If yes, do nothing (continue on current segment).
  *  If not, classify previous segment as "external dictionary", and start a new segment.
  *  This function cannot fail. */
-void ZSTD_checkContinuity(ZSTD_DCtx* dctx, const void* dst);
+void ZSTD_checkContinuity(ZSTD_DCtx* dctx, const void* dst, size_t dstSize);
 
 
 #endif /* ZSTD_DECOMPRESS_INTERNAL_H */

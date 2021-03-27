@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2020, Yann Collet, Facebook, Inc.
+ * Copyright (c) 2016-2021, Yann Collet, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under both the BSD-style license (found in the
@@ -128,9 +128,10 @@ static size_t ZSTD_buildSuperBlockEntropy_literal(void* const src, size_t srcSiz
         {   /* Build and write the CTable */
             size_t const newCSize = HUF_estimateCompressedSize(
                     (HUF_CElt*)nextHuf->CTable, countWksp, maxSymbolValue);
-            size_t const hSize = HUF_writeCTable(
+            size_t const hSize = HUF_writeCTable_wksp(
                     hufMetadata->hufDesBuffer, sizeof(hufMetadata->hufDesBuffer),
-                    (HUF_CElt*)nextHuf->CTable, maxSymbolValue, huffLog);
+                    (HUF_CElt*)nextHuf->CTable, maxSymbolValue, huffLog,
+                    nodeWksp, nodeWkspSize);
             /* Check against repeating the previous CTable */
             if (repeat != HUF_repeat_none) {
                 size_t const oldCSize = HUF_estimateCompressedSize(
@@ -304,7 +305,7 @@ ZSTD_buildSuperBlockEntropy(seqStore_t* seqStorePtr,
  *  before we know the table size + compressed size, so we have a bound on the
  *  table size. If we guessed incorrectly, we fall back to uncompressed literals.
  *
- *  We write the header when writeEntropy=1 and set entropyWrriten=1 when we succeeded
+ *  We write the header when writeEntropy=1 and set entropyWritten=1 when we succeeded
  *  in writing the header, otherwise it is set to 0.
  *
  *  hufMetadata->hType has literals block type info.

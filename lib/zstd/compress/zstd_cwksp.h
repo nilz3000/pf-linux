@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2020, Yann Collet, Facebook, Inc.
+ * Copyright (c) 2016-2021, Yann Collet, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under both the BSD-style license (found in the
@@ -40,6 +40,16 @@ typedef enum {
     ZSTD_cwksp_alloc_buffers,
     ZSTD_cwksp_alloc_aligned
 } ZSTD_cwksp_alloc_phase_e;
+
+/**
+ * Used to describe whether the workspace is statically allocated (and will not
+ * necessarily ever be freed), or if it's dynamically allocated and we can
+ * expect a well-formed caller to free this.
+ */
+typedef enum {
+    ZSTD_cwksp_dynamic_alloc,
+    ZSTD_cwksp_static_alloc
+} ZSTD_cwksp_static_alloc_e;
 
 /**
  * Zstd fits all its internal datastructures into a single continuous buffer,
@@ -134,9 +144,10 @@ typedef struct {
     void* tableValidEnd;
     void* allocStart;
 
-    int allocFailed;
+    BYTE allocFailed;
     int workspaceOversizedDuration;
     ZSTD_cwksp_alloc_phase_e phase;
+    ZSTD_cwksp_static_alloc_e isStatic;
 } ZSTD_cwksp;
 
 /*-*************************************
@@ -175,6 +186,8 @@ MEM_STATIC size_t ZSTD_cwksp_align(size_t size, size_t const align) {
  * else is though.
  */
 MEM_STATIC size_t ZSTD_cwksp_alloc_size(size_t size) {
+    if (size == 0)
+        return 0;
     return size;
 }
 
@@ -220,6 +233,9 @@ MEM_STATIC void* ZSTD_cwksp_reserve_internal(
     void* bottom = ws->tableEnd;
     ZSTD_cwksp_internal_advance_phase(ws, phase);
     alloc = (BYTE *)ws->allocStart - bytes;
+
+    if (bytes == 0)
+        return NULL;
 
 
     DEBUGLOG(5, "cwksp: reserving %p %zd bytes, %zd bytes remaining",
@@ -380,7 +396,7 @@ MEM_STATIC void ZSTD_cwksp_clear(ZSTD_cwksp* ws) {
  * Any existing values in the workspace are ignored (the previously managed
  * buffer, if present, must be separately freed).
  */
-MEM_STATIC void ZSTD_cwksp_init(ZSTD_cwksp* ws, void* start, size_t size) {
+MEM_STATIC void ZSTD_cwksp_init(ZSTD_cwksp* ws, void* start, size_t size, ZSTD_cwksp_static_alloc_e isStatic) {
     DEBUGLOG(4, "cwksp: init'ing workspace with %zd bytes", size);
     assert(((size_t)start & (sizeof(void*)-1)) == 0); /* ensure correct alignment */
     ws->workspace = start;
@@ -388,6 +404,7 @@ MEM_STATIC void ZSTD_cwksp_init(ZSTD_cwksp* ws, void* start, size_t size) {
     ws->objectEnd = ws->workspace;
     ws->tableValidEnd = ws->objectEnd;
     ws->phase = ZSTD_cwksp_alloc_objects;
+    ws->isStatic = isStatic;
     ZSTD_cwksp_clear(ws);
     ws->workspaceOversizedDuration = 0;
     ZSTD_cwksp_assert_internal_consistency(ws);
@@ -397,7 +414,7 @@ MEM_STATIC size_t ZSTD_cwksp_create(ZSTD_cwksp* ws, size_t size, ZSTD_customMem 
     void* workspace = ZSTD_customMalloc(size, customMem);
     DEBUGLOG(4, "cwksp: creating new workspace with %zd bytes", size);
     RETURN_ERROR_IF(workspace == NULL, memory_allocation, "NULL pointer!");
-    ZSTD_cwksp_init(ws, workspace, size);
+    ZSTD_cwksp_init(ws, workspace, size, ZSTD_cwksp_dynamic_alloc);
     return 0;
 }
 
@@ -410,7 +427,7 @@ MEM_STATIC void ZSTD_cwksp_free(ZSTD_cwksp* ws, ZSTD_customMem customMem) {
 
 /**
  * Moves the management of a workspace from one cwksp to another. The src cwksp
- * is left in an invalid state (src must be re-init()'ed before its used again).
+ * is left in an invalid state (src must be re-init()'ed before it's used again).
  */
 MEM_STATIC void ZSTD_cwksp_move(ZSTD_cwksp* dst, ZSTD_cwksp* src) {
     *dst = *src;
