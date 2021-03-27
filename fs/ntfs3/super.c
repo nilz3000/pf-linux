@@ -831,11 +831,7 @@ static int ntfs_init_from_boot(struct super_block *sb, u32 sector_size,
 	}
 
 	clusters = sbi->volume.size >> sbi->cluster_bits;
-#ifdef CONFIG_NTFS3_64BIT_CLUSTER
-#if BITS_PER_LONG < 64
-#error "CONFIG_NTFS3_64BIT_CLUSTER incompatible in 32 bit OS"
-#endif
-#else
+#ifndef CONFIG_NTFS3_64BIT_CLUSTER
 	/* 32 bits per cluster */
 	if (clusters >> 32) {
 		ntfs_notice(
@@ -844,6 +840,8 @@ static int ntfs_init_from_boot(struct super_block *sb, u32 sector_size,
 			gb, mb);
 		goto out;
 	}
+#elif BITS_PER_LONG < 64
+#error "CONFIG_NTFS3_64BIT_CLUSTER incompatible in 32 bit OS"
 #endif
 
 	sbi->used.bitmap.nbits = clusters;
@@ -964,7 +962,7 @@ static int ntfs_fill_super(struct super_block *sb, void *data, int silent)
 #endif
 
 	/*
-	 * Load $Volume. This should be done before $LogFile
+	 * Load $Volume. This should be done before LogFile
 	 * 'cause 'sbi->volume.ni' is used 'ntfs_set_state'
 	 */
 	ref.low = cpu_to_le32(MFT_REC_VOL);
@@ -1033,13 +1031,13 @@ static int ntfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	iput(inode);
 
-	/* Load $LogFile to replay */
+	/* Load LogFile to replay */
 	ref.low = cpu_to_le32(MFT_REC_LOG);
 	ref.seq = cpu_to_le16(MFT_REC_LOG);
 	inode = ntfs_iget5(sb, &ref, &NAME_LOGFILE);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
-		ntfs_err(sb, "Failed to load $LogFile.");
+		ntfs_err(sb, "Failed to load \x24LogFile.");
 		inode = NULL;
 		goto out;
 	}
@@ -1235,7 +1233,7 @@ static int ntfs_fill_super(struct super_block *sb, void *data, int silent)
 	inode = ntfs_iget5(sb, &ref, &NAME_UPCASE);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
-		ntfs_err(sb, "Failed to load $LogFile.");
+		ntfs_err(sb, "Failed to load \x24LogFile.");
 		inode = NULL;
 		goto out;
 	}
@@ -1306,7 +1304,6 @@ static int ntfs_fill_super(struct super_block *sb, void *data, int silent)
 	}
 
 load_root:
-
 	/* Load root */
 	ref.low = cpu_to_le32(MFT_REC_ROOT);
 	ref.seq = cpu_to_le16(MFT_REC_ROOT);
