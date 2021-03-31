@@ -87,7 +87,7 @@
 
 static int INIT handle_zstd_error(size_t ret, void (*error)(char *x))
 {
-	const zstd_error_code err = ZSTD_getErrorCode(ret);
+	const zstd_error_code err = zstd_get_error_code(ret);
 
 	if (!zstd_is_error(ret))
 		return 0;

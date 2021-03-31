@@ -1,4 +1,13 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Copyright (c) Facebook, Inc.
+ * All rights reserved.
+ *
+ * This source code is licensed under both the BSD-style license (found in the
+ * LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ * in the COPYING file in the root directory of this source tree).
+ * You may select, at your option, one of the above-listed licenses.
+ */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -7,6 +16,18 @@
 
 #include "common/zstd_deps.h"
 #include "common/zstd_internal.h"
+
+int zstd_min_clevel(void)
+{
+	return ZSTD_minCLevel();
+}
+EXPORT_SYMBOL(zstd_min_clevel);
+
+int zstd_max_clevel(void)
+{
+	return ZSTD_maxCLevel();
+}
+EXPORT_SYMBOL(zstd_max_clevel);
 
 size_t zstd_compress_bound(size_t src_size)
 {
