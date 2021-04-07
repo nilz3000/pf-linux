@@ -2816,14 +2816,14 @@ again:
 			 * vbabka: ugh, never say never
 			 */
 			VM_WARN_ON_ONCE(1);
-		} else {
+			clean_file = ULONG_MAX;
+		} else
 			clean_file = reclaimable_file - dirty_file;
 
-			sc->file_is_low = K(clean_file) < sysctl_unevictable_file_kbytes_low &&
-				          K(clean_file) > sysctl_unevictable_file_kbytes_min;
+		sc->file_is_low = K(clean_file) < sysctl_unevictable_file_kbytes_low &&
+			          K(clean_file) > sysctl_unevictable_file_kbytes_min;
 
-			sc->file_is_min = K(clean_file) <= sysctl_unevictable_file_kbytes_min;
-		}
+		sc->file_is_min = K(clean_file) <= sysctl_unevictable_file_kbytes_min;
 #endif
 	}
 
