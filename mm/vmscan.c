@@ -2776,6 +2776,9 @@ again:
 	if (!cgroup_reclaim(sc)) {
 		unsigned long total_high_wmark = 0;
 		unsigned long free, anon;
+#if defined(CONFIG_UNEVICTABLE_FILE)
+		unsigned long reclaimable_file, clean_file, dirty_file;
+#endif
 		int z;
 
 		free = sum_zone_node_page_state(pgdat->node_id, NR_FREE_PAGES);
@@ -2803,10 +2806,24 @@ again:
 			anon >> sc->priority;
 
 #if defined(CONFIG_UNEVICTABLE_FILE)
-		sc->file_is_low = K(file) < sysctl_unevictable_file_kbytes_low &&
-				  K(file) > sysctl_unevictable_file_kbytes_min;
+		reclaimable_file = file + node_page_state(pgdat, NR_ISOLATED_FILE);
+		dirty_file = node_page_state(pgdat, NR_FILE_DIRTY);
 
-		sc->file_is_min = K(file) <= sysctl_unevictable_file_kbytes_min;
+		if (reclaimable_file < dirty_file) {
+			/*
+			 * post-factum: so, nr_file_dirty can never exceed
+			 *              (nr_inactive_file+nr_active_file+nr_isolated_file)?
+			 * vbabka: ugh, never say never
+			 */
+			VM_WARN_ON_ONCE(1);
+		} else {
+			clean_file = reclaimable_file - dirty_file;
+
+			sc->file_is_low = K(clean_file) < sysctl_unevictable_file_kbytes_low &&
+				          K(clean_file) > sysctl_unevictable_file_kbytes_min;
+
+			sc->file_is_min = K(clean_file) <= sysctl_unevictable_file_kbytes_min;
+		}
 #endif
 	}
 
