@@ -2809,13 +2809,13 @@ again:
 		reclaimable_file = file + node_page_state(pgdat, NR_ISOLATED_FILE);
 		dirty_file = node_page_state(pgdat, NR_FILE_DIRTY);
 
-		if (reclaimable_file < dirty_file) {
+		if (unlikely(reclaimable_file < dirty_file)) {
 			/*
 			 * post-factum: so, nr_file_dirty can never exceed
 			 *              (nr_inactive_file+nr_active_file+nr_isolated_file)?
 			 * vbabka: ugh, never say never
 			 */
-			VM_WARN_ON_ONCE(1);
+			WARN_ON_ONCE(1);
 			clean_file = ULONG_MAX;
 		} else
 			clean_file = reclaimable_file - dirty_file;
