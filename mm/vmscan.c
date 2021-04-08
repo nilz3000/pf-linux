@@ -2784,6 +2784,10 @@ again:
 		free = sum_zone_node_page_state(pgdat->node_id, NR_FREE_PAGES);
 		file = node_page_state(pgdat, NR_ACTIVE_FILE) +
 			   node_page_state(pgdat, NR_INACTIVE_FILE);
+#if defined(CONFIG_UNEVICTABLE_FILE)
+		reclaimable_file = file + node_page_state(pgdat, NR_ISOLATED_FILE);
+		dirty_file = node_page_state(pgdat, NR_FILE_DIRTY);
+#endif
 
 		for (z = 0; z < MAX_NR_ZONES; z++) {
 			struct zone *zone = &pgdat->node_zones[z];
@@ -2806,9 +2810,6 @@ again:
 			anon >> sc->priority;
 
 #if defined(CONFIG_UNEVICTABLE_FILE)
-		reclaimable_file = file + node_page_state(pgdat, NR_ISOLATED_FILE);
-		dirty_file = node_page_state(pgdat, NR_FILE_DIRTY);
-
 		if (unlikely(reclaimable_file < dirty_file))
 			clean_file = ULONG_MAX;
 		else
