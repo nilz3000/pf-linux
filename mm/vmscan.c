@@ -2784,6 +2784,10 @@ again:
 		free = sum_zone_node_page_state(pgdat->node_id, NR_FREE_PAGES);
 		file = node_page_state(pgdat, NR_ACTIVE_FILE) +
 			   node_page_state(pgdat, NR_INACTIVE_FILE);
+#if defined(CONFIG_UNEVICTABLE_FILE)
+		reclaimable_file = file + node_page_state(pgdat, NR_ISOLATED_FILE);
+		dirty_file = node_page_state(pgdat, NR_FILE_DIRTY);
+#endif
 
 		for (z = 0; z < MAX_NR_ZONES; z++) {
 			struct zone *zone = &pgdat->node_zones[z];
@@ -2806,18 +2810,13 @@ again:
 			anon >> sc->priority;
 
 #if defined(CONFIG_UNEVICTABLE_FILE)
-		reclaimable_file = file + node_page_state(pgdat, NR_ISOLATED_FILE);
-		dirty_file = node_page_state(pgdat, NR_FILE_DIRTY);
-
-		if (unlikely(reclaimable_file < dirty_file)) {
-			/*
-			 * post-factum: so, nr_file_dirty can never exceed
-			 *              (nr_inactive_file+nr_active_file+nr_isolated_file)?
-			 * vbabka: ugh, never say never
-			 */
-			WARN_ON_ONCE(1);
+		/*
+		 * node_page_state() sum can go out of sync since
+		 * all the values are not read at once
+		 */
+		if (unlikely(reclaimable_file < dirty_file))
 			clean_file = ULONG_MAX;
-		} else
+		else
 			clean_file = reclaimable_file - dirty_file;
 
 		sc->file_is_low = K(clean_file) < sysctl_unevictable_file_kbytes_low &&
