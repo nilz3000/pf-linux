@@ -2809,15 +2809,9 @@ again:
 		reclaimable_file = file + node_page_state(pgdat, NR_ISOLATED_FILE);
 		dirty_file = node_page_state(pgdat, NR_FILE_DIRTY);
 
-		if (unlikely(reclaimable_file < dirty_file)) {
-			/*
-			 * post-factum: so, nr_file_dirty can never exceed
-			 *              (nr_inactive_file+nr_active_file+nr_isolated_file)?
-			 * vbabka: ugh, never say never
-			 */
-			WARN_ON_ONCE(1);
+		if (unlikely(reclaimable_file < dirty_file))
 			clean_file = ULONG_MAX;
-		} else
+		else
 			clean_file = reclaimable_file - dirty_file;
 
 		sc->file_is_low = K(clean_file) < sysctl_unevictable_file_kbytes_low &&
