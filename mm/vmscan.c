@@ -2810,6 +2810,10 @@ again:
 			anon >> sc->priority;
 
 #if defined(CONFIG_UNEVICTABLE_FILE)
+		/*
+		 * node_page_state() sum can go out of sync since
+		 * all the values are not read at once
+		 */
 		if (unlikely(reclaimable_file < dirty_file))
 			clean_file = ULONG_MAX;
 		else
