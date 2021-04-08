@@ -2815,7 +2815,11 @@ again:
 		 * all the values are not read at once
 		 */
 		if (unlikely(reclaimable_file < dirty_file))
-			clean_file = ULONG_MAX;
+			/*
+			 * in this case assume the system does not have
+			 * clean file pages anymore
+			 */
+			clean_file = 0;
 		else
 			clean_file = reclaimable_file - dirty_file;
 
