@@ -150,6 +150,7 @@ else
         cflags-$(CONFIG_MCOOPERLAKE) += $(call cc-option,-march=cooperlake)
         cflags-$(CONFIG_MTIGERLAKE) += $(call cc-option,-march=tigerlake)
         cflags-$(CONFIG_MSAPPHIRERAPIDS) += $(call cc-option,-march=sapphirerapids)
+        cflags-$(CONFIG_MROCKETLAKE) += $(call cc-option,-march=rocketlake)
         cflags-$(CONFIG_MALDERLAKE) += $(call cc-option,-march=alderlake)
         cflags-$(CONFIG_GENERIC_CPU2) += $(call cc-option,-march=x86-64-v2)
         cflags-$(CONFIG_GENERIC_CPU3) += $(call cc-option,-march=x86-64-v3)
