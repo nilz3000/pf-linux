@@ -221,7 +221,7 @@ typedef struct nodeElt_s {
     BYTE nbBits;
 } nodeElt;
 
-/**
+/*
  * HUF_setMaxHeight():
  * Enforces maxNbBits on the Huffman tree described in huffNode.
  *
@@ -377,7 +377,7 @@ typedef struct {
   rankPos rankPosition[RANK_POSITION_TABLE_SIZE];
 } HUF_buildCTable_wksp_tables;
 
-/**
+/*
  * HUF_sort():
  * Sorts the symbols [0, maxSymbolValue] by count[symbol] in decreasing order.
  *
@@ -426,7 +426,7 @@ static void HUF_sort(nodeElt* huffNode, const unsigned* count, U32 maxSymbolValu
 }
 
 
-/** HUF_buildCTable_wksp() :
+/* HUF_buildCTable_wksp() :
  *  Same as HUF_buildCTable(), but using externally allocated scratch buffer.
  *  `workSpace` must be aligned on 4-bytes boundaries, and be at least as large as sizeof(HUF_buildCTable_wksp_tables).
  */
@@ -475,7 +475,7 @@ static int HUF_buildTree(nodeElt* huffNode, U32 maxSymbolValue)
     return nonNullRank;
 }
 
-/**
+/*
  * HUF_buildCTableFromTree():
  * Build the CTable given the Huffman tree in huffNode.
  *

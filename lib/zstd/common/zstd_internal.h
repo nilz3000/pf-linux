@@ -48,7 +48,7 @@
 #define MIN(a,b) ((a)<(b) ? (a) : (b))
 #define MAX(a,b) ((a)>(b) ? (a) : (b))
 
-/**
+/*
  * Ignore: this is an internal helper.
  *
  * This is a helper function to help force C99-correctness during compilation.
@@ -62,7 +62,7 @@ void _force_has_format_string(const char *format, ...) {
   (void)format;
 }
 
-/**
+/*
  * Ignore: this is an internal helper.
  *
  * We want to force this function invocation to be syntactically correct, but
@@ -73,7 +73,7 @@ void _force_has_format_string(const char *format, ...) {
     _force_has_format_string(__VA_ARGS__); \
   }
 
-/**
+/*
  * Return the specified error if the condition evaluates to true.
  *
  * In debug modes, prints additional information.
@@ -90,7 +90,7 @@ void _force_has_format_string(const char *format, ...) {
     return ERROR(err); \
   }
 
-/**
+/*
  * Unconditionally return the specified error.
  *
  * In debug modes, prints additional information.
@@ -105,7 +105,7 @@ void _force_has_format_string(const char *format, ...) {
     return ERROR(err); \
   } while(0);
 
-/**
+/*
  * If the provided expression evaluates to an error code, returns that error code.
  *
  * In debug modes, prints additional information.
@@ -360,7 +360,7 @@ typedef struct {
     U32 matchLength;
 } ZSTD_sequenceLength;
 
-/**
+/*
  * Returns the ZSTD_sequenceLength for the given sequences. It handles the decoding of long sequences
  * indicated by longLengthPos and longLengthID, and adds MINMATCH back to matchLength.
  */
@@ -380,7 +380,7 @@ MEM_STATIC ZSTD_sequenceLength ZSTD_getSequenceLength(seqStore_t const* seqStore
     return seqLen;
 }
 
-/**
+/*
  * Contains the compressed frame size and an upper-bound for the decompressed frame size.
  * Note: before using `compressedSize`, check for errors using ZSTD_isError().
  *       similarly, before using `decompressedBound`, check for errors using:

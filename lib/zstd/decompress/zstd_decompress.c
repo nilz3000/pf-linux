@@ -68,7 +68,7 @@
 
 
 
-/*************************************
+/* ***********************************
  * Multiple DDicts Hashset internals *
  *************************************/
 
@@ -367,7 +367,7 @@ unsigned ZSTD_isFrame(const void* buffer, size_t size)
     return 0;
 }
 
-/** ZSTD_frameHeaderSize_internal() :
+/* ZSTD_frameHeaderSize_internal() :
  *  srcSize must be large enough to reach header size fields.
  *  note : only works for formats ZSTD_f_zstd1 and ZSTD_f_zstd1_magicless.
  * @return : size of the Frame Header
@@ -387,7 +387,7 @@ static size_t ZSTD_frameHeaderSize_internal(const void* src, size_t srcSize, ZST
     }
 }
 
-/** ZSTD_frameHeaderSize() :
+/* ZSTD_frameHeaderSize() :
  *  srcSize must be >= ZSTD_frameHeaderSize_prefix.
  * @return : size of the Frame Header,
  *           or an error code (if srcSize is too small) */
@@ -397,7 +397,7 @@ size_t ZSTD_frameHeaderSize(const void* src, size_t srcSize)
 }
 
 
-/** ZSTD_getFrameHeader_advanced() :
+/* ZSTD_getFrameHeader_advanced() :
  *  decode Frame Header, or require larger `srcSize`.
  *  note : only works for formats ZSTD_f_zstd1 and ZSTD_f_zstd1_magicless
  * @return : 0, `zfhPtr` is correctly filled,
@@ -479,7 +479,7 @@ size_t ZSTD_getFrameHeader_advanced(ZSTD_frameHeader* zfhPtr, const void* src, s
     return 0;
 }
 
-/** ZSTD_getFrameHeader() :
+/* ZSTD_getFrameHeader() :
  *  decode Frame Header, or require larger `srcSize`.
  *  note : this function does not consume input, it only reads it.
  * @return : 0, `zfhPtr` is correctly filled,
@@ -491,7 +491,7 @@ size_t ZSTD_getFrameHeader(ZSTD_frameHeader* zfhPtr, const void* src, size_t src
 }
 
 
-/** ZSTD_getFrameContentSize() :
+/* ZSTD_getFrameContentSize() :
  *  compatible with legacy mode
  * @return : decompressed size of the single frame pointed to be `src` if known, otherwise
  *         - ZSTD_CONTENTSIZE_UNKNOWN if the size cannot be determined
@@ -525,7 +525,7 @@ static size_t readSkippableFrameSize(void const* src, size_t srcSize)
     }
 }
 
-/** ZSTD_findDecompressedSize() :
+/* ZSTD_findDecompressedSize() :
  *  compatible with legacy mode
  *  `srcSize` must be the exact length of some number of ZSTD compressed and/or
  *      skippable frames
@@ -571,7 +571,7 @@ unsigned long long ZSTD_findDecompressedSize(const void* src, size_t srcSize)
     return totalDstSize;
 }
 
-/** ZSTD_getDecompressedSize() :
+/* ZSTD_getDecompressedSize() :
  *  compatible with legacy mode
  * @return : decompressed size if known, 0 otherwise
              note : 0 can mean any of the following :
@@ -587,7 +587,7 @@ unsigned long long ZSTD_getDecompressedSize(const void* src, size_t srcSize)
 }
 
 
-/** ZSTD_decodeFrameHeader() :
+/* ZSTD_decodeFrameHeader() :
  * `headerSize` must be the size provided by ZSTD_frameHeaderSize().
  * If multiple DDict references are enabled, also will choose the correct DDict to use.
  * @return : 0 if success, or an error code, which can be tested using ZSTD_isError() */
@@ -685,7 +685,7 @@ static ZSTD_frameSizeInfo ZSTD_findFrameSizeInfo(const void* src, size_t srcSize
     }
 }
 
-/** ZSTD_findFrameCompressedSize() :
+/* ZSTD_findFrameCompressedSize() :
  *  compatible with legacy mode
  *  `src` must point to the start of a ZSTD frame, ZSTD legacy frame, or skippable frame
  *  `srcSize` must be at least as large as the frame contained
@@ -696,7 +696,7 @@ size_t ZSTD_findFrameCompressedSize(const void *src, size_t srcSize)
     return frameSizeInfo.compressedSize;
 }
 
-/** ZSTD_decompressBound() :
+/* ZSTD_decompressBound() :
  *  compatible with legacy mode
  *  `src` must point to the start of a ZSTD frame or a skippeable frame
  *  `srcSize` must be at least as large as the frame contained
@@ -725,7 +725,7 @@ unsigned long long ZSTD_decompressBound(const void* src, size_t srcSize)
  *   Frame decoding
  ***************************************************************/
 
-/** ZSTD_insertBlock() :
+/* ZSTD_insertBlock() :
  *  insert `src` block into `dctx` history. Useful to track uncompressed blocks. */
 size_t ZSTD_insertBlock(ZSTD_DCtx* dctx, const void* blockStart, size_t blockSize)
 {
@@ -988,7 +988,7 @@ size_t ZSTD_decompress(void* dst, size_t dstCapacity, const void* src, size_t sr
 ****************************************/
 size_t ZSTD_nextSrcSizeToDecompress(ZSTD_DCtx* dctx) { return dctx->expected; }
 
-/**
+/*
  * Similar to ZSTD_nextSrcSizeToDecompress(), but when when a block input can be streamed,
  * we allow taking a partial block as the input. Currently only raw uncompressed blocks can
  * be streamed.
@@ -1030,7 +1030,7 @@ ZSTD_nextInputType_e ZSTD_nextInputType(ZSTD_DCtx* dctx) {
 
 static int ZSTD_isSkipFrame(ZSTD_DCtx* dctx) { return dctx->stage == ZSTDds_skipFrame; }
 
-/** ZSTD_decompressContinue() :
+/* ZSTD_decompressContinue() :
  *  srcSize : must be the exact nb of bytes expected (see ZSTD_nextSrcSizeToDecompress())
  *  @return : nb of bytes generated into `dst` (necessarily <= `dstCapacity)
  *            or an error code, which can be tested using ZSTD_isError() */

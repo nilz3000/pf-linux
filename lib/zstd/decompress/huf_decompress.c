@@ -115,7 +115,7 @@ static DTableDesc HUF_getDTableDesc(const HUF_DTable* table)
 /*-***************************/
 typedef struct { BYTE byte; BYTE nbBits; } HUF_DEltX1;   /* single-symbol decoding */
 
-/**
+/*
  * Packs 4 HUF_DEltX1 structs into a U64. This is used to lay down 4 entries at
  * a time.
  */
@@ -1047,7 +1047,7 @@ static const algo_time_t algoTime[16 /* Quantization */][3 /* single, double, qu
 };
 #endif
 
-/** HUF_selectDecoder() :
+/* HUF_selectDecoder() :
  *  Tells which decoder is likely to decode faster,
  *  based on a set of pre-computed metrics.
  * @return : 0==HUF_decompress4X1, 1==HUF_decompress4X2 .
