@@ -124,7 +124,7 @@ ZSTD_CCtx* ZSTD_initStaticCCtx(void* workspace, size_t workspaceSize)
     return cctx;
 }
 
-/**
+/*
  * Clears and frees all of the dictionaries in the CCtx.
  */
 static void ZSTD_clearAllDicts(ZSTD_CCtx* cctx)
@@ -261,7 +261,7 @@ size_t ZSTD_CCtxParams_init(ZSTD_CCtx_params* cctxParams, int compressionLevel) 
 
 #define ZSTD_NO_CLEVEL 0
 
-/**
+/*
  * Initializes the cctxParams from params and compressionLevel.
  * @param compressionLevel If params are derived from a compression level then that compression level, otherwise ZSTD_NO_CLEVEL.
  */
@@ -285,7 +285,7 @@ size_t ZSTD_CCtxParams_init_advanced(ZSTD_CCtx_params* cctxParams, ZSTD_paramete
     return 0;
 }
 
-/**
+/*
  * Sets cctxParams' cParams and fParams from params, but otherwise leaves them alone.
  * @param param Validated zstd parameters.
  */
@@ -868,7 +868,7 @@ size_t ZSTD_CCtxParams_getParameter(
     return 0;
 }
 
-/** ZSTD_CCtx_setParametersUsingCCtxParams() :
+/* ZSTD_CCtx_setParametersUsingCCtxParams() :
  *  just applies `params` into `cctx`
  *  no action is performed, parameters are merely stored.
  *  If ZSTDMT is enabled, parameters are pushed to cctx->mtctx.
@@ -906,7 +906,7 @@ static int ZSTD_dedicatedDictSearch_isSupported(
 static void ZSTD_dedicatedDictSearch_revertCParams(
         ZSTD_compressionParameters* cParams);
 
-/**
+/*
  * Initializes the local dict using the requested parameters.
  * NOTE: This does not use the pledged src size, because it may be used for more
  * than one compression.
@@ -1040,7 +1040,7 @@ size_t ZSTD_CCtx_reset(ZSTD_CCtx* cctx, ZSTD_ResetDirective reset)
 }
 
 
-/** ZSTD_checkCParams() :
+/* ZSTD_checkCParams() :
     control CParam values remain within authorized range.
     @return : 0, or an error code if one value is beyond authorized range */
 size_t ZSTD_checkCParams(ZSTD_compressionParameters cParams)
@@ -1055,7 +1055,7 @@ size_t ZSTD_checkCParams(ZSTD_compressionParameters cParams)
     return 0;
 }
 
-/** ZSTD_clampCParams() :
+/* ZSTD_clampCParams() :
  *  make CParam values within valid range.
  *  @return : valid CParams */
 static ZSTD_compressionParameters
@@ -1077,7 +1077,7 @@ ZSTD_clampCParams(ZSTD_compressionParameters cParams)
     return cParams;
 }
 
-/** ZSTD_cycleLog() :
+/* ZSTD_cycleLog() :
  *  condition for correct operation : hashLog > 1 */
 U32 ZSTD_cycleLog(U32 hashLog, ZSTD_strategy strat)
 {
@@ -1085,7 +1085,7 @@ U32 ZSTD_cycleLog(U32 hashLog, ZSTD_strategy strat)
     return hashLog - btScale;
 }
 
-/** ZSTD_dictAndWindowLog() :
+/* ZSTD_dictAndWindowLog() :
  * Returns an adjusted window log that is large enough to fit the source and the dictionary.
  * The zstd format says that the entire dictionary is valid if one byte of the dictionary
  * is within the window. So the hashLog and chainLog should be large enough to reference both
@@ -1119,7 +1119,7 @@ static U32 ZSTD_dictAndWindowLog(U32 windowLog, U64 srcSize, U64 dictSize)
     }
 }
 
-/** ZSTD_adjustCParams_internal() :
+/* ZSTD_adjustCParams_internal() :
  *  optimize `cPar` for a specified input (`srcSize` and `dictSize`).
  *  mostly downsize to reduce memory consumption and initialization latency.
  * `srcSize` can be ZSTD_CONTENTSIZE_UNKNOWN when not known.
@@ -1453,7 +1453,7 @@ static void ZSTD_invalidateMatchState(ZSTD_matchState_t* ms)
     ms->dictMatchState = NULL;
 }
 
-/**
+/*
  * Controls, for this matchState reset, whether the tables need to be cleared /
  * prepared for the coming compression (ZSTDcrp_makeClean), or whether the
  * tables can be left unclean (ZSTDcrp_leaveDirty), because we know that a
@@ -1465,7 +1465,7 @@ typedef enum {
     ZSTDcrp_leaveDirty
 } ZSTD_compResetPolicy_e;
 
-/**
+/*
  * Controls, for this matchState reset, whether indexing can continue where it
  * left off (ZSTDirp_continue), or whether it needs to be restarted from zero
  * (ZSTDirp_reset).
@@ -3264,7 +3264,7 @@ static size_t ZSTD_loadZstdDictionary(ZSTD_compressedBlockState_t* bs,
     return dictID;
 }
 
-/** ZSTD_compress_insertDictionary() :
+/* ZSTD_compress_insertDictionary() :
 *   @return : dictID, or an error code */
 static size_t
 ZSTD_compress_insertDictionary(ZSTD_compressedBlockState_t* bs,
@@ -4082,7 +4082,7 @@ static size_t ZSTD_nextInputSizeHint(const ZSTD_CCtx* cctx)
     return hintInSize;
 }
 
-/** ZSTD_compressStream_generic():
+/* ZSTD_compressStream_generic():
  *  internal function for all *compressStream*() variants
  *  non-static, because can be called from zstdmt_compress.c
  * @return : hint size for next input */
@@ -4999,7 +4999,7 @@ static int ZSTD_dedicatedDictSearch_isSupported(
         && (cParams->chainLog <= 24);
 }
 
-/**
+/*
  * Reverses the adjustment applied to cparams when enabling dedicated dict
  * search. This is used to recover the params set to be used in the working
  * context. (Otherwise, those tables would also grow.)

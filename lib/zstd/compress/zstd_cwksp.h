@@ -41,7 +41,7 @@ typedef enum {
     ZSTD_cwksp_alloc_aligned
 } ZSTD_cwksp_alloc_phase_e;
 
-/**
+/*
  * Used to describe whether the workspace is statically allocated (and will not
  * necessarily ever be freed), or if it's dynamically allocated and we can
  * expect a well-formed caller to free this.
@@ -51,7 +51,7 @@ typedef enum {
     ZSTD_cwksp_static_alloc
 } ZSTD_cwksp_static_alloc_e;
 
-/**
+/*
  * Zstd fits all its internal datastructures into a single continuous buffer,
  * so that it only needs to perform a single OS allocation (or so that a buffer
  * can be provided to it and it can perform no allocations at all). This buffer
@@ -166,7 +166,7 @@ MEM_STATIC void ZSTD_cwksp_assert_internal_consistency(ZSTD_cwksp* ws) {
     assert(ws->allocStart <= ws->workspaceEnd);
 }
 
-/**
+/*
  * Align must be a power of 2.
  */
 MEM_STATIC size_t ZSTD_cwksp_align(size_t size, size_t const align) {
@@ -175,7 +175,7 @@ MEM_STATIC size_t ZSTD_cwksp_align(size_t size, size_t const align) {
     return (size + mask) & ~mask;
 }
 
-/**
+/*
  * Use this to determine how much space in the workspace we will consume to
  * allocate this object. (Normally it should be exactly the size of the object,
  * but under special conditions, like ASAN, where we pad each object, it might
@@ -217,14 +217,14 @@ MEM_STATIC void ZSTD_cwksp_internal_advance_phase(
     }
 }
 
-/**
+/*
  * Returns whether this object/buffer/etc was allocated in this workspace.
  */
 MEM_STATIC int ZSTD_cwksp_owns_buffer(const ZSTD_cwksp* ws, const void* ptr) {
     return (ptr != NULL) && (ws->workspace <= ptr) && (ptr <= ws->workspaceEnd);
 }
 
-/**
+/*
  * Internal function. Do not use directly.
  */
 MEM_STATIC void* ZSTD_cwksp_reserve_internal(
@@ -256,14 +256,14 @@ MEM_STATIC void* ZSTD_cwksp_reserve_internal(
     return alloc;
 }
 
-/**
+/*
  * Reserves and returns unaligned memory.
  */
 MEM_STATIC BYTE* ZSTD_cwksp_reserve_buffer(ZSTD_cwksp* ws, size_t bytes) {
     return (BYTE*)ZSTD_cwksp_reserve_internal(ws, bytes, ZSTD_cwksp_alloc_buffers);
 }
 
-/**
+/*
  * Reserves and returns memory sized on and aligned on sizeof(unsigned).
  */
 MEM_STATIC void* ZSTD_cwksp_reserve_aligned(ZSTD_cwksp* ws, size_t bytes) {
@@ -271,7 +271,7 @@ MEM_STATIC void* ZSTD_cwksp_reserve_aligned(ZSTD_cwksp* ws, size_t bytes) {
     return ZSTD_cwksp_reserve_internal(ws, ZSTD_cwksp_align(bytes, sizeof(U32)), ZSTD_cwksp_alloc_aligned);
 }
 
-/**
+/*
  * Aligned on sizeof(unsigned). These buffers have the special property that
  * their values remain constrained, allowing us to re-use them without
  * memset()-ing them.
@@ -299,7 +299,7 @@ MEM_STATIC void* ZSTD_cwksp_reserve_table(ZSTD_cwksp* ws, size_t bytes) {
     return alloc;
 }
 
-/**
+/*
  * Aligned on sizeof(void*).
  */
 MEM_STATIC void* ZSTD_cwksp_reserve_object(ZSTD_cwksp* ws, size_t bytes) {
@@ -348,7 +348,7 @@ MEM_STATIC void ZSTD_cwksp_mark_tables_clean(ZSTD_cwksp* ws) {
     ZSTD_cwksp_assert_internal_consistency(ws);
 }
 
-/**
+/*
  * Zero the part of the allocated tables not already marked clean.
  */
 MEM_STATIC void ZSTD_cwksp_clean_tables(ZSTD_cwksp* ws) {
@@ -361,7 +361,7 @@ MEM_STATIC void ZSTD_cwksp_clean_tables(ZSTD_cwksp* ws) {
     ZSTD_cwksp_mark_tables_clean(ws);
 }
 
-/**
+/*
  * Invalidates table allocations.
  * All other allocations remain valid.
  */
@@ -373,7 +373,7 @@ MEM_STATIC void ZSTD_cwksp_clear_tables(ZSTD_cwksp* ws) {
     ZSTD_cwksp_assert_internal_consistency(ws);
 }
 
-/**
+/*
  * Invalidates all buffer, aligned, and table allocations.
  * Object allocations remain valid.
  */
@@ -391,7 +391,7 @@ MEM_STATIC void ZSTD_cwksp_clear(ZSTD_cwksp* ws) {
     ZSTD_cwksp_assert_internal_consistency(ws);
 }
 
-/**
+/*
  * The provided workspace takes ownership of the buffer [start, start+size).
  * Any existing values in the workspace are ignored (the previously managed
  * buffer, if present, must be separately freed).
@@ -425,7 +425,7 @@ MEM_STATIC void ZSTD_cwksp_free(ZSTD_cwksp* ws, ZSTD_customMem customMem) {
     ZSTD_customFree(ptr, customMem);
 }
 
-/**
+/*
  * Moves the management of a workspace from one cwksp to another. The src cwksp
  * is left in an invalid state (src must be re-init()'ed before it's used again).
  */

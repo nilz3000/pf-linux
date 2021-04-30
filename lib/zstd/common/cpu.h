@@ -11,7 +11,7 @@
 #ifndef ZSTD_COMMON_CPU_H
 #define ZSTD_COMMON_CPU_H
 
-/**
+/*
  * Implementation taken from folly/CpuId.h
  * https://github.com/facebook/folly/blob/master/folly/CpuId.h
  */

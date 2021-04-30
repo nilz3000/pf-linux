@@ -25,20 +25,20 @@
 #define FORCE_INLINE_ATTR __attribute__((always_inline))
 
 
-/**
+/*
   On MSVC qsort requires that functions passed into it use the __cdecl calling conversion(CC).
   This explictly marks such functions as __cdecl so that the code will still compile
   if a CC other than __cdecl has been made the default.
 */
 #define WIN_CDECL
 
-/**
+/*
  * FORCE_INLINE_TEMPLATE is used to define C "templates", which take constant
  * parameters. They must be inlined for the compiler to eliminate the constant
  * branches.
  */
 #define FORCE_INLINE_TEMPLATE static INLINE_KEYWORD FORCE_INLINE_ATTR
-/**
+/*
  * HINT_INLINE is used to help the compiler generate better code. It is *not*
  * used for "templates", so it can be tweaked based on the compilers
  * performance.
