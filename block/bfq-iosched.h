@@ -13,7 +13,7 @@
 #include "blk-cgroup-rwstat.h"
 
 #define BFQ_IOPRIO_CLASSES	3
-#define BFQ_CLASS_TIMEOUT	(HZ/5)
+#define BFQ_CL_IDLE_TIMEOUT	(HZ/5)
 
 #define BFQ_MIN_WEIGHT			1
 #define BFQ_MAX_WEIGHT			1000
@@ -22,6 +22,7 @@
 #define BFQ_DEFAULT_QUEUE_IOPRIO	4
 
 #define BFQ_WEIGHT_LEGACY_DFL	100
+#define BFQ_DEFAULT_GRP_IOPRIO	0
 #define BFQ_DEFAULT_GRP_CLASS	IOPRIO_CLASS_BE
 
 #define MAX_PID_STR_LENGTH 12
@@ -96,12 +97,9 @@ struct bfq_sched_data {
 	struct bfq_entity *next_in_service;
 	/* array of service trees, one per ioprio_class */
 	struct bfq_service_tree service_tree[BFQ_IOPRIO_CLASSES];
-	/* last time the class was served */
-	unsigned long bfq_class_last_service[BFQ_IOPRIO_CLASSES];
-	/* last time class timeout was checked */
-	unsigned long class_timeout_last_check;
-	/* next index to check class timeout */
-	unsigned int next_class_index;
+	/* last time CLASS_IDLE was served */
+	unsigned long bfq_class_idle_last_service;
+
 };
 
 /**
@@ -199,9 +197,6 @@ struct bfq_entity {
 
 	/* flag, set if the entity is counted in groups_with_pending_reqs */
 	bool in_groups_with_pending_reqs;
-
-	/* last child queue of entity created (for non-leaf entities) */
-	struct bfq_queue *last_bfqq_created;
 };
 
 struct bfq_group;
@@ -235,8 +230,6 @@ struct bfq_ttime {
 struct bfq_queue {
 	/* reference counter */
 	int ref;
-	/* counter of references from other queues for delayed stable merge */
-	int stable_ref;
 	/* parent bfq_data */
 	struct bfq_data *bfqd;
 
@@ -372,8 +365,6 @@ struct bfq_queue {
 
 	unsigned long first_IO_time; /* time of first I/O for this queue */
 
-	unsigned long creation_time; /* when this queue is created */
-
 	/* max service rate measured so far */
 	u32 max_service_rate;
 
@@ -463,11 +454,6 @@ struct bfq_io_cq {
 	u64 saved_last_serv_time_ns;
 	unsigned int saved_inject_limit;
 	unsigned long saved_decrease_time_jif;
-
-	/* candidate queue for a stable merge (due to close creation time) */
-	struct bfq_queue *stable_merge_bfqq;
-
-	bool stably_merged;	/* non splittable if true */
 };
 
 /**
@@ -591,9 +577,6 @@ struct bfq_data {
 
 	/* bfqq owning the last completed rq */
 	struct bfq_queue *last_completed_rq_bfqq;
-
-	/* last bfqq created, among those in the root group */
-	struct bfq_queue *last_bfqq_created;
 
 	/* time of last transition from empty to non-empty (ns) */
 	u64 last_empty_occupied_ns;
@@ -931,7 +914,7 @@ struct bfq_group {
 	struct bfq_entity entity;
 	struct bfq_sched_data sched_data;
 
-	struct bfq_data *bfqd;
+	void *bfqd;
 
 	struct bfq_queue *async_bfqq[2][IOPRIO_BE_NR];
 	struct bfq_queue *async_idle_bfqq;
@@ -958,7 +941,6 @@ struct bfq_group {
 #endif
 
 struct bfq_queue *bfq_entity_to_bfqq(struct bfq_entity *entity);
-struct bfq_group *bfq_entity_to_bfqg(struct bfq_entity *entity);
 
 /* --------------- main algorithm interface ----------------- */
 
