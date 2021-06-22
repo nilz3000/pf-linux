@@ -2345,9 +2345,9 @@ static bool bfq_bio_merge(struct request_queue *q, struct bio *bio,
 
 	ret = blk_mq_sched_try_merge(q, bio, nr_segs, &free);
 
-	spin_unlock_irq(&bfqd->lock);
 	if (free)
 		blk_mq_free_request(free);
+	spin_unlock_irq(&bfqd->lock);
 
 	return ret;
 }
@@ -2433,7 +2433,7 @@ static void bfq_requests_merged(struct request_queue *q, struct request *rq,
 		*next_bfqq = bfq_init_rq(next);
 
 	if (!bfqq)
-		goto remove;
+		return;
 
 	/*
 	 * If next and rq belong to the same bfq_queue and next is older
@@ -2456,14 +2456,6 @@ static void bfq_requests_merged(struct request_queue *q, struct request *rq,
 		bfqq->next_rq = rq;
 
 	bfqg_stats_update_io_merged(bfqq_group(bfqq), next->cmd_flags);
-remove:
-	/* Merged request may be in the IO scheduler. Remove it. */
-	if (!RB_EMPTY_NODE(&next->rb_node)) {
-		bfq_remove_request(next->q, next);
-		if (next_bfqq)
-			bfqg_stats_update_io_remove(bfqq_group(next_bfqq),
-						    next->cmd_flags);
-	}
 }
 
 /* Must be called with bfqq != NULL */
@@ -4989,17 +4981,6 @@ static struct request *__bfq_dispatch_request(struct blk_mq_hw_ctx *hctx)
 	if (!bfqq)
 		goto exit;
 
-	/*
-	 * Here, the IO depth of queues belong to CLASS_IDLE is limited
-	 * to 1, so that it can avoid introducing a larger tail latency
-	 * under a device with a larger IO depth. Although limiting the
-	 * IO depth may reduce the performance of idle_class, it is
-	 * generally not a big problem, because idle_class usually
-	 * does not have strict performance requirements.
-	 */
-	if (bfq_class_idle(bfqq) && bfqq->dispatched)
-		goto exit;
-
 	rq = bfq_dispatch_rq_from_bfqq(bfqd, bfqq);
 
 	if (rq) {
@@ -5980,16 +5961,14 @@ static void bfq_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
 	struct bfq_queue *bfqq;
 	bool idle_timer_disabled = false;
 	unsigned int cmd_flags;
-	LIST_HEAD(free);
 
 #ifdef CONFIG_BFQ_GROUP_IOSCHED
 	if (!cgroup_subsys_on_dfl(io_cgrp_subsys) && rq->bio)
 		bfqg_stats_update_legacy_io(q, rq);
 #endif
 	spin_lock_irq(&bfqd->lock);
-	if (blk_mq_sched_try_insert_merge(q, rq, &free)) {
+	if (blk_mq_sched_try_insert_merge(q, rq)) {
 		spin_unlock_irq(&bfqd->lock);
-		blk_mq_free_requests(&free);
 		return;
 	}
 
@@ -6435,7 +6414,6 @@ static void bfq_finish_requeue_request(struct request *rq)
 {
 	struct bfq_queue *bfqq = RQ_BFQQ(rq);
 	struct bfq_data *bfqd;
-	unsigned long flags;
 
 	/*
 	 * rq either is not associated with any icq, or is an already
@@ -6453,15 +6431,39 @@ static void bfq_finish_requeue_request(struct request *rq)
 					     rq->io_start_time_ns,
 					     rq->cmd_flags);
 
-	spin_lock_irqsave(&bfqd->lock, flags);
 	if (likely(rq->rq_flags & RQF_STARTED)) {
+		unsigned long flags;
+
+		spin_lock_irqsave(&bfqd->lock, flags);
+
 		if (rq == bfqd->waited_rq)
 			bfq_update_inject_limit(bfqd, bfqq);
 
 		bfq_completed_request(bfqq, bfqd);
+		bfq_finish_requeue_request_body(bfqq);
+
+		spin_unlock_irqrestore(&bfqd->lock, flags);
+	} else {
+		/*
+		 * Request rq may be still/already in the scheduler,
+		 * in which case we need to remove it (this should
+		 * never happen in case of requeue). And we cannot
+		 * defer such a check and removal, to avoid
+		 * inconsistencies in the time interval from the end
+		 * of this function to the start of the deferred work.
+		 * This situation seems to occur only in process
+		 * context, as a consequence of a merge. In the
+		 * current version of the code, this implies that the
+		 * lock is held.
+		 */
+
+		if (!RB_EMPTY_NODE(&rq->rb_node)) {
+			bfq_remove_request(rq->q, rq);
+			bfqg_stats_update_io_remove(bfqq_group(bfqq),
+						    rq->cmd_flags);
+		}
+		bfq_finish_requeue_request_body(bfqq);
 	}
-	bfq_finish_requeue_request_body(bfqq);
-	spin_unlock_irqrestore(&bfqd->lock, flags);
 
 	/*
 	 * Reset private fields. In case of a requeue, this allows
@@ -6942,11 +6944,9 @@ static void bfq_init_root_group(struct bfq_group *root_group,
 	root_group->bfqd = bfqd;
 #endif
 	root_group->rq_pos_tree = RB_ROOT;
-	for (i = 0; i < BFQ_IOPRIO_CLASSES; i++) {
+	for (i = 0; i < BFQ_IOPRIO_CLASSES; i++)
 		root_group->sched_data.service_tree[i] = BFQ_SERVICE_TREE_INIT;
-		root_group->sched_data.bfq_class_last_service[i] = jiffies;
-	}
-	root_group->sched_data.class_timeout_last_check = jiffies;
+	root_group->sched_data.bfq_class_idle_last_service = jiffies;
 }
 
 static int bfq_init_queue(struct request_queue *q, struct elevator_type *e)
