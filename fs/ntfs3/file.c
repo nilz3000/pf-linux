@@ -793,8 +793,6 @@ out:
 
 static ssize_t ntfs_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 {
-	ssize_t err;
-	size_t count = iov_iter_count(iter);
 	struct file *file = iocb->ki_filp;
 	struct inode *inode = file->f_mapping->host;
 	struct ntfs_inode *ni = ntfs_i(inode);
@@ -823,9 +821,7 @@ static ssize_t ntfs_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 		return -EOPNOTSUPP;
 	}
 
-	err = count ? generic_file_read_iter(iocb, iter) : 0;
-
-	return err;
+	return generic_file_read_iter(iocb, iter);
 }
 
 /*
@@ -1212,8 +1208,9 @@ int ntfs_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 	int err;
 	struct ntfs_inode *ni = ntfs_i(inode);
 
-	if (fieinfo->fi_flags & FIEMAP_FLAG_XATTR)
-		return -EOPNOTSUPP;
+	err = fiemap_prep(inode, fieinfo, start, &len, ~FIEMAP_FLAG_XATTR);
+	if (err)
+		return err;
 
 	ni_lock(ni);
 
