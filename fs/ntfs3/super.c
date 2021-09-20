@@ -840,8 +840,7 @@ static int ntfs_init_from_boot(struct super_block *sb, u32 sector_size,
 	rec->total = cpu_to_le32(sbi->record_size);
 	((struct ATTRIB *)Add2Ptr(rec, ao))->type = ATTR_END;
 
-	if (sbi->cluster_size < PAGE_SIZE)
-		sb_set_blocksize(sb, sbi->cluster_size);
+	sb_set_blocksize(sb, min_t(u32, sbi->cluster_size, PAGE_SIZE));
 
 	sbi->block_mask = sb->s_blocksize - 1;
 	sbi->blocks_per_cluster = sbi->cluster_size >> sb->s_blocksize_bits;
@@ -854,9 +853,11 @@ static int ntfs_init_from_boot(struct super_block *sb, u32 sector_size,
 	if (clusters >= (1ull << (64 - sbi->cluster_bits)))
 		sbi->maxbytes = -1;
 	sbi->maxbytes_sparse = -1;
+	sb->s_maxbytes = MAX_LFS_FILESIZE;
 #else
 	/* Maximum size for sparse file. */
 	sbi->maxbytes_sparse = (1ull << (sbi->cluster_bits + 32)) - 1;
+	sb->s_maxbytes = 0xFFFFFFFFull << sbi->cluster_bits;
 #endif
 
 	err = 0;
@@ -875,9 +876,8 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	int err;
 	struct ntfs_sb_info *sbi = sb->s_fs_info;
 	struct block_device *bdev = sb->s_bdev;
-	struct inode *bd_inode = bdev->bd_inode;
-	struct request_queue *rq = bdev_get_queue(bdev);
-	struct inode *inode = NULL;
+	struct request_queue *rq;
+	struct inode *inode;
 	struct ntfs_inode *ni;
 	size_t i, tt;
 	CLST vcn, lcn, len;
@@ -885,9 +885,7 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	const struct VOLUME_INFO *info;
 	u32 idx, done, bytes;
 	struct ATTR_DEF_ENTRY *t;
-	u16 *upcase;
 	u16 *shared;
-	bool is_ro;
 	struct MFT_REF ref;
 
 	ref.high = 0;
@@ -907,27 +905,18 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		return -EINVAL;
 	}
 
-	if (!rq || !blk_queue_discard(rq) || !rq->limits.discard_granularity) {
-		;
-	} else {
+	rq = bdev_get_queue(bdev);
+	if (blk_queue_discard(rq) && rq->limits.discard_granularity) {
 		sbi->discard_granularity = rq->limits.discard_granularity;
 		sbi->discard_granularity_mask_inv =
 			~(u64)(sbi->discard_granularity - 1);
 	}
 
-	sb_set_blocksize(sb, PAGE_SIZE);
-
 	/* Parse boot. */
 	err = ntfs_init_from_boot(sb, rq ? queue_logical_block_size(rq) : 512,
-				  bd_inode->i_size);
+				  bdev->bd_inode->i_size);
 	if (err)
-		goto out;
-
-#ifdef CONFIG_NTFS3_64BIT_CLUSTER
-	sb->s_maxbytes = MAX_LFS_FILESIZE;
-#else
-	sb->s_maxbytes = 0xFFFFFFFFull << sbi->cluster_bits;
-#endif
+		return err;
 
 	/*
 	 * Load $Volume. This should be done before $LogFile
@@ -937,10 +926,8 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	ref.seq = cpu_to_le16(MFT_REC_VOL);
 	inode = ntfs_iget5(sb, &ref, &NAME_VOLUME);
 	if (IS_ERR(inode)) {
-		err = PTR_ERR(inode);
 		ntfs_err(sb, "Failed to load $Volume.");
-		inode = NULL;
-		goto out;
+		return PTR_ERR(inode);
 	}
 
 	ni = ntfs_i(inode);
@@ -979,19 +966,15 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	sbi->volume.major_ver = info->major_ver;
 	sbi->volume.minor_ver = info->minor_ver;
 	sbi->volume.flags = info->flags;
-
 	sbi->volume.ni = ni;
-	inode = NULL;
 
 	/* Load $MFTMirr to estimate recs_mirr. */
 	ref.low = cpu_to_le32(MFT_REC_MIRR);
 	ref.seq = cpu_to_le16(MFT_REC_MIRR);
 	inode = ntfs_iget5(sb, &ref, &NAME_MIRROR);
 	if (IS_ERR(inode)) {
-		err = PTR_ERR(inode);
 		ntfs_err(sb, "Failed to load $MFTMirr.");
-		inode = NULL;
-		goto out;
+		return PTR_ERR(inode);
 	}
 
 	sbi->mft.recs_mirr =
@@ -1004,10 +987,8 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	ref.seq = cpu_to_le16(MFT_REC_LOG);
 	inode = ntfs_iget5(sb, &ref, &NAME_LOGFILE);
 	if (IS_ERR(inode)) {
-		err = PTR_ERR(inode);
 		ntfs_err(sb, "Failed to load \x24LogFile.");
-		inode = NULL;
-		goto out;
+		return PTR_ERR(inode);
 	}
 
 	ni = ntfs_i(inode);
@@ -1017,24 +998,19 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto out;
 
 	iput(inode);
-	inode = NULL;
-
-	is_ro = sb_rdonly(sbi->sb);
 
 	if (sbi->flags & NTFS_FLAGS_NEED_REPLAY) {
-		if (!is_ro) {
+		if (!sb_rdonly(sb)) {
 			ntfs_warn(sb,
 				  "failed to replay log file. Can't mount rw!");
-			err = -EINVAL;
-			goto out;
+			return -EINVAL;
 		}
 	} else if (sbi->volume.flags & VOLUME_FLAG_DIRTY) {
-		if (!is_ro && !sbi->options->force) {
+		if (!sb_rdonly(sb) && !sbi->options->force) {
 			ntfs_warn(
 				sb,
 				"volume is dirty and \"force\" flag is not set!");
-			err = -EINVAL;
-			goto out;
+			return -EINVAL;
 		}
 	}
 
@@ -1044,10 +1020,8 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 
 	inode = ntfs_iget5(sb, &ref, &NAME_MFT);
 	if (IS_ERR(inode)) {
-		err = PTR_ERR(inode);
 		ntfs_err(sb, "Failed to load $MFT.");
-		inode = NULL;
-		goto out;
+		return PTR_ERR(inode);
 	}
 
 	ni = ntfs_i(inode);
@@ -1071,10 +1045,8 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	ref.seq = cpu_to_le16(MFT_REC_BADCLUST);
 	inode = ntfs_iget5(sb, &ref, &NAME_BADCLUS);
 	if (IS_ERR(inode)) {
-		err = PTR_ERR(inode);
 		ntfs_err(sb, "Failed to load $BadClus.");
-		inode = NULL;
-		goto out;
+		return PTR_ERR(inode);
 	}
 
 	ni = ntfs_i(inode);
@@ -1096,13 +1068,9 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	ref.seq = cpu_to_le16(MFT_REC_BITMAP);
 	inode = ntfs_iget5(sb, &ref, &NAME_BITMAP);
 	if (IS_ERR(inode)) {
-		err = PTR_ERR(inode);
 		ntfs_err(sb, "Failed to load $Bitmap.");
-		inode = NULL;
-		goto out;
+		return PTR_ERR(inode);
 	}
-
-	ni = ntfs_i(inode);
 
 #ifndef CONFIG_NTFS3_64BIT_CLUSTER
 	if (inode->i_size >> 32) {
@@ -1120,7 +1088,7 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 
 	/* Not necessary. */
 	sbi->used.bitmap.set_tail = true;
-	err = wnd_init(&sbi->used.bitmap, sbi->sb, tt);
+	err = wnd_init(&sbi->used.bitmap, sb, tt);
 	if (err)
 		goto out;
 
@@ -1129,17 +1097,15 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	/* Compute the MFT zone. */
 	err = ntfs_refresh_zone(sbi);
 	if (err)
-		goto out;
+		return err;
 
 	/* Load $AttrDef. */
 	ref.low = cpu_to_le32(MFT_REC_ATTR);
 	ref.seq = cpu_to_le16(MFT_REC_ATTR);
-	inode = ntfs_iget5(sbi->sb, &ref, &NAME_ATTRDEF);
+	inode = ntfs_iget5(sb, &ref, &NAME_ATTRDEF);
 	if (IS_ERR(inode)) {
-		err = PTR_ERR(inode);
 		ntfs_err(sb, "Failed to load $AttrDef -> %d", err);
-		inode = NULL;
-		goto out;
+		return PTR_ERR(inode);
 	}
 
 	if (inode->i_size < sizeof(struct ATTR_DEF_ENTRY)) {
@@ -1200,24 +1166,18 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	ref.seq = cpu_to_le16(MFT_REC_UPCASE);
 	inode = ntfs_iget5(sb, &ref, &NAME_UPCASE);
 	if (IS_ERR(inode)) {
-		err = PTR_ERR(inode);
-		ntfs_err(sb, "Failed to load \x24LogFile.");
-		inode = NULL;
-		goto out;
+		ntfs_err(sb, "Failed to load $UpCase.");
+		return PTR_ERR(inode);
 	}
-
-	ni = ntfs_i(inode);
 
 	if (inode->i_size != 0x10000 * sizeof(short)) {
 		err = -EINVAL;
 		goto out;
 	}
 
-	upcase = sbi->upcase;
-
 	for (idx = 0; idx < (0x10000 * sizeof(short) >> PAGE_SHIFT); idx++) {
 		const __le16 *src;
-		u16 *dst = Add2Ptr(upcase, idx << PAGE_SHIFT);
+		u16 *dst = Add2Ptr(sbi->upcase, idx << PAGE_SHIFT);
 		struct page *page = ntfs_map_page(inode->i_mapping, idx);
 
 		if (IS_ERR(page)) {
@@ -1236,20 +1196,19 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		ntfs_unmap_page(page);
 	}
 
-	shared = ntfs_set_shared(upcase, 0x10000 * sizeof(short));
-	if (shared && upcase != shared) {
+	shared = ntfs_set_shared(sbi->upcase, 0x10000 * sizeof(short));
+	if (shared && sbi->upcase != shared) {
+		kvfree(sbi->upcase);
 		sbi->upcase = shared;
-		kvfree(upcase);
 	}
 
 	iput(inode);
-	inode = NULL;
 
 	if (is_ntfs3(sbi)) {
 		/* Load $Secure. */
 		err = ntfs_security_init(sbi);
 		if (err)
-			goto out;
+			return err;
 
 		/* Load $Extend. */
 		err = ntfs_extend_init(sbi);
@@ -1273,34 +1232,20 @@ load_root:
 	ref.seq = cpu_to_le16(MFT_REC_ROOT);
 	inode = ntfs_iget5(sb, &ref, &NAME_ROOT);
 	if (IS_ERR(inode)) {
-		err = PTR_ERR(inode);
 		ntfs_err(sb, "Failed to load root.");
-		inode = NULL;
-		goto out;
+		return PTR_ERR(inode);
 	}
-
-	ni = ntfs_i(inode);
 
 	sb->s_root = d_make_root(inode);
-
-	if (!sb->s_root) {
-		err = -EINVAL;
-		goto out;
-	}
+	if (!sb->s_root)
+		return -ENOMEM;
 
 	fc->fs_private = NULL;
 	fc->s_fs_info = NULL;
 
 	return 0;
-
 out:
 	iput(inode);
-
-	if (sb->s_root) {
-		d_drop(sb->s_root);
-		sb->s_root = NULL;
-	}
-
 	return err;
 }
 
@@ -1448,10 +1393,10 @@ ok:
 	fc->ops = &ntfs_context_ops;
 
 	return 0;
-free_opts:
-	kfree(opts);
 free_sbi:
 	kfree(sbi);
+free_opts:
+	kfree(opts);
 	return -ENOMEM;
 }
 
