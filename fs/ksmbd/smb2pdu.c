@@ -2393,10 +2393,6 @@ static int smb2_create_sd_buffer(struct ksmbd_work *work,
 	ksmbd_debug(SMB,
 		    "Set ACLs using SMB2_CREATE_SD_BUFFER context\n");
 	sd_buf = (struct create_sd_buf_req *)context;
-	if (le16_to_cpu(context->DataOffset) +
-	    le32_to_cpu(context->DataLength) <
-	    sizeof(struct create_sd_buf_req))
-		return -EINVAL;
 	return set_info_sec(work->conn, work->tcon, path, &sd_buf->ntsd,
 			    le32_to_cpu(sd_buf->ccontext.DataLength), true);
 }
@@ -2597,12 +2593,6 @@ int smb2_open(struct ksmbd_work *work)
 			goto err_out1;
 		} else if (context) {
 			ea_buf = (struct create_ea_buf_req *)context;
-			if (le16_to_cpu(context->DataOffset) +
-			    le32_to_cpu(context->DataLength) <
-			    sizeof(struct create_ea_buf_req)) {
-				rc = -EINVAL;
-				goto err_out1;
-			}
 			if (req->CreateOptions & FILE_NO_EA_KNOWLEDGE_LE) {
 				rsp->hdr.Status = STATUS_ACCESS_DENIED;
 				rc = -EACCES;
@@ -2641,12 +2631,6 @@ int smb2_open(struct ksmbd_work *work)
 			} else if (context) {
 				struct create_posix *posix =
 					(struct create_posix *)context;
-				if (le16_to_cpu(context->DataOffset) +
-				    le32_to_cpu(context->DataLength) <
-				    sizeof(struct create_posix)) {
-					rc = -EINVAL;
-					goto err_out1;
-				}
 				ksmbd_debug(SMB, "get posix context\n");
 
 				posix_mode = le32_to_cpu(posix->Mode);
@@ -3034,16 +3018,9 @@ int smb2_open(struct ksmbd_work *work)
 			rc = PTR_ERR(az_req);
 			goto err_out;
 		} else if (az_req) {
-			loff_t alloc_size;
+			loff_t alloc_size = le64_to_cpu(az_req->AllocationSize);
 			int err;
 
-			if (le16_to_cpu(az_req->ccontext.DataOffset) +
-			    le32_to_cpu(az_req->ccontext.DataLength) <
-			    sizeof(struct create_alloc_size_req)) {
-				rc = -EINVAL;
-				goto err_out;
-			}
-			alloc_size = le64_to_cpu(az_req->AllocationSize);
 			ksmbd_debug(SMB,
 				    "request smb2 create allocate size : %llu\n",
 				    alloc_size);
@@ -7019,7 +6996,7 @@ static int fsctl_copychunk(struct ksmbd_work *work, struct smb2_ioctl_req *req,
 	unsigned int i, chunk_count, chunk_count_written = 0;
 	unsigned int chunk_size_written = 0;
 	loff_t total_size_written = 0;
-	int ret = 0, cnt_code;
+	int ret, cnt_code;
 
 	cnt_code = le32_to_cpu(req->CntCode);
 	ci_req = (struct copychunk_ioctl_req *)&req->Buffer[0];
@@ -7036,8 +7013,6 @@ static int fsctl_copychunk(struct ksmbd_work *work, struct smb2_ioctl_req *req,
 
 	chunks = (struct srv_copychunk *)&ci_req->Chunks[0];
 	chunk_count = le32_to_cpu(ci_req->ChunkCount);
-	if (chunk_count == 0)
-		goto out;
 	total_size_written = 0;
 
 	/* verify the SRV_COPYCHUNK_COPY packet */
@@ -7142,8 +7117,7 @@ static __be32 idev_ipv4_address(struct in_device *idev)
 
 static int fsctl_query_iface_info_ioctl(struct ksmbd_conn *conn,
 					struct smb2_ioctl_req *req,
-					struct smb2_ioctl_rsp *rsp,
-					int out_buf_len)
+					struct smb2_ioctl_rsp *rsp)
 {
 	struct network_interface_info_ioctl_rsp *nii_rsp = NULL;
 	int nbytes = 0;
@@ -7226,8 +7200,6 @@ static int fsctl_query_iface_info_ioctl(struct ksmbd_conn *conn,
 			sockaddr_storage->addr6.ScopeId = 0;
 		}
 
-		if (out_buf_len < sizeof(struct network_interface_info_ioctl_rsp))
-			break;
 		nbytes += sizeof(struct network_interface_info_ioctl_rsp);
 	}
 	rtnl_unlock();
@@ -7248,15 +7220,10 @@ static int fsctl_query_iface_info_ioctl(struct ksmbd_conn *conn,
 
 static int fsctl_validate_negotiate_info(struct ksmbd_conn *conn,
 					 struct validate_negotiate_info_req *neg_req,
-					 struct validate_negotiate_info_rsp *neg_rsp,
-					 int in_buf_len)
+					 struct validate_negotiate_info_rsp *neg_rsp)
 {
 	int ret = 0;
 	int dialect;
-
-	if (in_buf_len < sizeof(struct validate_negotiate_info_req) +
-			le16_to_cpu(neg_req->DialectCount) * sizeof(__le16))
-		return -EINVAL;
 
 	dialect = ksmbd_lookup_dialect_by_id(neg_req->Dialects,
 					     neg_req->DialectCount);
@@ -7433,7 +7400,7 @@ int smb2_ioctl(struct ksmbd_work *work)
 	struct smb2_ioctl_req *req;
 	struct smb2_ioctl_rsp *rsp, *rsp_org;
 	int cnt_code, nbytes = 0;
-	int out_buf_len, in_buf_len;
+	int out_buf_len;
 	u64 id = KSMBD_NO_FID;
 	struct ksmbd_conn *conn = work->conn;
 	int ret = 0;
@@ -7463,7 +7430,6 @@ int smb2_ioctl(struct ksmbd_work *work)
 	cnt_code = le32_to_cpu(req->CntCode);
 	out_buf_len = le32_to_cpu(req->MaxOutputResponse);
 	out_buf_len = min(KSMBD_IPC_MAX_PAYLOAD, out_buf_len);
-	in_buf_len = le32_to_cpu(req->InputCount);
 
 	switch (cnt_code) {
 	case FSCTL_DFS_GET_REFERRALS:
@@ -7499,16 +7465,9 @@ int smb2_ioctl(struct ksmbd_work *work)
 			goto out;
 		}
 
-		if (in_buf_len < sizeof(struct validate_negotiate_info_req))
-			return -EINVAL;
-
-		if (out_buf_len < sizeof(struct validate_negotiate_info_rsp))
-			return -EINVAL;
-
 		ret = fsctl_validate_negotiate_info(conn,
 			(struct validate_negotiate_info_req *)&req->Buffer[0],
-			(struct validate_negotiate_info_rsp *)&rsp->Buffer[0],
-			in_buf_len);
+			(struct validate_negotiate_info_rsp *)&rsp->Buffer[0]);
 		if (ret < 0)
 			goto out;
 
@@ -7517,8 +7476,7 @@ int smb2_ioctl(struct ksmbd_work *work)
 		rsp->VolatileFileId = cpu_to_le64(SMB2_NO_FID);
 		break;
 	case FSCTL_QUERY_NETWORK_INTERFACE_INFO:
-		nbytes = fsctl_query_iface_info_ioctl(conn, req, rsp,
-						      out_buf_len);
+		nbytes = fsctl_query_iface_info_ioctl(conn, req, rsp);
 		if (nbytes < 0)
 			goto out;
 		break;
@@ -7545,11 +7503,6 @@ int smb2_ioctl(struct ksmbd_work *work)
 			goto out;
 		}
 
-		if (in_buf_len < sizeof(struct copychunk_ioctl_req)) {
-			ret = -EINVAL;
-			goto out;
-		}
-
 		if (out_buf_len < sizeof(struct copychunk_ioctl_rsp)) {
 			ret = -EINVAL;
 			goto out;
@@ -7559,11 +7512,6 @@ int smb2_ioctl(struct ksmbd_work *work)
 		fsctl_copychunk(work, req, rsp);
 		break;
 	case FSCTL_SET_SPARSE:
-		if (in_buf_len < sizeof(struct file_sparse)) {
-			ret = -EINVAL;
-			goto out;
-		}
-
 		ret = fsctl_set_sparse(work, id,
 				       (struct file_sparse *)&req->Buffer[0]);
 		if (ret < 0)
@@ -7579,11 +7527,6 @@ int smb2_ioctl(struct ksmbd_work *work)
 			ksmbd_debug(SMB,
 				    "User does not have write permission\n");
 			ret = -EACCES;
-			goto out;
-		}
-
-		if (in_buf_len < sizeof(struct file_zero_data_information)) {
-			ret = -EINVAL;
 			goto out;
 		}
 
@@ -7606,11 +7549,6 @@ int smb2_ioctl(struct ksmbd_work *work)
 		break;
 	}
 	case FSCTL_QUERY_ALLOCATED_RANGES:
-		if (in_buf_len < sizeof(struct file_allocated_range_buffer)) {
-			ret = -EINVAL;
-			goto out;
-		}
-
 		ret = fsctl_query_allocated_ranges(work, id,
 			(struct file_allocated_range_buffer *)&req->Buffer[0],
 			(struct file_allocated_range_buffer *)&rsp->Buffer[0],
@@ -7650,11 +7588,6 @@ int smb2_ioctl(struct ksmbd_work *work)
 		struct ksmbd_file *fp_in, *fp_out = NULL;
 		struct duplicate_extents_to_file *dup_ext;
 		loff_t src_off, dst_off, length, cloned;
-
-		if (in_buf_len < sizeof(struct duplicate_extents_to_file)) {
-			ret = -EINVAL;
-			goto out;
-		}
 
 		dup_ext = (struct duplicate_extents_to_file *)&req->Buffer[0];
 
