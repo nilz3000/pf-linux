@@ -164,13 +164,9 @@ int ksmbd_vfs_create(struct ksmbd_work *work, const char *name, umode_t mode)
 {
 	struct path path;
 	struct dentry *dentry;
-	int err, lookup_flags = LOOKUP_NO_SYMLINKS;
+	int err;
 
-	if (test_share_config_flag(work->tcon->share_conf,
-				   KSMBD_SHARE_FLAG_FOLLOW_SYMLINKS))
-		lookup_flags = LOOKUP_FOLLOW;
-
-	dentry = kern_path_create(AT_FDCWD, name, &path, lookup_flags);
+	dentry = kern_path_create(AT_FDCWD, name, &path, 0);
 	if (IS_ERR(dentry)) {
 		err = PTR_ERR(dentry);
 		if (err != -ENOENT)
@@ -205,14 +201,9 @@ int ksmbd_vfs_mkdir(struct ksmbd_work *work, const char *name, umode_t mode)
 	struct user_namespace *user_ns;
 	struct path path;
 	struct dentry *dentry;
-	int err, lookup_flags = LOOKUP_NO_SYMLINKS;
+	int err;
 
-	if (test_share_config_flag(work->tcon->share_conf,
-				   KSMBD_SHARE_FLAG_FOLLOW_SYMLINKS))
-		lookup_flags = LOOKUP_FOLLOW;
-
-	dentry = kern_path_create(AT_FDCWD, name, &path,
-				  lookup_flags | LOOKUP_DIRECTORY);
+	dentry = kern_path_create(AT_FDCWD, name, &path, LOOKUP_DIRECTORY);
 	if (IS_ERR(dentry)) {
 		err = PTR_ERR(dentry);
 		if (err != -EEXIST)
@@ -597,7 +588,7 @@ int ksmbd_vfs_remove_file(struct ksmbd_work *work, char *name)
 	struct path path;
 	struct dentry *parent;
 	int err;
-	int flags = LOOKUP_NO_SYMLINKS;
+	int flags = 0;
 
 	if (ksmbd_override_fsids(work))
 		return -ENOMEM;
@@ -661,7 +652,7 @@ int ksmbd_vfs_link(struct ksmbd_work *work, const char *oldname,
 	struct path oldpath, newpath;
 	struct dentry *dentry;
 	int err;
-	int flags = LOOKUP_NO_SYMLINKS;
+	int flags = 0;
 
 	if (ksmbd_override_fsids(work))
 		return -ENOMEM;
@@ -797,7 +788,7 @@ int ksmbd_vfs_fp_rename(struct ksmbd_work *work, struct ksmbd_file *fp,
 	struct dentry *src_dent, *trap_dent, *src_child;
 	char *dst_name;
 	int err;
-	int flags = LOOKUP_NO_SYMLINKS;
+	int flags;
 
 	dst_name = extract_last_component(newname);
 	if (!dst_name)
@@ -809,8 +800,7 @@ int ksmbd_vfs_fp_rename(struct ksmbd_work *work, struct ksmbd_file *fp,
 	flags = LOOKUP_DIRECTORY;
 	if (test_share_config_flag(work->tcon->share_conf,
 				   KSMBD_SHARE_FLAG_FOLLOW_SYMLINKS))
-		flags = LOOKUP_FOLLOW;
-	flags |= LOOKUP_DIRECTORY;
+		flags |= LOOKUP_FOLLOW;
 
 	err = kern_path(newname, flags, &dst_path);
 	if (err) {
@@ -871,13 +861,7 @@ int ksmbd_vfs_truncate(struct ksmbd_work *work, const char *name,
 	int err = 0;
 
 	if (name) {
-		int flags = LOOKUP_NO_SYMLINKS;
-
-		if (test_share_config_flag(work->tcon->share_conf,
-					   KSMBD_SHARE_FLAG_FOLLOW_SYMLINKS))
-			flags = LOOKUP_FOLLOW;
-
-		err = kern_path(name, flags, &path);
+		err = kern_path(name, 0, &path);
 		if (err) {
 			pr_err("cannot get linux path for %s, err %d\n",
 			       name, err);
