@@ -433,7 +433,7 @@ static void init_chained_smb2_rsp(struct ksmbd_work *work)
 		work->compound_pfid = KSMBD_NO_FID;
 	}
 	memset((char *)rsp_hdr + 4, 0, sizeof(struct smb2_hdr) + 2);
-	rsp_hdr->ProtocolId = rcv_hdr->ProtocolId;
+	rsp_hdr->ProtocolId = SMB2_PROTO_NUMBER;
 	rsp_hdr->StructureSize = SMB2_HEADER_STRUCTURE_SIZE;
 	rsp_hdr->Command = rcv_hdr->Command;
 
@@ -466,13 +466,6 @@ bool is_chained_smb2_message(struct ksmbd_work *work)
 
 	hdr = ksmbd_req_buf_next(work);
 	if (le32_to_cpu(hdr->NextCommand) > 0) {
-		if ((u64)work->next_smb2_rcv_hdr_off + le32_to_cpu(hdr->NextCommand) >
-		    get_rfc1002_len(work->request_buf)) {
-			pr_err("next command(%u) offset exceeds smb msg size\n",
-			       hdr->NextCommand);
-			return false;
-		}
-
 		ksmbd_debug(SMB, "got SMB2 chained command\n");
 		init_chained_smb2_rsp(work);
 		return true;
@@ -2114,22 +2107,16 @@ out:
  * smb2_set_ea() - handler for setting extended attributes using set
  *		info command
  * @eabuf:	set info command buffer
- * @buf_len:	set info command buffer length
  * @path:	dentry path for get ea
  *
  * Return:	0 on success, otherwise error
  */
-static int smb2_set_ea(struct smb2_ea_info *eabuf, unsigned int buf_len,
-		       struct path *path)
+static int smb2_set_ea(struct smb2_ea_info *eabuf, struct path *path)
 {
 	struct user_namespace *user_ns = mnt_user_ns(path->mnt);
 	char *attr_name = NULL, *value;
 	int rc = 0;
 	int next = 0;
-
-	if (buf_len < sizeof(struct smb2_ea_info) + eabuf->EaNameLength +
-			le16_to_cpu(eabuf->EaValueLength))
-		return -EINVAL;
 
 	attr_name = kmalloc(XATTR_NAME_MAX + 1, GFP_KERNEL);
 	if (!attr_name)
@@ -2194,13 +2181,7 @@ static int smb2_set_ea(struct smb2_ea_info *eabuf, unsigned int buf_len,
 
 next:
 		next = le32_to_cpu(eabuf->NextEntryOffset);
-		if (next == 0 || buf_len < next)
-			break;
-		buf_len -= next;
 		eabuf = (struct smb2_ea_info *)((char *)eabuf + next);
-		if (next < eabuf->EaNameLength + le16_to_cpu(eabuf->EaValueLength))
-			break;
-
 	} while (next != 0);
 
 	kfree(attr_name);
@@ -2790,9 +2771,7 @@ int smb2_open(struct ksmbd_work *work)
 		created = true;
 		user_ns = mnt_user_ns(path.mnt);
 		if (ea_buf) {
-			rc = smb2_set_ea(&ea_buf->ea,
-					 le32_to_cpu(ea_buf->ccontext.DataLength),
-					 &path);
+			rc = smb2_set_ea(&ea_buf->ea, &path);
 			if (rc == -EOPNOTSUPP)
 				rc = 0;
 			else if (rc)
@@ -5375,17 +5354,13 @@ out:
 static int smb2_create_link(struct ksmbd_work *work,
 			    struct ksmbd_share_config *share,
 			    struct smb2_file_link_info *file_info,
-			    int buf_len, struct file *filp,
+			    struct file *filp,
 			    struct nls_table *local_nls)
 {
 	char *link_name = NULL, *target_name = NULL, *pathname = NULL;
 	struct path path;
 	bool file_present = true;
 	int rc;
-
-	if (buf_len < sizeof(struct smb2_file_link_info) +
-			le32_to_cpu(file_info->FileNameLength))
-		return -EINVAL;
 
 	ksmbd_debug(SMB, "setting FILE_LINK_INFORMATION\n");
 	pathname = kmalloc(PATH_MAX, GFP_KERNEL);
@@ -5443,10 +5418,10 @@ out:
 	return rc;
 }
 
-static int set_file_basic_info(struct ksmbd_file *fp,
-			       struct smb2_file_basic_info *file_info,
+static int set_file_basic_info(struct ksmbd_file *fp, char *buf,
 			       struct ksmbd_share_config *share)
 {
+	struct smb2_file_all_info *file_info;
 	struct iattr attrs;
 	struct timespec64 ctime;
 	struct file *filp;
@@ -5457,6 +5432,7 @@ static int set_file_basic_info(struct ksmbd_file *fp,
 	if (!(fp->daccess & FILE_WRITE_ATTRIBUTES_LE))
 		return -EACCES;
 
+	file_info = (struct smb2_file_all_info *)buf;
 	attrs.ia_valid = 0;
 	filp = fp->filp;
 	inode = file_inode(filp);
@@ -5533,8 +5509,7 @@ static int set_file_basic_info(struct ksmbd_file *fp,
 }
 
 static int set_file_allocation_info(struct ksmbd_work *work,
-				    struct ksmbd_file *fp,
-				    struct smb2_file_alloc_info *file_alloc_info)
+				    struct ksmbd_file *fp, char *buf)
 {
 	/*
 	 * TODO : It's working fine only when store dos attributes
@@ -5542,6 +5517,7 @@ static int set_file_allocation_info(struct ksmbd_work *work,
 	 * properly with any smb.conf option
 	 */
 
+	struct smb2_file_alloc_info *file_alloc_info;
 	loff_t alloc_blks;
 	struct inode *inode;
 	int rc;
@@ -5549,6 +5525,7 @@ static int set_file_allocation_info(struct ksmbd_work *work,
 	if (!(fp->daccess & FILE_WRITE_DATA_LE))
 		return -EACCES;
 
+	file_alloc_info = (struct smb2_file_alloc_info *)buf;
 	alloc_blks = (le64_to_cpu(file_alloc_info->AllocationSize) + 511) >> 9;
 	inode = file_inode(fp->filp);
 
@@ -5584,8 +5561,9 @@ static int set_file_allocation_info(struct ksmbd_work *work,
 }
 
 static int set_end_of_file_info(struct ksmbd_work *work, struct ksmbd_file *fp,
-				struct smb2_file_eof_info *file_eof_info)
+				char *buf)
 {
+	struct smb2_file_eof_info *file_eof_info;
 	loff_t newsize;
 	struct inode *inode;
 	int rc;
@@ -5593,6 +5571,7 @@ static int set_end_of_file_info(struct ksmbd_work *work, struct ksmbd_file *fp,
 	if (!(fp->daccess & FILE_WRITE_DATA_LE))
 		return -EACCES;
 
+	file_eof_info = (struct smb2_file_eof_info *)buf;
 	newsize = le64_to_cpu(file_eof_info->EndOfFile);
 	inode = file_inode(fp->filp);
 
@@ -5619,8 +5598,7 @@ static int set_end_of_file_info(struct ksmbd_work *work, struct ksmbd_file *fp,
 }
 
 static int set_rename_info(struct ksmbd_work *work, struct ksmbd_file *fp,
-			   struct smb2_file_rename_info *rename_info,
-			   int buf_len)
+			   char *buf)
 {
 	struct user_namespace *user_ns;
 	struct ksmbd_file *parent_fp;
@@ -5632,10 +5610,6 @@ static int set_rename_info(struct ksmbd_work *work, struct ksmbd_file *fp,
 		pr_err("no right to delete : 0x%x\n", fp->daccess);
 		return -EACCES;
 	}
-
-	if (buf_len < sizeof(struct smb2_file_rename_info) +
-			le32_to_cpu(rename_info->FileNameLength))
-		return -EINVAL;
 
 	user_ns = file_mnt_user_ns(fp->filp);
 	if (ksmbd_stream_fd(fp))
@@ -5659,13 +5633,14 @@ static int set_rename_info(struct ksmbd_work *work, struct ksmbd_file *fp,
 		}
 	}
 next:
-	return smb2_rename(work, fp, user_ns, rename_info,
+	return smb2_rename(work, fp, user_ns,
+			   (struct smb2_file_rename_info *)buf,
 			   work->sess->conn->local_nls);
 }
 
-static int set_file_disposition_info(struct ksmbd_file *fp,
-				     struct smb2_file_disposition_info *file_info)
+static int set_file_disposition_info(struct ksmbd_file *fp, char *buf)
 {
+	struct smb2_file_disposition_info *file_info;
 	struct inode *inode;
 
 	if (!(fp->daccess & FILE_DELETE_LE)) {
@@ -5674,6 +5649,7 @@ static int set_file_disposition_info(struct ksmbd_file *fp,
 	}
 
 	inode = file_inode(fp->filp);
+	file_info = (struct smb2_file_disposition_info *)buf;
 	if (file_info->DeletePending) {
 		if (S_ISDIR(inode->i_mode) &&
 		    ksmbd_vfs_empty_dir(fp) == -ENOTEMPTY)
@@ -5685,14 +5661,15 @@ static int set_file_disposition_info(struct ksmbd_file *fp,
 	return 0;
 }
 
-static int set_file_position_info(struct ksmbd_file *fp,
-				  struct smb2_file_pos_info *file_info)
+static int set_file_position_info(struct ksmbd_file *fp, char *buf)
 {
+	struct smb2_file_pos_info *file_info;
 	loff_t current_byte_offset;
 	unsigned long sector_size;
 	struct inode *inode;
 
 	inode = file_inode(fp->filp);
+	file_info = (struct smb2_file_pos_info *)buf;
 	current_byte_offset = le64_to_cpu(file_info->CurrentByteOffset);
 	sector_size = inode->i_sb->s_blocksize;
 
@@ -5708,11 +5685,12 @@ static int set_file_position_info(struct ksmbd_file *fp,
 	return 0;
 }
 
-static int set_file_mode_info(struct ksmbd_file *fp,
-			      struct smb2_file_mode_info *file_info)
+static int set_file_mode_info(struct ksmbd_file *fp, char *buf)
 {
+	struct smb2_file_mode_info *file_info;
 	__le32 mode;
 
+	file_info = (struct smb2_file_mode_info *)buf;
 	mode = file_info->Mode;
 
 	if ((mode & ~FILE_MODE_INFO_MASK) ||
@@ -5742,74 +5720,40 @@ static int set_file_mode_info(struct ksmbd_file *fp,
  * TODO: need to implement an error handling for STATUS_INFO_LENGTH_MISMATCH
  */
 static int smb2_set_info_file(struct ksmbd_work *work, struct ksmbd_file *fp,
-			      struct smb2_set_info_req *req,
+			      int info_class, char *buf,
 			      struct ksmbd_share_config *share)
 {
-	int buf_len = le32_to_cpu(req->BufferLength);
-
-	switch (req->FileInfoClass) {
+	switch (info_class) {
 	case FILE_BASIC_INFORMATION:
-	{
-		if (buf_len < sizeof(struct smb2_file_basic_info))
-			return -EINVAL;
+		return set_file_basic_info(fp, buf, share);
 
-		return set_file_basic_info(fp, (struct smb2_file_basic_info *)req->Buffer, share);
-	}
 	case FILE_ALLOCATION_INFORMATION:
-	{
-		if (buf_len < sizeof(struct smb2_file_alloc_info))
-			return -EINVAL;
+		return set_file_allocation_info(work, fp, buf);
 
-		return set_file_allocation_info(work, fp,
-						(struct smb2_file_alloc_info *)req->Buffer);
-	}
 	case FILE_END_OF_FILE_INFORMATION:
-	{
-		if (buf_len < sizeof(struct smb2_file_eof_info))
-			return -EINVAL;
+		return set_end_of_file_info(work, fp, buf);
 
-		return set_end_of_file_info(work, fp,
-					    (struct smb2_file_eof_info *)req->Buffer);
-	}
 	case FILE_RENAME_INFORMATION:
-	{
 		if (!test_tree_conn_flag(work->tcon, KSMBD_TREE_CONN_FLAG_WRITABLE)) {
 			ksmbd_debug(SMB,
 				    "User does not have write permission\n");
 			return -EACCES;
 		}
+		return set_rename_info(work, fp, buf);
 
-		if (buf_len < sizeof(struct smb2_file_rename_info))
-			return -EINVAL;
-
-		return set_rename_info(work, fp,
-				       (struct smb2_file_rename_info *)req->Buffer,
-				       buf_len);
-	}
 	case FILE_LINK_INFORMATION:
-	{
-		if (buf_len < sizeof(struct smb2_file_link_info))
-			return -EINVAL;
-
 		return smb2_create_link(work, work->tcon->share_conf,
-					(struct smb2_file_link_info *)req->Buffer,
-					buf_len, fp->filp,
+					(struct smb2_file_link_info *)buf, fp->filp,
 					work->sess->conn->local_nls);
-	}
+
 	case FILE_DISPOSITION_INFORMATION:
-	{
 		if (!test_tree_conn_flag(work->tcon, KSMBD_TREE_CONN_FLAG_WRITABLE)) {
 			ksmbd_debug(SMB,
 				    "User does not have write permission\n");
 			return -EACCES;
 		}
+		return set_file_disposition_info(fp, buf);
 
-		if (buf_len < sizeof(struct smb2_file_disposition_info))
-			return -EINVAL;
-
-		return set_file_disposition_info(fp,
-						 (struct smb2_file_disposition_info *)req->Buffer);
-	}
 	case FILE_FULL_EA_INFORMATION:
 	{
 		if (!(fp->daccess & FILE_WRITE_EA_LE)) {
@@ -5818,29 +5762,18 @@ static int smb2_set_info_file(struct ksmbd_work *work, struct ksmbd_file *fp,
 			return -EACCES;
 		}
 
-		if (buf_len < sizeof(struct smb2_ea_info))
-			return -EINVAL;
-
-		return smb2_set_ea((struct smb2_ea_info *)req->Buffer,
-				   buf_len, &fp->filp->f_path);
+		return smb2_set_ea((struct smb2_ea_info *)buf,
+				   &fp->filp->f_path);
 	}
+
 	case FILE_POSITION_INFORMATION:
-	{
-		if (buf_len < sizeof(struct smb2_file_pos_info))
-			return -EINVAL;
+		return set_file_position_info(fp, buf);
 
-		return set_file_position_info(fp, (struct smb2_file_pos_info *)req->Buffer);
-	}
 	case FILE_MODE_INFORMATION:
-	{
-		if (buf_len < sizeof(struct smb2_file_mode_info))
-			return -EINVAL;
-
-		return set_file_mode_info(fp, (struct smb2_file_mode_info *)req->Buffer);
-	}
+		return set_file_mode_info(fp, buf);
 	}
 
-	pr_err("Unimplemented Fileinfoclass :%d\n", req->FileInfoClass);
+	pr_err("Unimplemented Fileinfoclass :%d\n", info_class);
 	return -EOPNOTSUPP;
 }
 
@@ -5901,7 +5834,8 @@ int smb2_set_info(struct ksmbd_work *work)
 	switch (req->InfoType) {
 	case SMB2_O_INFO_FILE:
 		ksmbd_debug(SMB, "GOT SMB2_O_INFO_FILE\n");
-		rc = smb2_set_info_file(work, fp, req, work->tcon->share_conf);
+		rc = smb2_set_info_file(work, fp, req->FileInfoClass,
+					req->Buffer, work->tcon->share_conf);
 		break;
 	case SMB2_O_INFO_SECURITY:
 		ksmbd_debug(SMB, "GOT SMB2_O_INFO_SECURITY\n");
