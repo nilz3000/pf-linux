@@ -19,6 +19,8 @@
 #include <linux/sched/xacct.h>
 #include <linux/crc32c.h>
 
+#include "../internal.h"	/* for vfs_path_lookup */
+
 #include "glob.h"
 #include "oplock.h"
 #include "connection.h"
@@ -1213,33 +1215,48 @@ static int ksmbd_vfs_lookup_in_dir(struct path *dir, char *name, size_t namelen)
  *
  * Return:	0 on success, otherwise error
  */
-int ksmbd_vfs_kern_path(char *name, unsigned int flags, struct path *path,
-			bool caseless)
+int ksmbd_vfs_kern_path(struct ksmbd_work *work, char *name,
+			unsigned int flags, struct path *path, bool caseless)
 {
+	struct ksmbd_share_config *share_conf = work->tcon->share_conf;
+	char *filepath;
 	int err;
 
-	if (name[0] != '/')
+	/* name must start with the share path */
+	if (strlen(name) < share_conf->path_sz ||
+	    strncmp(name, share_conf->path, share_conf->path_sz) != 0)
 		return -EINVAL;
-
-	err = kern_path(name, flags, path);
-	if (!err)
+	else if (strlen(name) == share_conf->path_sz) {
+		*path = share_conf->vfs_path;
+		path_get(path);
 		return 0;
+	}
+
+	filepath = kstrdup(name + share_conf->path_sz + 1,
+			   GFP_KERNEL);
+	if (!filepath)
+		return -ENOMEM;
+
+	flags |= LOOKUP_BENEATH;
+	err = vfs_path_lookup(share_conf->vfs_path.dentry,
+			      share_conf->vfs_path.mnt,
+			      filepath,
+			      flags,
+			      path);
+	if (!err) {
+		kfree(filepath);
+		return 0;
+	}
 
 	if (caseless) {
-		char *filepath;
 		struct path parent;
 		size_t path_len, remain_len;
 
-		filepath = kstrdup(name, GFP_KERNEL);
-		if (!filepath)
-			return -ENOMEM;
-
 		path_len = strlen(filepath);
-		remain_len = path_len - 1;
+		remain_len = path_len;
 
-		err = kern_path("/", flags, &parent);
-		if (err)
-			goto out;
+		parent = share_conf->vfs_path;
+		path_get(&parent);
 
 		while (d_can_lookup(parent.dentry)) {
 			char *filename = filepath + path_len - remain_len;
@@ -1252,21 +1269,21 @@ int ksmbd_vfs_kern_path(char *name, unsigned int flags, struct path *path,
 
 			err = ksmbd_vfs_lookup_in_dir(&parent, filename,
 						      filename_len);
-			if (err) {
-				path_put(&parent);
-				goto out;
-			}
-
 			path_put(&parent);
-			next[0] = '\0';
-
-			err = kern_path(filepath, flags, &parent);
 			if (err)
 				goto out;
 
-			if (is_last) {
-				path->mnt = parent.mnt;
-				path->dentry = parent.dentry;
+			next[0] = '\0';
+
+			err = vfs_path_lookup(share_conf->vfs_path.dentry,
+					      share_conf->vfs_path.mnt,
+					      filepath,
+					      flags,
+					      &parent);
+			if (err)
+				goto out;
+			else if (is_last) {
+				*path = parent;
 				goto out;
 			}
 
@@ -1276,9 +1293,9 @@ int ksmbd_vfs_kern_path(char *name, unsigned int flags, struct path *path,
 
 		path_put(&parent);
 		err = -EINVAL;
-out:
-		kfree(filepath);
 	}
+out:
+	kfree(filepath);
 	return err;
 }
 
