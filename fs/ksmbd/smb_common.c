@@ -155,7 +155,20 @@ int ksmbd_verify_smb_message(struct ksmbd_work *work)
  */
 bool ksmbd_smb_request(struct ksmbd_conn *conn)
 {
-	return conn->request_buf[0] == 0;
+	int type = *(char *)conn->request_buf;
+
+	switch (type) {
+	case RFC1002_SESSION_MESSAGE:
+		/* Regular SMB request */
+		return true;
+	case RFC1002_SESSION_KEEP_ALIVE:
+		ksmbd_debug(SMB, "RFC 1002 session keep alive\n");
+		break;
+	default:
+		ksmbd_debug(SMB, "RFC 1002 unknown request type 0x%x\n", type);
+	}
+
+	return false;
 }
 
 static bool supported_protocol(int idx)
@@ -235,22 +248,13 @@ int ksmbd_lookup_dialect_by_id(__le16 *cli_dialects, __le16 dialects_count)
 
 static int ksmbd_negotiate_smb_dialect(void *buf)
 {
-	int smb_buf_length = get_rfc1002_len(buf);
-	__le32 proto = ((struct smb2_hdr *)buf)->ProtocolId;
+	__le32 proto;
 
+	proto = ((struct smb2_hdr *)buf)->ProtocolId;
 	if (proto == SMB2_PROTO_NUMBER) {
 		struct smb2_negotiate_req *req;
-		int smb2_neg_size =
-			offsetof(struct smb2_negotiate_req, Dialects) - 4;
 
 		req = (struct smb2_negotiate_req *)buf;
-		if (smb2_neg_size > smb_buf_length)
-			goto err_out;
-
-		if (smb2_neg_size + le16_to_cpu(req->DialectCount) * sizeof(__le16) >
-		    smb_buf_length)
-			goto err_out;
-
 		return ksmbd_lookup_dialect_by_id(req->Dialects,
 						  req->DialectCount);
 	}
@@ -260,19 +264,10 @@ static int ksmbd_negotiate_smb_dialect(void *buf)
 		struct smb_negotiate_req *req;
 
 		req = (struct smb_negotiate_req *)buf;
-		if (le16_to_cpu(req->ByteCount) < 2)
-			goto err_out;
-
-		if (offsetof(struct smb_negotiate_req, DialectsArray) - 4 +
-			le16_to_cpu(req->ByteCount) > smb_buf_length) {
-			goto err_out;
-		}
-
 		return ksmbd_lookup_dialect_by_name(req->DialectsArray,
 						    req->ByteCount);
 	}
 
-err_out:
 	return BAD_PROT_ID;
 }
 
@@ -292,8 +287,7 @@ int ksmbd_init_smb_server(struct ksmbd_work *work)
 
 bool ksmbd_pdu_size_has_room(unsigned int pdu)
 {
-	return (pdu >= KSMBD_MIN_SUPPORTED_HEADER_SIZE - 4 &&
-		pdu <= MAX_STREAM_PROT_LEN);
+	return (pdu >= KSMBD_MIN_SUPPORTED_HEADER_SIZE - 4);
 }
 
 int ksmbd_populate_dot_dotdot_entries(struct ksmbd_work *work, int info_level,
