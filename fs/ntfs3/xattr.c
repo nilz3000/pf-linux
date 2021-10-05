@@ -75,6 +75,7 @@ static int ntfs_read_ea(struct ntfs_inode *ni, struct EA_FULL **ea,
 			size_t add_bytes, const struct EA_INFO **info)
 {
 	int err;
+	struct ntfs_sb_info *sbi = ni->mi.sbi;
 	struct ATTR_LIST_ENTRY *le = NULL;
 	struct ATTRIB *attr_info, *attr_ea;
 	void *ea_p;
@@ -99,10 +100,10 @@ static int ntfs_read_ea(struct ntfs_inode *ni, struct EA_FULL **ea,
 
 	/* Check Ea limit. */
 	size = le32_to_cpu((*info)->size);
-	if (size > ni->mi.sbi->ea_max_size)
+	if (size > sbi->ea_max_size)
 		return -EFBIG;
 
-	if (attr_size(attr_ea) > ni->mi.sbi->ea_max_size)
+	if (attr_size(attr_ea) > sbi->ea_max_size)
 		return -EFBIG;
 
 	/* Allocate memory for packed Ea. */
@@ -110,15 +111,16 @@ static int ntfs_read_ea(struct ntfs_inode *ni, struct EA_FULL **ea,
 	if (!ea_p)
 		return -ENOMEM;
 
-	if (attr_ea->non_res) {
+	if (!size) {
+		;
+	} else if (attr_ea->non_res) {
 		struct runs_tree run;
 
 		run_init(&run);
 
 		err = attr_load_runs(attr_ea, ni, &run, NULL);
 		if (!err)
-			err = ntfs_read_run_nb(ni->mi.sbi, &run, 0, ea_p, size,
-					       NULL);
+			err = ntfs_read_run_nb(sbi, &run, 0, ea_p, size, NULL);
 		run_close(&run);
 
 		if (err)
@@ -257,7 +259,7 @@ out:
 
 static noinline int ntfs_set_ea(struct inode *inode, const char *name,
 				size_t name_len, const void *value,
-				size_t val_size, int flags, int locked)
+				size_t val_size, int flags)
 {
 	struct ntfs_inode *ni = ntfs_i(inode);
 	struct ntfs_sb_info *sbi = ni->mi.sbi;
@@ -276,8 +278,7 @@ static noinline int ntfs_set_ea(struct inode *inode, const char *name,
 	u64 new_sz;
 	void *p;
 
-	if (!locked)
-		ni_lock(ni);
+	ni_lock(ni);
 
 	run_init(&ea_run);
 
@@ -367,21 +368,22 @@ static noinline int ntfs_set_ea(struct inode *inode, const char *name,
 	new_ea->name[name_len] = 0;
 	memcpy(new_ea->name + name_len + 1, value, val_size);
 	new_pack = le16_to_cpu(ea_info.size_pack) + packed_ea_size(new_ea);
-
-	/* Should fit into 16 bits. */
-	if (new_pack > 0xffff) {
-		err = -EFBIG; // -EINVAL?
-		goto out;
-	}
 	ea_info.size_pack = cpu_to_le16(new_pack);
-
 	/* New size of ATTR_EA. */
 	size += add;
-	if (size > sbi->ea_max_size) {
+	ea_info.size = cpu_to_le32(size);
+
+	/*
+	 * 1. Check ea_info.size_pack for overflow.
+	 * 2. New attibute size must fit value from $AttrDef
+	 */
+	if (new_pack > 0xffff || size > sbi->ea_max_size) {
+		ntfs_inode_warn(
+			inode,
+			"The size of extended attributes must not exceed 64KiB");
 		err = -EFBIG; // -EINVAL?
 		goto out;
 	}
-	ea_info.size = cpu_to_le32(size);
 
 update_ea:
 
@@ -465,8 +467,7 @@ update_ea:
 	mark_inode_dirty(&ni->vfs_inode);
 
 out:
-	if (!locked)
-		ni_unlock(ni);
+	ni_unlock(ni);
 
 	run_close(&ea_run);
 	kfree(ea_all);
@@ -475,12 +476,6 @@ out:
 }
 
 #ifdef CONFIG_NTFS3_FS_POSIX_ACL
-static inline void ntfs_posix_acl_release(struct posix_acl *acl)
-{
-	if (acl && refcount_dec_and_test(&acl->a_refcount))
-		kfree(acl);
-}
-
 static struct posix_acl *ntfs_get_acl_ex(struct user_namespace *mnt_userns,
 					 struct inode *inode, int type,
 					 int locked)
@@ -543,7 +538,7 @@ struct posix_acl *ntfs_get_acl(struct inode *inode, int type)
 
 static noinline int ntfs_set_acl_ex(struct user_namespace *mnt_userns,
 				    struct inode *inode, struct posix_acl *acl,
-				    int type, int locked)
+				    int type)
 {
 	const char *name;
 	size_t size, name_len;
@@ -600,7 +595,7 @@ static noinline int ntfs_set_acl_ex(struct user_namespace *mnt_userns,
 		flags = 0;
 	}
 
-	err = ntfs_set_ea(inode, name, name_len, value, size, flags, locked);
+	err = ntfs_set_ea(inode, name, name_len, value, size, flags);
 	if (err == -ENODATA && !size)
 		err = 0; /* Removing non existed xattr. */
 	if (!err)
@@ -618,68 +613,7 @@ out:
 int ntfs_set_acl(struct user_namespace *mnt_userns, struct inode *inode,
 		 struct posix_acl *acl, int type)
 {
-	return ntfs_set_acl_ex(mnt_userns, inode, acl, type, 0);
-}
-
-static int ntfs_xattr_get_acl(struct user_namespace *mnt_userns,
-			      struct inode *inode, int type, void *buffer,
-			      size_t size)
-{
-	struct posix_acl *acl;
-	int err;
-
-	if (!(inode->i_sb->s_flags & SB_POSIXACL)) {
-		ntfs_inode_warn(inode, "add mount option \"acl\" to use acl");
-		return -EOPNOTSUPP;
-	}
-
-	acl = ntfs_get_acl(inode, type);
-	if (IS_ERR(acl))
-		return PTR_ERR(acl);
-
-	if (!acl)
-		return -ENODATA;
-
-	err = posix_acl_to_xattr(mnt_userns, acl, buffer, size);
-	ntfs_posix_acl_release(acl);
-
-	return err;
-}
-
-static int ntfs_xattr_set_acl(struct user_namespace *mnt_userns,
-			      struct inode *inode, int type, const void *value,
-			      size_t size)
-{
-	struct posix_acl *acl;
-	int err;
-
-	if (!(inode->i_sb->s_flags & SB_POSIXACL)) {
-		ntfs_inode_warn(inode, "add mount option \"acl\" to use acl");
-		return -EOPNOTSUPP;
-	}
-
-	if (!inode_owner_or_capable(mnt_userns, inode))
-		return -EPERM;
-
-	if (!value) {
-		acl = NULL;
-	} else {
-		acl = posix_acl_from_xattr(mnt_userns, value, size);
-		if (IS_ERR(acl))
-			return PTR_ERR(acl);
-
-		if (acl) {
-			err = posix_acl_valid(mnt_userns, acl);
-			if (err)
-				goto release_and_out;
-		}
-	}
-
-	err = ntfs_set_acl(mnt_userns, inode, acl, type);
-
-release_and_out:
-	ntfs_posix_acl_release(acl);
-	return err;
+	return ntfs_set_acl_ex(mnt_userns, inode, acl, type);
 }
 
 /*
@@ -699,7 +633,7 @@ int ntfs_init_acl(struct user_namespace *mnt_userns, struct inode *inode,
 
 	if (default_acl) {
 		err = ntfs_set_acl_ex(mnt_userns, inode, default_acl,
-				      ACL_TYPE_DEFAULT, 1);
+				      ACL_TYPE_DEFAULT);
 		posix_acl_release(default_acl);
 	} else {
 		inode->i_default_acl = NULL;
@@ -710,7 +644,7 @@ int ntfs_init_acl(struct user_namespace *mnt_userns, struct inode *inode,
 	else {
 		if (!err)
 			err = ntfs_set_acl_ex(mnt_userns, inode, acl,
-					      ACL_TYPE_ACCESS, 1);
+					      ACL_TYPE_ACCESS);
 		posix_acl_release(acl);
 	}
 
@@ -848,23 +782,6 @@ static int ntfs_getxattr(const struct xattr_handler *handler, struct dentry *de,
 		goto out;
 	}
 
-#ifdef CONFIG_NTFS3_FS_POSIX_ACL
-	if ((name_len == sizeof(XATTR_NAME_POSIX_ACL_ACCESS) - 1 &&
-	     !memcmp(name, XATTR_NAME_POSIX_ACL_ACCESS,
-		     sizeof(XATTR_NAME_POSIX_ACL_ACCESS))) ||
-	    (name_len == sizeof(XATTR_NAME_POSIX_ACL_DEFAULT) - 1 &&
-	     !memcmp(name, XATTR_NAME_POSIX_ACL_DEFAULT,
-		     sizeof(XATTR_NAME_POSIX_ACL_DEFAULT)))) {
-		/* TODO: init_user_ns? */
-		err = ntfs_xattr_get_acl(
-			&init_user_ns, inode,
-			name_len == sizeof(XATTR_NAME_POSIX_ACL_ACCESS) - 1
-				? ACL_TYPE_ACCESS
-				: ACL_TYPE_DEFAULT,
-			buffer, size);
-		goto out;
-	}
-#endif
 	/* Deal with NTFS extended attribute. */
 	err = ntfs_get_ea(inode, name, name_len, buffer, size, NULL);
 
@@ -977,24 +894,8 @@ set_new_fa:
 		goto out;
 	}
 
-#ifdef CONFIG_NTFS3_FS_POSIX_ACL
-	if ((name_len == sizeof(XATTR_NAME_POSIX_ACL_ACCESS) - 1 &&
-	     !memcmp(name, XATTR_NAME_POSIX_ACL_ACCESS,
-		     sizeof(XATTR_NAME_POSIX_ACL_ACCESS))) ||
-	    (name_len == sizeof(XATTR_NAME_POSIX_ACL_DEFAULT) - 1 &&
-	     !memcmp(name, XATTR_NAME_POSIX_ACL_DEFAULT,
-		     sizeof(XATTR_NAME_POSIX_ACL_DEFAULT)))) {
-		err = ntfs_xattr_set_acl(
-			mnt_userns, inode,
-			name_len == sizeof(XATTR_NAME_POSIX_ACL_ACCESS) - 1
-				? ACL_TYPE_ACCESS
-				: ACL_TYPE_DEFAULT,
-			value, size);
-		goto out;
-	}
-#endif
 	/* Deal with NTFS extended attribute. */
-	err = ntfs_set_ea(inode, name, name_len, value, size, flags, 0);
+	err = ntfs_set_ea(inode, name, name_len, value, size, flags);
 
 out:
 	return err;
@@ -1010,28 +911,29 @@ int ntfs_save_wsl_perm(struct inode *inode)
 	int err;
 	__le32 value;
 
+	/* TODO: refactor this, so we don't lock 4 times in ntfs_set_ea */
 	value = cpu_to_le32(i_uid_read(inode));
 	err = ntfs_set_ea(inode, "$LXUID", sizeof("$LXUID") - 1, &value,
-			  sizeof(value), 0, 0);
+			  sizeof(value), 0);
 	if (err)
 		goto out;
 
 	value = cpu_to_le32(i_gid_read(inode));
 	err = ntfs_set_ea(inode, "$LXGID", sizeof("$LXGID") - 1, &value,
-			  sizeof(value), 0, 0);
+			  sizeof(value), 0);
 	if (err)
 		goto out;
 
 	value = cpu_to_le32(inode->i_mode);
 	err = ntfs_set_ea(inode, "$LXMOD", sizeof("$LXMOD") - 1, &value,
-			  sizeof(value), 0, 0);
+			  sizeof(value), 0);
 	if (err)
 		goto out;
 
 	if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode)) {
 		value = cpu_to_le32(inode->i_rdev);
 		err = ntfs_set_ea(inode, "$LXDEV", sizeof("$LXDEV") - 1, &value,
-				  sizeof(value), 0, 0);
+				  sizeof(value), 0);
 		if (err)
 			goto out;
 	}
