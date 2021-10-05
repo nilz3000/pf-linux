@@ -142,6 +142,25 @@
 #  define __has_feature(x) 0
 #endif
 
+/* C-language Attributes are added in C23. */
+#if defined(__STDC_VERSION__) && (__STDC_VERSION__ > 201710L) && defined(__has_c_attribute)
+# define ZSTD_HAS_C_ATTRIBUTE(x) __has_c_attribute(x)
+#else
+# define ZSTD_HAS_C_ATTRIBUTE(x) 0
+#endif
+
+/* Only use C++ attributes in C++. Some compilers report support for C++
+ * attributes when compiling with C.
+ */
+#define ZSTD_HAS_CPP_ATTRIBUTE(x) 0
+
+/* Define ZSTD_FALLTHROUGH macro for annotating switch case with the 'fallthrough' attribute.
+ * - C23: https://en.cppreference.com/w/c/language/attributes/fallthrough
+ * - CPP17: https://en.cppreference.com/w/cpp/language/attributes/fallthrough
+ * - Else: __attribute__((__fallthrough__))
+ */
+#define ZSTD_FALLTHROUGH fallthrough
+
 /* detects whether we are being compiled under msan */
 
 

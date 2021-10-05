@@ -2886,7 +2886,9 @@ static size_t ZSTD_writeFrameHeader(void* dst, size_t dstCapacity,
     if (!singleSegment) op[pos++] = windowLogByte;
     switch(dictIDSizeCode)
     {
-        default:  assert(0); /* impossible */
+        default:
+            assert(0); /* impossible */
+            ZSTD_FALLTHROUGH;
         case 0 : break;
         case 1 : op[pos] = (BYTE)(dictID); pos++; break;
         case 2 : MEM_writeLE16(op+pos, (U16)dictID); pos+=2; break;
@@ -2894,7 +2896,9 @@ static size_t ZSTD_writeFrameHeader(void* dst, size_t dstCapacity,
     }
     switch(fcsCode)
     {
-        default:  assert(0); /* impossible */
+        default:
+            assert(0); /* impossible */
+            ZSTD_FALLTHROUGH;
         case 0 : if (singleSegment) op[pos++] = (BYTE)(pledgedSrcSize); break;
         case 1 : MEM_writeLE16(op+pos, (U16)(pledgedSrcSize-256)); pos+=2; break;
         case 2 : MEM_writeLE32(op+pos, (U32)(pledgedSrcSize)); pos+=4; break;
@@ -4213,7 +4217,7 @@ static size_t ZSTD_compressStream_generic(ZSTD_CStream* zcs,
                 zcs->outBuffFlushedSize = 0;
                 zcs->streamStage = zcss_flush; /* pass-through to flush stage */
             }
-	    fallthrough;
+	    ZSTD_FALLTHROUGH;
         case zcss_flush:
             DEBUGLOG(5, "flush stage");
             assert(zcs->appliedParams.outBufferMode == ZSTD_bm_buffered);
