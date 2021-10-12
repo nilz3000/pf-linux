@@ -35,7 +35,6 @@
 #define ASUS_EC_KNOWN_EC_REGISTERS 14
 
 enum asus_wmi_ec_board {
-	BOARD_PW_X570_A, // Pro WS X570-ACE
 	BOARD_R_C8H, // ROG Crosshair VIII Hero
 	BOARD_R_C8DH, // ROG Crosshair VIII Dark Hero
 	BOARD_R_C8F, // ROG Crosshair VIII Formula
@@ -45,7 +44,6 @@ enum asus_wmi_ec_board {
 
 /* boards with EC support */
 static const char *const asus_wmi_ec_boards_names[] = {
-	[BOARD_PW_X570_A] = "Pro WS X570-ACE",
 	[BOARD_R_C8H] = "ROG CROSSHAIR VIII HERO",
 	[BOARD_R_C8DH] = "ROG CROSSHAIR VIII DARK HERO",
 	[BOARD_R_C8F] = "ROG CROSSHAIR VIII FORMULA",
@@ -132,7 +130,6 @@ static void asus_wmi_ec_fill_board_sensors(struct asus_wmi_ec_info *ec, int boar
 	ec->nr_registers = 0;
 
 	switch (board) {
-	case BOARD_PW_X570_A:
 	case BOARD_RS_B550_E_G:
 	case BOARD_RS_X570_E_G:
 	case BOARD_R_C8H:
@@ -156,7 +153,6 @@ static void asus_wmi_ec_fill_board_sensors(struct asus_wmi_ec_info *ec, int boar
 	}
 
 	switch (board) {
-	case BOARD_PW_X570_A:
 	case BOARD_RS_X570_E_G:
 	case BOARD_R_C8H:
 	case BOARD_R_C8DH:
@@ -170,7 +166,6 @@ static void asus_wmi_ec_fill_board_sensors(struct asus_wmi_ec_info *ec, int boar
 	}
 
 	switch (board) {
-	case BOARD_PW_X570_A:
 	case BOARD_RS_X570_E_G:
 	case BOARD_R_C8H:
 	case BOARD_R_C8F:
