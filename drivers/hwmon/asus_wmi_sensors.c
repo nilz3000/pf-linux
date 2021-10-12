@@ -147,19 +147,11 @@ static void asus_wmi_ec_fill_board_sensors(struct asus_wmi_ec_info *ec, int boar
 		asus_wmi_ec_set_sensor_info(si++, "Motherboard", hwmon_temp,
 					    asus_wmi_ec_make_sensor_address(1, 0x00, 0x3C),
 					    &ec->nr_registers);
-		asus_wmi_ec_set_sensor_info(si++, "VRM", hwmon_temp,
-					    asus_wmi_ec_make_sensor_address(1, 0x00, 0x3E),
-					    &ec->nr_registers);
-	}
-
-	switch (board) {
-	case BOARD_RS_B550_E_G:
-	case BOARD_RS_X570_E_G:
-	case BOARD_R_C8H:
-	case BOARD_R_C8DH:
-	case BOARD_R_C8F:
 		asus_wmi_ec_set_sensor_info(si++, "T_Sensor", hwmon_temp,
 					    asus_wmi_ec_make_sensor_address(1, 0x00, 0x3D),
+					    &ec->nr_registers);
+		asus_wmi_ec_set_sensor_info(si++, "VRM", hwmon_temp,
+					    asus_wmi_ec_make_sensor_address(1, 0x00, 0x3E),
 					    &ec->nr_registers);
 	}
 
