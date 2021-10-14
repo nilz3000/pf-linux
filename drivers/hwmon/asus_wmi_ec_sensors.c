@@ -237,7 +237,7 @@ struct asus_wmi_ec_info {
 };
 
 struct asus_wmi_sensors {
-	/* lock access to instrnal cache */
+	/* lock access to internal cache */
 	struct mutex lock;
 	struct asus_wmi_ec_info ec;
 };
@@ -321,16 +321,6 @@ static void asus_wmi_ec_make_block_read_query(struct asus_wmi_ec_info *ec)
 	const struct ec_sensor_info *si;
 	int i, j, register_idx = 0;
 
-	/*
-	 * if we can get values for all the registers in a single query,
-	 * the query will not change from call to call
-	 */
-	if (ec->nr_registers <= ASUS_WMI_BLOCK_READ_REGISTERS_MAX &&
-	    ec->read_arg[0] > 0) {
-		/* no need to update */
-		return;
-	}
-
 	for (i = 0; i < ec->nr_sensors; i++) {
 		si = &known_ec_sensors[ec->sensors[i].info_index];
 		for (j = 0; j < si->addr.size;
@@ -361,55 +351,45 @@ static int asus_wmi_ec_block_read(u32 method_id, char *query, u8 *out)
 
 	obj = output.pointer;
 	if (!obj || obj->type != ACPI_TYPE_BUFFER) {
-		if (!obj)
-			acpi_os_free(output.pointer);
-
+		acpi_os_free(obj);
 		return -EIO;
 	}
 	asus_wmi_ec_decode_reply_buffer(obj->buffer.pointer, out);
-	acpi_os_free(output.pointer);
+	acpi_os_free(obj);
 	return 0;
 #else
 	return -EOPNOTSUPP;
 #endif
 }
 
-static int asus_wmi_ec_update_ec_sensors(struct asus_wmi_ec_info *ec)
+static inline u32 get_sensor_value(const struct ec_sensor_info *si, u8 *data)
+{
+	switch (si->addr.size) {
+	case 1:
+		return *data;
+	case 2:
+		return get_unaligned_be16(data);
+	case 4:
+		return get_unaligned_be32(data);
+	default:
+		return 0;
+	}
+}
+
+static void asus_wmi_ec_update_ec_sensors(struct asus_wmi_ec_info *ec)
 {
 	const struct ec_sensor_info *si;
+	u8 i_sensor;
 	struct ec_sensor *s;
+	u8 *data;
 
-	int status;
-	u8 i_sensor, read_reg_ct;
-
-	asus_wmi_ec_make_block_read_query(ec);
-	status = asus_wmi_ec_block_read(ASUSWMI_METHODID_BLOCK_READ_EC,
-					ec->read_arg,
-					ec->read_buffer);
-	if (status)
-		return status;
-
-	read_reg_ct = 0;
+	data = ec->read_buffer;
 	for (i_sensor = 0; i_sensor < ec->nr_sensors; i_sensor++) {
 		s = &ec->sensors[i_sensor];
 		si = &known_ec_sensors[s->info_index];
-
-		switch (si->addr.size) {
-		case 1:
-			s->cached_value = ec->read_buffer[read_reg_ct];
-			break;
-		case 2:
-			s->cached_value = get_unaligned_be16(&ec->read_buffer[read_reg_ct]);
-			break;
-		case 4:
-			s->cached_value = get_unaligned_be32(&ec->read_buffer[read_reg_ct]);
-			break;
-		default:
-			s->cached_value =  0;
-		}
-		read_reg_ct += si->addr.size;
+		s->cached_value = get_sensor_value(si, data);
+		data += si->addr.size;
 	}
-	return 0;
 }
 
 static int asus_wmi_ec_scale_sensor_value(u32 value, int data_type)
@@ -447,10 +427,13 @@ static int asus_wmi_ec_get_cached_value_or_update(int sensor_index,
 	int ret;
 
 	if (time_after(jiffies, state->ec.last_updated + HZ)) {
-		ret = asus_wmi_ec_update_ec_sensors(&state->ec);
+		ret = asus_wmi_ec_block_read(ASUSWMI_METHODID_BLOCK_READ_EC,
+					     state->ec.read_arg,
+					     state->ec.read_buffer);
 		if (ret)
 			return ret;
 
+		asus_wmi_ec_update_ec_sensors(&state->ec);
 		state->ec.last_updated = jiffies;
 	}
 
@@ -568,6 +551,12 @@ static int asus_wmi_ec_configure_sensor_setup(struct device *dev,
 		nr_count[hwmon_chip]++;
 		nr_types++;
 	}
+
+	/*
+	 * if we can get values for all the registers in a single query,
+	 * the query will not change from call to call
+	 */
+	asus_wmi_ec_make_block_read_query(&sensor_data->ec);
 
 	asus_wmi_hwmon_chan = devm_kcalloc(dev, nr_types,
 					   sizeof(*asus_wmi_hwmon_chan),
