@@ -449,6 +449,12 @@ bool is_chained_smb2_message(struct ksmbd_work *work)
 			return false;
 		}
 
+		if ((u64)get_rfc1002_len(work->response_buf) + MAX_CIFS_SMALL_BUFFER_SIZE >
+		    work->response_sz) {
+			pr_err("next response offset exceeds response buffer size\n");
+			return false;
+		}
+
 		ksmbd_debug(SMB, "got SMB2 chained command\n");
 		init_chained_smb2_rsp(work);
 		return true;
@@ -6197,8 +6203,7 @@ static noinline int smb2_write_pipe(struct ksmbd_work *work)
 	    (offsetof(struct smb2_write_req, Buffer) - 4)) {
 		data_buf = (char *)&req->Buffer[0];
 	} else {
-		if ((le16_to_cpu(req->DataOffset) > get_rfc1002_len(req)) ||
-		    (le16_to_cpu(req->DataOffset) + length > get_rfc1002_len(req))) {
+		if ((u64)le16_to_cpu(req->DataOffset) + length > get_rfc1002_len(req)) {
 			pr_err("invalid write data offset %u, smb_len %u\n",
 			       le16_to_cpu(req->DataOffset),
 			       get_rfc1002_len(req));
@@ -6356,8 +6361,7 @@ int smb2_write(struct ksmbd_work *work)
 		    (offsetof(struct smb2_write_req, Buffer) - 4)) {
 			data_buf = (char *)&req->Buffer[0];
 		} else {
-			if ((le16_to_cpu(req->DataOffset) > get_rfc1002_len(req)) ||
-			    (le16_to_cpu(req->DataOffset) + length > get_rfc1002_len(req))) {
+			if ((u64)le16_to_cpu(req->DataOffset) + length > get_rfc1002_len(req)) {
 				pr_err("invalid write data offset %u, smb_len %u\n",
 				       le16_to_cpu(req->DataOffset),
 				       get_rfc1002_len(req));
