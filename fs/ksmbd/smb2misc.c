@@ -406,14 +406,14 @@ int ksmbd_smb2_check_message(struct ksmbd_work *work)
 	if (len != clc_len) {
 		/* client can return one byte more due to implied bcc[0] */
 		if (clc_len == len + 1)
-			return 0;
+			goto validate_credit;
 
 		/*
 		 * Some windows servers (win2016) will pad also the final
 		 * PDU in a compound to 8 bytes.
 		 */
 		if (ALIGN(clc_len, 8) == len)
-			return 0;
+			goto validate_credit;
 
 		/*
 		 * windows client also pad up to 8 bytes when compounding.
@@ -426,7 +426,7 @@ int ksmbd_smb2_check_message(struct ksmbd_work *work)
 				    "cli req padded more than expected. Length %d not %d for cmd:%d mid:%llu\n",
 				    len, clc_len, command,
 				    le64_to_cpu(hdr->MessageId));
-			return 0;
+			goto validate_credit;
 		}
 
 		ksmbd_debug(SMB,
@@ -437,6 +437,7 @@ int ksmbd_smb2_check_message(struct ksmbd_work *work)
 		return 1;
 	}
 
+validate_credit:
 	if ((work->conn->vals->capabilities & SMB2_GLOBAL_CAP_LARGE_MTU) &&
 	    smb2_validate_credit_charge(work->conn, hdr)) {
 		work->conn->ops->set_rsp_status(work, STATUS_INVALID_PARAMETER);
