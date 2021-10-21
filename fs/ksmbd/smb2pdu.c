@@ -1257,18 +1257,12 @@ static int generate_preauth_hash(struct ksmbd_work *work)
 	return 0;
 }
 
-static int decode_negotiation_token(struct ksmbd_work *work,
-				    struct negotiate_message *negblob)
+static int decode_negotiation_token(struct ksmbd_conn *conn,
+				    struct negotiate_message *negblob,
+				    size_t sz)
 {
-	struct ksmbd_conn *conn = work->conn;
-	struct smb2_sess_setup_req *req;
-	int sz;
-
 	if (!conn->use_spnego)
 		return -EINVAL;
-
-	req = work->request_buf;
-	sz = le16_to_cpu(req->SecurityBufferLength);
 
 	if (ksmbd_decode_negTokenInit((char *)negblob, sz, conn)) {
 		if (ksmbd_decode_negTokenTarg((char *)negblob, sz, conn)) {
@@ -1281,9 +1275,9 @@ static int decode_negotiation_token(struct ksmbd_work *work,
 }
 
 static int ntlm_negotiate(struct ksmbd_work *work,
-			  struct negotiate_message *negblob)
+			  struct negotiate_message *negblob,
+			  size_t negblob_len)
 {
-	struct smb2_sess_setup_req *req = work->request_buf;
 	struct smb2_sess_setup_rsp *rsp = work->response_buf;
 	struct challenge_message *chgblob;
 	unsigned char *spnego_blob = NULL;
@@ -1292,8 +1286,7 @@ static int ntlm_negotiate(struct ksmbd_work *work,
 	int sz, rc;
 
 	ksmbd_debug(SMB, "negotiate phase\n");
-	sz = le16_to_cpu(req->SecurityBufferLength);
-	rc = ksmbd_decode_ntlmssp_neg_blob(negblob, sz, work->sess);
+	rc = ksmbd_decode_ntlmssp_neg_blob(negblob, negblob_len, work->sess);
 	if (rc)
 		return rc;
 
@@ -1361,12 +1354,23 @@ static struct ksmbd_user *session_user(struct ksmbd_conn *conn,
 	struct authenticate_message *authblob;
 	struct ksmbd_user *user;
 	char *name;
-	int sz;
+	unsigned int auth_msg_len, name_off, name_len, secbuf_len;
 
+	secbuf_len = le16_to_cpu(req->SecurityBufferLength);
+	if (secbuf_len < sizeof(struct authenticate_message)) {
+		ksmbd_debug(SMB, "blob len %d too small\n", secbuf_len);
+		return NULL;
+	}
 	authblob = user_authblob(conn, req);
-	sz = le32_to_cpu(authblob->UserName.BufferOffset);
-	name = smb_strndup_from_utf16((const char *)authblob + sz,
-				      le16_to_cpu(authblob->UserName.Length),
+	name_off = le32_to_cpu(authblob->UserName.BufferOffset);
+	name_len = le16_to_cpu(authblob->UserName.Length);
+	auth_msg_len = le16_to_cpu(req->SecurityBufferOffset) + secbuf_len;
+
+	if (auth_msg_len < (u64)name_off + name_len)
+		return NULL;
+
+	name = smb_strndup_from_utf16((const char *)authblob + name_off,
+				      name_len,
 				      true,
 				      conn->local_nls);
 	if (IS_ERR(name)) {
@@ -1612,6 +1616,7 @@ int smb2_sess_setup(struct ksmbd_work *work)
 	struct smb2_sess_setup_rsp *rsp = work->response_buf;
 	struct ksmbd_session *sess;
 	struct negotiate_message *negblob;
+	unsigned int negblob_len, negblob_off;
 	int rc = 0;
 
 	ksmbd_debug(SMB, "Received request for session setup\n");
@@ -1692,10 +1697,16 @@ int smb2_sess_setup(struct ksmbd_work *work)
 	if (sess->state == SMB2_SESSION_EXPIRED)
 		sess->state = SMB2_SESSION_IN_PROGRESS;
 
-	negblob = (struct negotiate_message *)((char *)&req->hdr.ProtocolId +
-			le16_to_cpu(req->SecurityBufferOffset));
+	negblob_off = le16_to_cpu(req->SecurityBufferOffset);
+	negblob_len = le16_to_cpu(req->SecurityBufferLength);
+	if (negblob_off < (offsetof(struct smb2_sess_setup_req, Buffer) - 4) ||
+	    negblob_len < offsetof(struct negotiate_message, NegotiateFlags))
+		return -EINVAL;
 
-	if (decode_negotiation_token(work, negblob) == 0) {
+	negblob = (struct negotiate_message *)((char *)&req->hdr.ProtocolId +
+			negblob_off);
+
+	if (decode_negotiation_token(conn, negblob, negblob_len) == 0) {
 		if (conn->mechToken)
 			negblob = (struct negotiate_message *)conn->mechToken;
 	}
@@ -1719,7 +1730,7 @@ int smb2_sess_setup(struct ksmbd_work *work)
 			sess->Preauth_HashValue = NULL;
 		} else if (conn->preferred_auth_mech == KSMBD_AUTH_NTLMSSP) {
 			if (negblob->MessageType == NtLmNegotiate) {
-				rc = ntlm_negotiate(work, negblob);
+				rc = ntlm_negotiate(work, negblob, negblob_len);
 				if (rc)
 					goto out_err;
 				rsp->hdr.Status =
@@ -1779,9 +1790,30 @@ out_err:
 		conn->mechToken = NULL;
 	}
 
-	if (rc < 0 && sess) {
-		ksmbd_session_destroy(sess);
-		work->sess = NULL;
+	if (rc < 0) {
+		/*
+		 * SecurityBufferOffset should be set to zero
+		 * in session setup error response.
+		 */
+		rsp->SecurityBufferOffset = 0;
+
+		if (sess) {
+			bool try_delay = false;
+
+			/*
+			 * To avoid dictionary attacks (repeated session setups rapidly sent) to
+			 * connect to server, ksmbd make a delay of a 5 seconds on session setup
+			 * failure to make it harder to send enough random connection requests
+			 * to break into a server.
+			 */
+			if (sess->user && sess->user->flags & KSMBD_USER_FLAG_DELAY_SESSION)
+				try_delay = true;
+
+			ksmbd_session_destroy(sess);
+			work->sess = NULL;
+			if (try_delay)
+				ssleep(5);
+		}
 	}
 
 	return rc;
@@ -3762,6 +3794,24 @@ static int verify_info_level(int info_level)
 	return 0;
 }
 
+static int smb2_calc_max_out_buf_len(struct ksmbd_work *work,
+				     unsigned short hdr2_len,
+				     unsigned int out_buf_len)
+{
+	int free_len;
+
+	if (out_buf_len > work->conn->vals->max_trans_size)
+		return -EINVAL;
+
+	free_len = (int)(work->response_sz -
+			 (get_rfc1002_len(work->response_buf) + 4)) -
+		hdr2_len;
+	if (free_len < 0)
+		return -EINVAL;
+
+	return min_t(int, out_buf_len, free_len);
+}
+
 int smb2_query_dir(struct ksmbd_work *work)
 {
 	struct ksmbd_conn *conn = work->conn;
@@ -3838,9 +3888,13 @@ int smb2_query_dir(struct ksmbd_work *work)
 	memset(&d_info, 0, sizeof(struct ksmbd_dir_info));
 	d_info.wptr = (char *)rsp->Buffer;
 	d_info.rptr = (char *)rsp->Buffer;
-	d_info.out_buf_len = (work->response_sz - (get_rfc1002_len(rsp_org) + 4));
-	d_info.out_buf_len = min_t(int, d_info.out_buf_len, le32_to_cpu(req->OutputBufferLength)) -
-		sizeof(struct smb2_query_directory_rsp);
+	d_info.out_buf_len =
+		smb2_calc_max_out_buf_len(work, 8,
+					  le32_to_cpu(req->OutputBufferLength));
+	if (d_info.out_buf_len < 0) {
+		rc = -EINVAL;
+		goto err_out;
+	}
 	d_info.flags = srch_flag;
 
 	/*
@@ -4074,12 +4128,11 @@ static int smb2_get_ea(struct ksmbd_work *work, struct ksmbd_file *fp,
 				    le32_to_cpu(req->Flags));
 	}
 
-	buf_free_len = work->response_sz -
-			(get_rfc1002_len(rsp_org) + 4) -
-			sizeof(struct smb2_query_info_rsp);
-
-	if (le32_to_cpu(req->OutputBufferLength) < buf_free_len)
-		buf_free_len = le32_to_cpu(req->OutputBufferLength);
+	buf_free_len =
+		smb2_calc_max_out_buf_len(work, 8,
+					  le32_to_cpu(req->OutputBufferLength));
+	if (buf_free_len < 0)
+		return -EINVAL;
 
 	rc = ksmbd_vfs_listxattr(path->dentry, &xattr_list);
 	if (rc < 0) {
@@ -4390,6 +4443,8 @@ static void get_file_stream_info(struct ksmbd_work *work,
 	struct path *path = &fp->filp->f_path;
 	ssize_t xattr_list_len;
 	int nbytes = 0, streamlen, stream_name_len, next, idx = 0;
+	int buf_free_len;
+	struct smb2_query_info_req *req = ksmbd_req_buf_next(work);
 
 	generic_fillattr(file_mnt_user_ns(fp->filp), file_inode(fp->filp),
 			 &stat);
@@ -4402,6 +4457,12 @@ static void get_file_stream_info(struct ksmbd_work *work,
 		ksmbd_debug(SMB, "empty xattr in the file\n");
 		goto out;
 	}
+
+	buf_free_len =
+		smb2_calc_max_out_buf_len(work, 8,
+					  le32_to_cpu(req->OutputBufferLength));
+	if (buf_free_len < 0)
+		goto out;
 
 	while (idx < xattr_list_len) {
 		stream_name = xattr_list + idx;
@@ -4427,6 +4488,10 @@ static void get_file_stream_info(struct ksmbd_work *work,
 		streamlen = snprintf(stream_buf, streamlen + 1,
 				     ":%s", &stream_name[XATTR_NAME_STREAM_LEN]);
 
+		next = sizeof(struct smb2_file_stream_info) + streamlen * 2;
+		if (next > buf_free_len)
+			break;
+
 		file_info = (struct smb2_file_stream_info *)&rsp->Buffer[nbytes];
 		streamlen  = smbConvertToUTF16((__le16 *)file_info->StreamName,
 					       stream_buf, streamlen,
@@ -4437,12 +4502,13 @@ static void get_file_stream_info(struct ksmbd_work *work,
 		file_info->StreamSize = cpu_to_le64(stream_name_len);
 		file_info->StreamAllocationSize = cpu_to_le64(stream_name_len);
 
-		next = sizeof(struct smb2_file_stream_info) + streamlen;
 		nbytes += next;
+		buf_free_len -= next;
 		file_info->NextEntryOffset = cpu_to_le32(next);
 	}
 
-	if (!S_ISDIR(stat.mode)) {
+	if (!S_ISDIR(stat.mode) &&
+	    buf_free_len >= sizeof(struct smb2_file_stream_info) + 7 * 2) {
 		file_info = (struct smb2_file_stream_info *)
 			&rsp->Buffer[nbytes];
 		streamlen = smbConvertToUTF16((__le16 *)file_info->StreamName,
@@ -7453,11 +7519,13 @@ int smb2_ioctl(struct ksmbd_work *work)
 	}
 
 	cnt_code = le32_to_cpu(req->CntCode);
-	out_buf_len = le32_to_cpu(req->MaxOutputResponse);
-	out_buf_len =
-		min_t(u32, work->response_sz - work->next_smb2_rsp_hdr_off -
-				(offsetof(struct smb2_ioctl_rsp, Buffer) - 4),
-		      out_buf_len);
+	ret = smb2_calc_max_out_buf_len(work, 48,
+					le32_to_cpu(req->MaxOutputResponse));
+	if (ret < 0) {
+		rsp->hdr.Status = STATUS_INVALID_PARAMETER;
+		goto out;
+	}
+	out_buf_len = (unsigned int)ret;
 	in_buf_len = le32_to_cpu(req->InputCount);
 
 	switch (cnt_code) {
