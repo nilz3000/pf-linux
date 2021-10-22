@@ -1,4 +1,4 @@
-Kernel driver asus-wmi-sensors
+Kernel driver asus_wmi_sensors
 =================================
 
 Supported boards:
@@ -19,7 +19,7 @@ Supported boards:
  * ROG ZENITH EXTREME ALPHA.
 
 Authors:
-        Ed Brindley <kernel@maidavale.org>
+    - Ed Brindley <kernel@maidavale.org>
 
 Description:
 ------------
