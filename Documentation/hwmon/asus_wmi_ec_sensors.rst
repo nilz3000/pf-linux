@@ -1,4 +1,4 @@
-Kernel driver asus-wmi-ec-sensors
+Kernel driver asus_wmi_ec_sensors
 =================================
 
 Supported boards:
@@ -11,7 +11,7 @@ Supported boards:
  * ROG STRIX X570-E GAMING.
 
 Authors:
-        Eugene Shalygin <eugene.shalygin@gmail.com>
+    - Eugene Shalygin <eugene.shalygin@gmail.com>
 
 Description:
 ------------

@@ -18,13 +18,10 @@
  * Chipset Fan RPM,
  * Water Flow Fan RPM,
  * CPU current.
- *
  */
-#include <asm/unaligned.h>
+
 #include <linux/acpi.h>
 #include <linux/dmi.h>
-#include <linux/hwmon.h>
-#include <linux/hwmon-sysfs.h>
 #include <linux/init.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
@@ -33,14 +30,16 @@
 #include <linux/nls.h>
 #include <linux/units.h>
 #include <linux/wmi.h>
+#include <asm/unaligned.h>
+#include <linux/hwmon.h>
+#include <linux/hwmon-sysfs.h>
 
-#define	ASUSWMI_MONITORING_GUID	"466747A0-70EC-11DE-8A39-0800200C9A66"
-/* BLOCK_READ_EC */
-#define	ASUSWMI_METHODID_BREC	0x42524543
-/* from the ASUS DSDT source */
-#define	ASUSWMI_BREC_REGISTERS_MAX	0x10
-#define	ASUSWMI_MAX_BUF_LEN	0x80
-#define	SENSOR_LABEL_LEN	0x10
+#define ASUSWMI_MONITORING_GUID	"466747A0-70EC-11DE-8A39-0800200C9A66"
+#define ASUSWMI_METHODID_BLOCK_READ_EC	0x42524543 /* BREC */
+/* From the ASUS DSDT source */
+#define ASUSWMI_BREC_REGISTERS_MAX	0x10
+#define ASUSWMI_MAX_BUF_LEN	0x80
+#define SENSOR_LABEL_LEN	0x10
 
 static u32 hwmon_attributes[] = {
 	[hwmon_chip] = HWMON_C_REGISTER_TZ,
@@ -56,10 +55,11 @@ struct asus_wmi_ec_sensor_address {
 	u8 size;
 };
 
-#define	MAKE_SENSOR_ADDRESS(size_i, bank_i, index_i) \
-	{ .size = size_i,\
-	   .bank = bank_i,\
-	   .index = index_i}
+#define MAKE_SENSOR_ADDRESS(size_i, bank_i, index_i) {	\
+	.size = size_i,					\
+	.bank = bank_i,					\
+	.index = index_i				\
+}
 
 struct ec_sensor_info {
 	char label[SENSOR_LABEL_LEN];
@@ -67,11 +67,11 @@ struct ec_sensor_info {
 	struct asus_wmi_ec_sensor_address addr;
 };
 
-#define	EC_SENSOR(sensor_label, sensor_type, size, bank, index) \
-	{ .label = sensor_label,\
-	.type = sensor_type, \
-	.addr = MAKE_SENSOR_ADDRESS(size, bank, index) \
-	}
+#define EC_SENSOR(sensor_label, sensor_type, size, bank, index) {	\
+	.label = sensor_label,						\
+	.type = sensor_type,						\
+	.addr = MAKE_SENSOR_ADDRESS(size, bank, index)			\
+}
 
 enum known_ec_sensor {
 	SENSOR_TEMP_CHIPSET,
@@ -88,9 +88,7 @@ enum known_ec_sensor {
 	SENSOR_MAX
 };
 
-/*
- * All the known sensors for ASUS EC controllers
- */
+/* All known sensors for ASUS EC controllers */
 static const struct ec_sensor_info known_ec_sensors[] = {
 	[SENSOR_TEMP_CHIPSET] = EC_SENSOR("Chipset", hwmon_temp, 1, 0x00, 0x3a),
 	[SENSOR_TEMP_CPU] = EC_SENSOR("CPU", hwmon_temp, 1, 0x00, 0x3b),
@@ -166,7 +164,6 @@ static struct asus_wmi_data sensors_board_RS_B550_E_G = {
 		SENSOR_TEMP_CHIPSET, SENSOR_TEMP_CPU, SENSOR_TEMP_MB,
 		SENSOR_TEMP_T_SENSOR, SENSOR_TEMP_VRM,
 		SENSOR_FAN_CPU_OPT,
-		SENSOR_CURR_CPU,
 		SENSOR_MAX
 	},
 };
@@ -181,15 +178,14 @@ static struct asus_wmi_data sensors_board_RS_X570_E_G = {
 	},
 };
 
-#define	DMI_EXACT_MATCH_ASUS_BOARD_NAME(name, sensors) \
-	{ \
-		.matches = { \
-			DMI_EXACT_MATCH(DMI_BOARD_VENDOR, \
-					"ASUSTeK COMPUTER INC."), \
-			DMI_EXACT_MATCH(DMI_BOARD_NAME, name), \
-		}, \
-		.driver_data = sensors, \
-	}
+#define DMI_EXACT_MATCH_ASUS_BOARD_NAME(name, sensors) {	\
+	.matches = {						\
+		DMI_EXACT_MATCH(DMI_BOARD_VENDOR,		\
+				"ASUSTeK COMPUTER INC."),	\
+		DMI_EXACT_MATCH(DMI_BOARD_NAME, name),		\
+	},							\
+	.driver_data = sensors,					\
+}
 
 static const struct dmi_system_id asus_wmi_ec_dmi_table[] = {
 	DMI_EXACT_MATCH_ASUS_BOARD_NAME("PRIME X570-PRO", &sensors_board_PW_X570_P),
@@ -220,7 +216,7 @@ struct ec_sensor {
  */
 struct asus_wmi_ec_info {
 	struct ec_sensor sensors[SENSOR_MAX];
-	char read_arg[((ASUSWMI_BREC_REGISTERS_MAX * 4) + 1) * 2];
+	char read_arg[(ASUSWMI_BREC_REGISTERS_MAX * 4 + 1) * 2];
 	u8 read_buffer[ASUSWMI_BREC_REGISTERS_MAX];
 	unsigned int nr_sensors;
 	unsigned int nr_registers;
@@ -244,7 +240,6 @@ static int asus_wmi_ec_fill_board_sensors(struct asus_wmi_ec_info *ec,
 
 	for (i = 0; i < SENSOR_MAX && bsi[i] != SENSOR_MAX; i++) {
 		s[i].info_index = bsi[i];
-		s[i].cached_value = 0;
 		ec->nr_sensors++;
 		ec->nr_registers += known_ec_sensors[bsi[i]].addr.size;
 	}
@@ -253,32 +248,33 @@ static int asus_wmi_ec_fill_board_sensors(struct asus_wmi_ec_info *ec,
 }
 
 /*
- * The next four functions converts to/from BRxx string argument format
+ * The next four functions converts to/from BRxx string argument format.
  * The format of the string is as follows:
- * The string consists of two-byte UTF-16 characters
- * The value of the very first byte int the string is equal to the total length
- * of the next string in bytes, thus excluding the first two-byte character
- * The rest of the string encodes pairs of (bank, index) pairs, where both
- * values are byte-long (0x00 to 0xFF)
- * Numbers are encoded as UTF-16 hex values
+ * * The string consists of two-byte UTF-16 characters.
+ * * The value of the very first byte int the string is equal to the total
+ *   length of the next string in bytes, thus excluding the first two-byte
+ *   character.
+ * * The rest of the string encodes pairs of (bank, index) pairs, where both
+ *   values are byte-long (0x00 to 0xFF).
+ * * Numbers are encoded as UTF-16 hex values.
  */
-static void asus_wmi_ec_decode_reply_buffer(const u8 *inp, u8 *out, u32 length)
+static int asus_wmi_ec_decode_reply_buffer(const u8 *inp, u8 *out, u32 length)
 {
 	char buffer[ASUSWMI_MAX_BUF_LEN * 2];
 	const char *pos = buffer;
 	const u8 *data = inp + 2;
-	unsigned int i;
 	u32 len;
 
-	len = min3((u32)ASUSWMI_MAX_BUF_LEN, (length - 2) / 4, (u32)inp[0] / 4);
+	/* Minimum of size of response and size of ACPI result*/
+	len = min_t(u32, inp[0] / 4, (length - 2) / 4);
+	len = min_t(u32, len, ASUSWMI_MAX_BUF_LEN);
 
 	utf16s_to_utf8s((wchar_t *)data, len * 2,  UTF16_LITTLE_ENDIAN, buffer, len * 2);
 
-	for (i = 0; i < len; i++, pos += 2)
-		out[i] = (hex_to_bin(pos[0]) << 4) + hex_to_bin(pos[1]);
+	return hex2bin(out, pos, len);
 }
 
-static void asus_wmi_ec_encode_registers(u16 *registers, u8 len, char *out)
+static void asus_wmi_ec_encode_registers(const u16 *registers, u8 len, char *out)
 {
 	char buffer[ASUSWMI_MAX_BUF_LEN * 2];
 	char *pos = buffer;
@@ -290,15 +286,9 @@ static void asus_wmi_ec_encode_registers(u16 *registers, u8 len, char *out)
 
 	for (i = 0; i < len; i++) {
 		byte = registers[i] >> 8;
-		*pos = hex_asc_hi(byte);
-		pos++;
-		*pos = hex_asc_lo(byte);
-		pos++;
+		pos = bin2hex(pos, &byte, 1);
 		byte = registers[i];
-		*pos = hex_asc_hi(byte);
-		pos++;
-		*pos = hex_asc_lo(byte);
-		pos++;
+		pos = bin2hex(pos, &byte, 1);
 	}
 
 	utf8s_to_utf16s(buffer, len * 4, UTF16_LITTLE_ENDIAN, (wchar_t *)out, len * 4);
@@ -312,10 +302,8 @@ static void asus_wmi_ec_make_block_read_query(struct asus_wmi_ec_info *ec)
 
 	for (i = 0; i < ec->nr_sensors; i++) {
 		si = &known_ec_sensors[ec->sensors[i].info_index];
-		for (j = 0; j < si->addr.size;
-		     j++, register_idx++) {
+		for (j = 0; j < si->addr.size; j++, register_idx++)
 			registers[register_idx] = (si->addr.bank << 8) + si->addr.index + j;
-		}
 	}
 
 	asus_wmi_ec_encode_registers(registers, ec->nr_registers, ec->read_arg);
@@ -328,22 +316,19 @@ static int asus_wmi_ec_block_read(u32 method_id, char *query, u8 *out)
 	union acpi_object *obj;
 	acpi_status status;
 
-	/* the first byte of the BRxx() argument string has to be the string size */
-	input.length = (acpi_size)query[0] + 2;
+	/* The first byte of the BRxx() argument string has to be the string size. */
+	input.length = query[0] + 2;
 	input.pointer = query;
-	status = wmi_evaluate_method(ASUSWMI_MONITORING_GUID, 0, method_id, &input,
-				     &output);
+	status = wmi_evaluate_method(ASUSWMI_MONITORING_GUID, 0,
+				     method_id, &input, &output);
 	if (ACPI_FAILURE(status))
 		return -EIO;
 
 	obj = output.pointer;
-	if (!obj || obj->type != ACPI_TYPE_BUFFER) {
-		acpi_os_free(obj);
+	if (!obj || obj->type != ACPI_TYPE_BUFFER || obj->buffer.length < 2)
 		return -EIO;
-	}
-	asus_wmi_ec_decode_reply_buffer(obj->buffer.pointer, out, obj->buffer.length);
-	acpi_os_free(obj);
-	return 0;
+
+	return asus_wmi_ec_decode_reply_buffer(obj->buffer.pointer, out, obj->buffer.length);
 }
 
 static inline u32 get_sensor_value(const struct ec_sensor_info *si, u8 *data)
@@ -382,7 +367,7 @@ static int asus_wmi_ec_scale_sensor_value(u32 value, int data_type)
 	case hwmon_curr:
 	case hwmon_temp:
 	case hwmon_in:
-		return value * KILO;
+		return value * MILLI;
 	default:
 		return value;
 	}
@@ -410,24 +395,29 @@ static int asus_wmi_ec_get_cached_value_or_update(int sensor_index,
 {
 	int ret;
 
+	mutex_lock(&state->lock);
+
 	if (time_after(jiffies, state->ec.last_updated + HZ)) {
-		ret = asus_wmi_ec_block_read(ASUSWMI_METHODID_BREC,
+		ret = asus_wmi_ec_block_read(ASUSWMI_METHODID_BLOCK_READ_EC,
 					     state->ec.read_arg,
 					     state->ec.read_buffer);
-		if (ret)
+		if (ret) {
+			mutex_unlock(&state->lock);
 			return ret;
+		}
 
 		asus_wmi_ec_update_ec_sensors(&state->ec);
 		state->ec.last_updated = jiffies;
 	}
 
 	*value = state->ec.sensors[sensor_index].cached_value;
+
+	mutex_unlock(&state->lock);
+
 	return 0;
 }
 
-/*
- * Now follow the functions that implement the hwmon interface
- */
+/* Now follow the functions that implement the hwmon interface */
 
 static int asus_wmi_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 				  u32 attr, int channel, long *val)
@@ -440,9 +430,7 @@ static int asus_wmi_ec_hwmon_read(struct device *dev, enum hwmon_sensor_types ty
 	if (sidx < 0)
 		return sidx;
 
-	mutex_lock(&sensor_data->lock);
 	ret = asus_wmi_ec_get_cached_value_or_update(sidx, sensor_data, &value);
-	mutex_unlock(&sensor_data->lock);
 	if (ret)
 		return ret;
 
@@ -470,12 +458,12 @@ static umode_t asus_wmi_ec_hwmon_is_visible(const void *drvdata,
 					    enum hwmon_sensor_types type, u32 attr,
 					    int channel)
 {
-	int index;
 	const struct asus_wmi_sensors *sensor_data = drvdata;
+	int index;
 
 	index = asus_wmi_ec_find_sensor_index(&sensor_data->ec, type, channel);
 
-	return index == 0xff ? 0 : 0444;
+	return index < 0 ? 0 : 0444;
 }
 
 static int asus_wmi_hwmon_add_chan_info(struct hwmon_channel_info *asus_wmi_hwmon_chan,
@@ -511,7 +499,7 @@ static int asus_wmi_ec_configure_sensor_setup(struct device *dev,
 {
 	struct hwmon_channel_info *asus_wmi_hwmon_chan;
 	const struct hwmon_channel_info **ptr_asus_wmi_ci;
-	int nr_count[hwmon_max] = { 0 }, nr_types = 0;
+	int nr_count[hwmon_max] = {}, nr_types = 0;
 	const struct hwmon_chip_info *chip_info;
 	const struct ec_sensor_info *si;
 	enum hwmon_sensor_types type;
@@ -538,8 +526,8 @@ static int asus_wmi_ec_configure_sensor_setup(struct device *dev,
 	}
 
 	/*
-	 * if we can get values for all the registers in a single query,
-	 * the query will not change from call to call
+	 * If we can get values for all the registers in a single query,
+	 * the query will not change from call to call.
 	 */
 	asus_wmi_ec_make_block_read_query(&sensor_data->ec);
 
@@ -574,7 +562,7 @@ static int asus_wmi_ec_configure_sensor_setup(struct device *dev,
 		sensor_data->ec.nr_sensors,
 		sensor_data->ec.nr_registers);
 
-	hwdev = devm_hwmon_device_register_with_info(dev, KBUILD_MODNAME,
+	hwdev = devm_hwmon_device_register_with_info(dev, "asus_wmi_ec_sensors",
 						     sensor_data, chip_info, NULL);
 
 	return PTR_ERR_OR_ZERO(hwdev);
@@ -598,8 +586,7 @@ static int asus_wmi_probe(struct wmi_device *wdev, const void *context)
 
 	bsi = board_sensors->known_board_sensors;
 
-	sensor_data = devm_kzalloc(dev, sizeof(struct asus_wmi_sensors),
-				   GFP_KERNEL);
+	sensor_data = devm_kzalloc(dev, sizeof(*sensor_data), GFP_KERNEL);
 	if (!sensor_data)
 		return -ENOMEM;
 
@@ -607,7 +594,6 @@ static int asus_wmi_probe(struct wmi_device *wdev, const void *context)
 
 	dev_set_drvdata(dev, sensor_data);
 
-	/* ec init */
 	return asus_wmi_ec_configure_sensor_setup(dev,
 						  sensor_data, bsi);
 }
@@ -619,7 +605,7 @@ static const struct wmi_device_id asus_ec_wmi_id_table[] = {
 
 static struct wmi_driver asus_sensors_wmi_driver = {
 	.driver = {
-		.name = KBUILD_MODNAME,
+		.name = "asus_wmi_ec_sensors",
 	},
 	.id_table = asus_ec_wmi_id_table,
 	.probe = asus_wmi_probe,
