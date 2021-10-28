@@ -118,8 +118,24 @@ struct scan_control {
 	/* There is easily reclaimable cold cache in the current node */
 	unsigned int cache_trim_mode:1;
 
+#if defined(CONFIG_UNEVICTABLE_FILE)
+	/* The file pages on the current node are low */
+	unsigned int file_is_low:1;
+
+	/* The file pages on the current node are minimal */
+	unsigned int file_is_min:1;
+#endif
+
 	/* The file pages on the current node are dangerously low */
 	unsigned int file_is_tiny:1;
+
+#if defined(CONFIG_UNEVICTABLE_ANON)
+	/* The anonymous pages on the current node are low */
+	unsigned int anon_is_low:1;
+
+	/* The anonymous pages on the current node are minimal */
+	unsigned int anon_is_min:1;
+#endif
 
 	/* Allocation order */
 	s8 order;
@@ -165,6 +181,16 @@ struct scan_control {
 	} while (0)
 #else
 #define prefetchw_prev_lru_page(_page, _base, _field) do { } while (0)
+#endif
+
+#if defined(CONFIG_UNEVICTABLE_FILE)
+extern unsigned long sysctl_unevictable_file_kbytes_low;
+extern unsigned long sysctl_unevictable_file_kbytes_min;
+#endif
+
+#if defined(CONFIG_UNEVICTABLE_ANON)
+extern unsigned long sysctl_unevictable_anon_kbytes_low;
+extern unsigned long sysctl_unevictable_anon_kbytes_min;
 #endif
 
 /*
@@ -959,91 +985,6 @@ static void handle_write_error(struct address_space *mapping,
 	unlock_page(page);
 }
 
-void reclaim_throttle(pg_data_t *pgdat, enum vmscan_throttle_state reason)
-{
-	wait_queue_head_t *wqh = &pgdat->reclaim_wait[reason];
-	long timeout, ret;
-	DEFINE_WAIT(wait);
-
-	/*
-	 * Do not throttle IO workers, kthreads other than kswapd or
-	 * workqueues. They may be required for reclaim to make
-	 * forward progress (e.g. journalling workqueues or kthreads).
-	 */
-	if (!current_is_kswapd() &&
-	    current->flags & (PF_IO_WORKER|PF_KTHREAD))
-		return;
-
-	/*
-	 * These figures are pulled out of thin air.
-	 * VMSCAN_THROTTLE_ISOLATED is a transient condition based on too many
-	 * parallel reclaimers which is a short-lived event so the timeout is
-	 * short. Failing to make progress or waiting on writeback are
-	 * potentially long-lived events so use a longer timeout. This is shaky
-	 * logic as a failure to make progress could be due to anything from
-	 * writeback to a slow device to excessive references pages at the tail
-	 * of the inactive LRU.
-	 */
-	switch(reason) {
-	case VMSCAN_THROTTLE_WRITEBACK:
-		timeout = HZ/10;
-
-		if (atomic_inc_return(&pgdat->nr_writeback_throttled) == 1) {
-			WRITE_ONCE(pgdat->nr_reclaim_start,
-				node_page_state(pgdat, NR_THROTTLED_WRITTEN));
-		}
-
-		break;
-	case VMSCAN_THROTTLE_NOPROGRESS:
-		timeout = HZ/2;
-		break;
-	case VMSCAN_THROTTLE_ISOLATED:
-		timeout = HZ/50;
-		break;
-	default:
-		WARN_ON_ONCE(1);
-		timeout = HZ;
-		break;
-	}
-
-	prepare_to_wait(wqh, &wait, TASK_UNINTERRUPTIBLE);
-	ret = schedule_timeout(timeout);
-	finish_wait(wqh, &wait);
-
-	if (reason == VMSCAN_THROTTLE_WRITEBACK)
-		atomic_dec(&pgdat->nr_writeback_throttled);
-
-	trace_mm_vmscan_throttled(pgdat->node_id, jiffies_to_usecs(timeout),
-				jiffies_to_usecs(timeout - ret),
-				reason);
-}
-
-/*
- * Account for pages written if tasks are throttled waiting on dirty
- * pages to clean. If enough pages have been cleaned since throttling
- * started then wakeup the throttled tasks.
- */
-void __acct_reclaim_writeback(pg_data_t *pgdat, struct page *page,
-							int nr_throttled)
-{
-	unsigned long nr_written;
-
-	inc_node_page_state(page, NR_THROTTLED_WRITTEN);
-
-	/*
-	 * This is an inaccurate read as the per-cpu deltas may not
-	 * be synchronised. However, given that the system is
-	 * writeback throttled, it is not worth taking the penalty
-	 * of getting an accurate count. At worst, the throttle
-	 * timeout guarantees forward progress.
-	 */
-	nr_written = node_page_state(pgdat, NR_THROTTLED_WRITTEN) -
-		READ_ONCE(pgdat->nr_reclaim_start);
-
-	if (nr_written > SWAP_CLUSTER_MAX * nr_throttled)
-		wake_up(&pgdat->reclaim_wait[VMSCAN_THROTTLE_WRITEBACK]);
-}
-
 /* possible outcome of pageout() */
 typedef enum {
 	/* failed to write page out, page is locked */
@@ -1399,8 +1340,9 @@ static unsigned int shrink_page_list(struct list_head *page_list,
 
 		/*
 		 * The number of dirty pages determines if a node is marked
-		 * reclaim_congested. kswapd will stall and start writing
-		 * pages if the tail of the LRU is all dirty unqueued pages.
+		 * reclaim_congested which affects wait_iff_congested. kswapd
+		 * will stall and start writing pages if the tail of the LRU
+		 * is all dirty unqueued pages.
 		 */
 		page_check_dirty_writeback(page, &dirty, &writeback);
 		if (dirty || writeback)
@@ -2081,7 +2023,6 @@ static int too_many_isolated(struct pglist_data *pgdat, int file,
 		struct scan_control *sc)
 {
 	unsigned long inactive, isolated;
-	bool too_many;
 
 	if (current_is_kswapd())
 		return 0;
@@ -2105,13 +2046,7 @@ static int too_many_isolated(struct pglist_data *pgdat, int file,
 	if ((sc->gfp_mask & (__GFP_IO | __GFP_FS)) == (__GFP_IO | __GFP_FS))
 		inactive >>= 3;
 
-	too_many = isolated > inactive;
-
-	/* Wake up tasks throttled due to too_many_isolated. */
-	if (!too_many)
-		wake_throttle_isolated(pgdat);
-
-	return too_many;
+	return isolated > inactive;
 }
 
 /*
@@ -2220,8 +2155,8 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 			return 0;
 
 		/* wait a bit for the reclaimer. */
+		msleep(100);
 		stalled = true;
-		reclaim_throttle(pgdat, VMSCAN_THROTTLE_ISOLATED);
 
 		/* We are about to die and free our memory. Return now. */
 		if (fatal_signal_pending(current))
@@ -2732,6 +2667,23 @@ out:
 			BUG();
 		}
 
+#if defined(CONFIG_UNEVICTABLE_FILE)
+		if (file && scan) {
+			if (sc->file_is_low)
+				scan = min(scan, SWAP_CLUSTER_MAX >> sc->priority);
+			else if (sc->file_is_min)
+				scan = 0;
+		}
+#endif
+#if defined(CONFIG_UNEVICTABLE_ANON)
+		if (!file && scan) {
+			if (sc->anon_is_low)
+				scan = min(scan, SWAP_CLUSTER_MAX >> sc->priority);
+			else if (sc->anon_is_min)
+				scan = 0;
+		}
+#endif
+
 		nr[lru] = scan;
 	}
 }
@@ -2978,6 +2930,10 @@ static void shrink_node_memcgs(pg_data_t *pgdat, struct scan_control *sc)
 	} while ((memcg = mem_cgroup_iter(target_memcg, memcg, NULL)));
 }
 
+#if defined(CONFIG_UNEVICTABLE_FILE) || defined(CONFIG_UNEVICTABLE_ANON)
+#define K(x) ((x) << (PAGE_SHIFT - 10))
+#endif
+
 static void shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 {
 	struct reclaim_state *reclaim_state = current->reclaim_state;
@@ -3055,11 +3011,26 @@ again:
 	if (!cgroup_reclaim(sc)) {
 		unsigned long total_high_wmark = 0;
 		unsigned long free, anon;
+#if defined(CONFIG_UNEVICTABLE_FILE)
+		unsigned long reclaimable_file, clean_file, dirty_file;
+#endif
+#if defined(CONFIG_UNEVICTABLE_ANON)
+		unsigned long reclaimable_anon;
+#endif
 		int z;
 
 		free = sum_zone_node_page_state(pgdat->node_id, NR_FREE_PAGES);
 		file = node_page_state(pgdat, NR_ACTIVE_FILE) +
 			   node_page_state(pgdat, NR_INACTIVE_FILE);
+#if defined(CONFIG_UNEVICTABLE_FILE)
+		reclaimable_file = file + node_page_state(pgdat, NR_ISOLATED_FILE);
+		dirty_file = node_page_state(pgdat, NR_FILE_DIRTY);
+#endif
+#if defined(CONFIG_UNEVICTABLE_ANON)
+		reclaimable_anon = node_page_state(pgdat, NR_ACTIVE_ANON) +
+				   node_page_state(pgdat, NR_INACTIVE_ANON) +
+				   node_page_state(pgdat, NR_ISOLATED_ANON);
+#endif
 
 		for (z = 0; z < MAX_NR_ZONES; z++) {
 			struct zone *zone = &pgdat->node_zones[z];
@@ -3080,6 +3051,32 @@ again:
 			file + free <= total_high_wmark &&
 			!(sc->may_deactivate & DEACTIVATE_ANON) &&
 			anon >> sc->priority;
+
+#if defined(CONFIG_UNEVICTABLE_FILE)
+		/*
+		 * node_page_state() sum can go out of sync since
+		 * all the values are not read at once
+		 */
+		if (unlikely(reclaimable_file < dirty_file))
+			/*
+			 * in this case assume the system does not have
+			 * clean file pages anymore
+			 */
+			clean_file = 0;
+		else
+			clean_file = reclaimable_file - dirty_file;
+
+		sc->file_is_low = K(clean_file) < sysctl_unevictable_file_kbytes_low &&
+			          K(clean_file) > sysctl_unevictable_file_kbytes_min;
+
+		sc->file_is_min = K(clean_file) <= sysctl_unevictable_file_kbytes_min;
+#endif
+#if defined(CONFIG_UNEVICTABLE_ANON)
+		sc->anon_is_low = K(reclaimable_anon) < sysctl_unevictable_anon_kbytes_low &&
+				  K(reclaimable_anon) > sysctl_unevictable_anon_kbytes_min;
+
+		sc->anon_is_min = K(reclaimable_anon) <= sysctl_unevictable_anon_kbytes_min;
+#endif
 	}
 
 	shrink_node_memcgs(pgdat, sc);
@@ -3126,19 +3123,19 @@ again:
 		 * If kswapd scans pages marked for immediate
 		 * reclaim and under writeback (nr_immediate), it
 		 * implies that pages are cycling through the LRU
-		 * faster than they are written so forcibly stall
-		 * until some pages complete writeback.
+		 * faster than they are written so also forcibly stall.
 		 */
 		if (sc->nr.immediate)
-			reclaim_throttle(pgdat, VMSCAN_THROTTLE_WRITEBACK);
+			congestion_wait(BLK_RW_ASYNC, HZ/10);
 	}
 
 	/*
-	 * Tag a node/memcg as congested if all the dirty pages were marked
-	 * for writeback and immediate reclaim (counted in nr.congested).
+	 * Tag a node/memcg as congested if all the dirty pages
+	 * scanned were backed by a congested BDI and
+	 * wait_iff_congested will stall.
 	 *
 	 * Legacy memcg will stall in page writeback so avoid forcibly
-	 * stalling in reclaim_throttle().
+	 * stalling in wait_iff_congested().
 	 */
 	if ((current_is_kswapd() ||
 	     (cgroup_reclaim(sc) && writeback_throttling_sane(sc))) &&
@@ -3146,15 +3143,15 @@ again:
 		set_bit(LRUVEC_CONGESTED, &target_lruvec->flags);
 
 	/*
-	 * Stall direct reclaim for IO completions if the lruvec is
-	 * node is congested. Allow kswapd to continue until it
+	 * Stall direct reclaim for IO completions if underlying BDIs
+	 * and node is congested. Allow kswapd to continue until it
 	 * starts encountering unqueued dirty pages or cycling through
 	 * the LRU too quickly.
 	 */
 	if (!current_is_kswapd() && current_may_throttle() &&
 	    !sc->hibernation_mode &&
 	    test_bit(LRUVEC_CONGESTED, &target_lruvec->flags))
-		reclaim_throttle(pgdat, VMSCAN_THROTTLE_WRITEBACK);
+		wait_iff_congested(BLK_RW_ASYNC, HZ/10);
 
 	if (should_continue_reclaim(pgdat, sc->nr_reclaimed - nr_reclaimed,
 				    sc))
@@ -3200,36 +3197,6 @@ static inline bool compaction_ready(struct zone *zone, struct scan_control *sc)
 	watermark = high_wmark_pages(zone) + compact_gap(sc->order);
 
 	return zone_watermark_ok_safe(zone, 0, watermark, sc->reclaim_idx);
-}
-
-static void consider_reclaim_throttle(pg_data_t *pgdat, struct scan_control *sc)
-{
-	/*
-	 * If reclaim is making progress greater than 12% efficiency then
-	 * wake all the NOPROGRESS throttled tasks.
-	 */
-	if (sc->nr_reclaimed > (sc->nr_scanned >> 3)) {
-		wait_queue_head_t *wqh;
-
-		wqh = &pgdat->reclaim_wait[VMSCAN_THROTTLE_NOPROGRESS];
-		if (waitqueue_active(wqh))
-			wake_up(wqh);
-
-		return;
-	}
-
-	/*
-	 * Do not throttle kswapd on NOPROGRESS as it will throttle on
-	 * VMSCAN_THROTTLE_WRITEBACK if there are too many pages under
-	 * writeback and marked for immediate reclaim at the tail of
-	 * the LRU.
-	 */
-	if (current_is_kswapd())
-		return;
-
-	/* Throttle if making no progress at high prioities. */
-	if (sc->priority < DEF_PRIORITY - 2)
-		reclaim_throttle(pgdat, VMSCAN_THROTTLE_NOPROGRESS);
 }
 
 /*
@@ -3316,7 +3283,6 @@ static void shrink_zones(struct zonelist *zonelist, struct scan_control *sc)
 			continue;
 		last_pgdat = zone->zone_pgdat;
 		shrink_node(zone->zone_pgdat, sc);
-		consider_reclaim_throttle(zone->zone_pgdat, sc);
 	}
 
 	/*
@@ -4267,7 +4233,6 @@ static int kswapd(void *p)
 
 	WRITE_ONCE(pgdat->kswapd_order, 0);
 	WRITE_ONCE(pgdat->kswapd_highest_zoneidx, MAX_NR_ZONES);
-	atomic_set(&pgdat->nr_writeback_throttled, 0);
 	for ( ; ; ) {
 		bool ret;
 
