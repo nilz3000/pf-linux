@@ -12,8 +12,6 @@
 #include <linux/kthread.h>
 #include <linux/mm.h>
 #include <linux/random.h>
-#include <linux/sched.h>
-#include <linux/sched/debug.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 
@@ -980,25 +978,12 @@ static unsigned long damos_wmark_wait_us(struct damos *scheme)
 	return 0;
 }
 
-/* sleep for @usecs in idle mode */
-static void __sched damon_usleep_idle(unsigned long usecs)
-{
-	ktime_t exp = ktime_add_us(ktime_get(), usecs);
-	u64 delta = usecs * NSEC_PER_USEC / 100;	/* allow 1% error */
-
-	for (;;) {
-		__set_current_state(TASK_IDLE);
-		if (!schedule_hrtimeout_range(&exp, delta, HRTIMER_MODE_ABS))
-			break;
-	}
-}
-
 static void kdamond_usleep(unsigned long usecs)
 {
 	if (usecs > 100 * 1000)
 		schedule_timeout_idle(usecs_to_jiffies(usecs));
 	else
-		damon_usleep_idle(usecs);
+		usleep_idle_range(usecs, usecs + 1);
 }
 
 /* Returns negative error code if it's not activated but should return */
