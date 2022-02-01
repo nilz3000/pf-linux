@@ -1193,7 +1193,7 @@ static inline unsigned int tsi_temp_from_reg(unsigned int reg)
 
 struct nct6775_data {
 	int addr;	/* IO base of hw monitor block */
-	int sioreg;	/* SIO register address */
+	struct nct6775_sio_data *sio_data;
 	enum kinds kind;
 	const char *name;
 
@@ -3631,7 +3631,7 @@ clear_caseopen(struct device *dev, struct device_attribute *attr,
 	       const char *buf, size_t count)
 {
 	struct nct6775_data *data = dev_get_drvdata(dev);
-	struct nct6775_sio_data *sio_data = dev_get_platdata(dev);
+	struct nct6775_sio_data *sio_data = data->sio_data;
 	int nr = to_sensor_dev_attr(attr)->index - INTRUSION_ALARM_BASE;
 	unsigned long val;
 	u8 reg;
@@ -4040,7 +4040,7 @@ static int nct6775_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	data->kind = sio_data->kind;
-	data->sioreg = sio_data->sioreg;
+	data->sio_data = sio_data;
 
 	if (sio_data->access == access_direct) {
 		data->addr = res->start;
