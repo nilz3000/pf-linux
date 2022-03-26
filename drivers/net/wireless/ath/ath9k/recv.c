@@ -647,8 +647,12 @@ static bool ath_edma_get_buffers(struct ath_softc *sc,
 				common->rx_bufsize, DMA_FROM_DEVICE);
 
 	ret = ath9k_hw_process_rxdesc_edma(ah, rs, skb->data);
-	if (ret == -EINPROGRESS)
+	if (ret == -EINPROGRESS) {
+		/*let device gain the buffer again*/
+		dma_sync_single_for_device(sc->dev, bf->bf_buf_addr,
+				common->rx_bufsize, DMA_FROM_DEVICE);
 		return false;
+	}
 
 	__skb_unlink(skb, &rx_edma->rx_fifo);
 	if (ret == -EINVAL) {
