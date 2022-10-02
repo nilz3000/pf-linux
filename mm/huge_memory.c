@@ -2445,7 +2445,8 @@ static void __split_huge_page_tail(struct page *head, int tail,
 			page_tail);
 	page_tail->mapping = head->mapping;
 	page_tail->index = head->index + tail;
-	page_tail->private = 0;
+	if (!PageSwapCache(page_tail))
+		page_tail->private = 0;
 
 	/* Page flags must be visible before we make the page non-compound. */
 	smp_wmb();
