@@ -21,6 +21,15 @@
 
 /********************************** Helper ***********************************/
 
+static bool lrng_trust_bootloader __initdata =
+	IS_ENABLED(CONFIG_RANDOM_TRUST_BOOTLOADER);
+
+static int __init lrng_parse_trust_bootloader(char *arg)
+{
+	return kstrtobool(arg, &lrng_trust_bootloader);
+}
+early_param("random.trust_bootloader", lrng_parse_trust_bootloader);
+
 int __init random_init(const char *command_line)
 {
 	int ret = lrng_rand_initialize();
@@ -71,11 +80,9 @@ EXPORT_SYMBOL_GPL(add_hwgenerator_randomness);
  *	 insert into entropy pool.
  * @size: length of buffer
  */
-void add_bootloader_randomness(const void *buf, size_t size)
+void __init add_bootloader_randomness(const void *buf, size_t size)
 {
-	lrng_pool_insert_aux(buf, size,
-			     IS_ENABLED(CONFIG_RANDOM_TRUST_BOOTLOADER) ?
-			     size * 8 : 0);
+	lrng_pool_insert_aux(buf, size, lrng_trust_bootloader ? size * 8 : 0);
 }
 
 /*
