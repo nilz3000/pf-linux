@@ -90,7 +90,7 @@ MODULE_PARM_DESC(ntg1, "Enable AIS20/31 NTG.1 compliant seeding strategy\n");
 
 /********************************** Helper ***********************************/
 
-bool lrng_ntg1_compliant(void)
+bool lrng_ntg1_2022_compliant(void)
 {
 	/* Implies use of /dev/random w/ O_SYNC / getrandom w/ GRND_RANDOM */
 	return ntg1;
@@ -379,12 +379,12 @@ void __init lrng_rand_initialize_early(void)
 	unsigned int i;
 
 	for (i = 0; i < ARRAY_SIZE(seed.data); i += longs) {
-		longs = arch_get_random_seed_longs(seed.data + i,
-						   ARRAY_SIZE(seed.data) - i);
+		longs = arch_get_random_seed_longs_early(seed.data + i,
+						ARRAY_SIZE(seed.data) - i);
 		if (longs)
 			continue;
-		longs = arch_get_random_longs(seed.data + i,
-					      ARRAY_SIZE(seed.data) - i);
+		longs = arch_get_random_longs_early(seed.data + i,
+						    ARRAY_SIZE(seed.data) - i);
 		if (longs)
 			continue;
 		longs = 1;
@@ -450,7 +450,8 @@ void lrng_es_add_entropy(void)
 }
 
 /* Fill the seed buffer with data from the noise sources */
-void lrng_fill_seed_buffer(struct entropy_buf *eb, u32 requested_bits)
+void lrng_fill_seed_buffer(struct entropy_buf *eb, u32 requested_bits,
+			   bool force)
 {
 	struct lrng_state *state = &lrng_state;
 	u32 i, req_ent = lrng_sp80090c_compliant() ?
@@ -467,7 +468,8 @@ void lrng_fill_seed_buffer(struct entropy_buf *eb, u32 requested_bits)
 	 * operated SP800-90C compliant we want to comply with SP800-90A section
 	 * 9.2 mandating that DRNG is reseeded with the security strength.
 	 */
-	if (state->lrng_fully_seeded && (lrng_avail_entropy() < req_ent)) {
+	if (!force &&
+	    state->lrng_fully_seeded && (lrng_avail_entropy() < req_ent)) {
 		for_each_lrng_es(i)
 			eb->e_bits[i] = 0;
 

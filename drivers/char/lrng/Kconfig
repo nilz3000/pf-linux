@@ -10,6 +10,12 @@ config RANDOM_DEFAULT_IMPL
 	  The default random number generator as provided with
 	  drivers/char/random.c is selected with this option.
 
+config LRNG_AUTO_SELECTED
+	bool
+	default y if !RANDOM_DEFAULT_IMPL
+	default n if RANDOM_DEFAULT_IMPL
+	select LRNG
+
 config LRNG
 	bool "Linux Random Number Generator"
 	default n
@@ -889,6 +895,13 @@ config LRNG_RUNTIME_MAX_WO_RESEED_CONFIG
 	  allowing the setting of the maximum number of DRNG generate
 	  operations without a reseed that has full entropy. The
 	  interface is lrng_drng.max_wo_reseed.
+
+config LRNG_RUNTIME_FORCE_SEEDING_DISABLE
+	bool "Enable runtime configuration of force seeding"
+	help
+	  When enabling this option, the LRNG provides an interface
+	  allowing the disabling of the force seeding when the DRNG
+	  is not fully seeded but entropy is available.
 
 config LRNG_TEST_CPU_ES_COMPRESSION
 	bool "Force CPU ES compression operation"

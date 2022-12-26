@@ -85,6 +85,13 @@ MODULE_PARM_DESC(max_wo_reseed,
 		 "Maximum number of DRNG generate operation without full reseed\n");
 #endif
 
+static bool force_seeding = true;
+#ifdef CONFIG_LRNG_RUNTIME_FORCE_SEEDING_DISABLE
+module_param(force_seeding, bool, 0444);
+MODULE_PARM_DESC(force_seeding,
+		 "Allow disabling of the forced seeding when insufficient entropy is availabe\n");
+#endif
+
 /* Wait queue to wait until the LRNG is initialized - can freely be used */
 DECLARE_WAIT_QUEUE_HEAD(lrng_init_wait);
 
@@ -118,11 +125,13 @@ struct lrng_drng *lrng_drng_node_instance(void)
 
 void lrng_drng_reset(struct lrng_drng *drng)
 {
-	atomic_set(&drng->requests, LRNG_DRNG_RESEED_THRESH);
+	/* Ensure reseed during next call */
+	atomic_set(&drng->requests, 1);
 	atomic_set(&drng->requests_since_fully_seeded, 0);
 	drng->last_seeded = jiffies;
 	drng->fully_seeded = false;
-	drng->force_reseed = true;
+	/* Do not set force, as this flag is used for the emergency reseeding */
+	drng->force_reseed = false;
 	pr_debug("reset DRNG\n");
 }
 
@@ -244,20 +253,58 @@ void lrng_drng_inject(struct lrng_drng *drng, const u8 *inbuf, u32 inbuflen,
  */
 static u32 lrng_drng_seed_es_nolock(struct lrng_drng *drng)
 {
-	struct entropy_buf seedbuf __aligned(LRNG_KCAPI_ALIGN);
-	u32 collected_entropy;
+	struct entropy_buf seedbuf __aligned(LRNG_KCAPI_ALIGN),
+			   collected_seedbuf;
+	u32 collected_entropy = 0;
+	unsigned int i, num_es_delivered = 0;
+	bool forced = drng->force_reseed;
 
-	lrng_fill_seed_buffer(&seedbuf,
-			      lrng_get_seed_entropy_osr(drng->fully_seeded));
+	for_each_lrng_es(i)
+		collected_seedbuf.e_bits[i] = 0;
 
-	collected_entropy = lrng_entropy_rate_eb(&seedbuf);
-	lrng_drng_inject(drng, (u8 *)&seedbuf, sizeof(seedbuf),
-			 lrng_fully_seeded(drng->fully_seeded,
-					   collected_entropy, &seedbuf),
-			 "regular");
+	do {
+		/* Count the number of ES which delivered entropy */
+		num_es_delivered = 0;
 
-	/* Set the seeding state of the LRNG */
-	lrng_init_ops(&seedbuf);
+		if (collected_entropy)
+			pr_debug("Force fully seeding level by repeatedly pull entropy from available entropy sources\n");
+
+		lrng_fill_seed_buffer(&seedbuf,
+			lrng_get_seed_entropy_osr(drng->fully_seeded),
+				      forced && !drng->fully_seeded);
+
+		collected_entropy += lrng_entropy_rate_eb(&seedbuf);
+
+		/* Sum iterations up. */
+		for_each_lrng_es(i) {
+			collected_seedbuf.e_bits[i] += seedbuf.e_bits[i];
+			num_es_delivered += !!seedbuf.e_bits[i];
+		}
+
+		lrng_drng_inject(drng, (u8 *)&seedbuf, sizeof(seedbuf),
+				 lrng_fully_seeded(drng->fully_seeded,
+						   collected_entropy,
+						   &collected_seedbuf),
+				 "regular");
+
+		/* Set the seeding state of the LRNG */
+		lrng_init_ops(&collected_seedbuf);
+
+	/*
+	 * Emergency reseeding: If we reached the min seed threshold now
+	 * multiple times but never reached fully seeded level and we collect
+	 * entropy, keep doing it until we reached fully seeded level for
+	 * at least one DRNG. This operation is not continued if the
+	 * ES do not deliver entropy such that we cannot reach the fully seeded
+	 * level.
+	 *
+	 * The emergency reseeding implies that the consecutively injected
+	 * entropy can be added up. This is applicable due to the fact that
+	 * the entire operation is atomic which means that the DRNG is not
+	 * producing data while this is ongoing.
+	 */
+	} while (force_seeding && forced && !drng->fully_seeded &&
+		 num_es_delivered >= (lrng_ntg1_2022_compliant() ? 2 : 1));
 
 	memzero_explicit(&seedbuf, sizeof(seedbuf));
 
@@ -293,7 +340,7 @@ static void lrng_drng_seed(struct lrng_drng *drng)
 	}
 }
 
-static void _lrng_drng_seed_work(struct lrng_drng *drng, u32 node)
+static void lrng_drng_seed_work_one(struct lrng_drng *drng, u32 node)
 {
 	pr_debug("reseed triggered by system events for DRNG on NUMA node %d\n",
 		 node);
@@ -307,7 +354,7 @@ static void _lrng_drng_seed_work(struct lrng_drng *drng, u32 node)
 /*
  * DRNG reseed trigger: Kernel thread handler triggered by the schedule_work()
  */
-void lrng_drng_seed_work(struct work_struct *dummy)
+static void __lrng_drng_seed_work(bool force)
 {
 	struct lrng_drng **lrng_drng = lrng_drng_instances();
 	u32 node;
@@ -317,25 +364,32 @@ void lrng_drng_seed_work(struct work_struct *dummy)
 			struct lrng_drng *drng = lrng_drng[node];
 
 			if (drng && !drng->fully_seeded) {
-				_lrng_drng_seed_work(drng, node);
-				goto out;
+				drng->force_reseed |= force;
+				lrng_drng_seed_work_one(drng, node);
+				return;
 			}
 		}
 	} else {
 		if (!lrng_drng_init.fully_seeded) {
-			_lrng_drng_seed_work(&lrng_drng_init, 0);
-			goto out;
+			lrng_drng_init.force_reseed |= force;
+			lrng_drng_seed_work_one(&lrng_drng_init, 0);
+			return;
 		}
 	}
 
 	if (!lrng_drng_pr.fully_seeded) {
-		_lrng_drng_seed_work(&lrng_drng_pr, 0);
-		goto out;
+		lrng_drng_pr.force_reseed |= force;
+		lrng_drng_seed_work_one(&lrng_drng_pr, 0);
+		return;
 	}
 
 	lrng_pool_all_numa_nodes_seeded(true);
+}
 
-out:
+void lrng_drng_seed_work(struct work_struct *dummy)
+{
+	__lrng_drng_seed_work(false);
+
 	/* Allow the seeding operation to be called again */
 	lrng_pool_unlock();
 }
@@ -539,8 +593,25 @@ void lrng_reset(void)
 
 /******************* Generic LRNG kernel output interfaces ********************/
 
+static void lrng_force_fully_seeded(void)
+{
+	static unsigned int ctr = 0;
+
+	if (lrng_pool_all_numa_nodes_seeded_get())
+		return;
+
+	if (ctr++ < LRNG_FORCE_FULLY_SEEDED_ATTEMPT)
+		return;
+
+	lrng_pool_lock();
+	__lrng_drng_seed_work(true);
+	lrng_pool_unlock();
+	ctr = 0;
+}
+
 static int lrng_drng_sleep_while_not_all_nodes_seeded(unsigned int nonblock)
 {
+	lrng_force_fully_seeded();
 	if (lrng_pool_all_numa_nodes_seeded_get())
 		return 0;
 	if (nonblock)
@@ -552,6 +623,7 @@ static int lrng_drng_sleep_while_not_all_nodes_seeded(unsigned int nonblock)
 
 int lrng_drng_sleep_while_nonoperational(int nonblock)
 {
+	lrng_force_fully_seeded();
 	if (likely(lrng_state_operational()))
 		return 0;
 	if (nonblock)
@@ -562,6 +634,7 @@ int lrng_drng_sleep_while_nonoperational(int nonblock)
 
 int lrng_drng_sleep_while_non_min_seeded(void)
 {
+	lrng_force_fully_seeded();
 	if (likely(lrng_state_min_seeded()))
 		return 0;
 	return wait_event_interruptible(lrng_init_wait,
@@ -607,7 +680,8 @@ ssize_t lrng_get_seed(u64 *buf, size_t nbytes, unsigned int flags)
 	for (;;) {
 		lrng_fill_seed_buffer(eb,
 			lrng_get_seed_entropy_osr(flags &
-						  LRNG_GET_SEED_FULLY_SEEDED));
+						  LRNG_GET_SEED_FULLY_SEEDED),
+						  false);
 		collected_bits = lrng_entropy_rate_eb(eb);
 
 		/* Break the collection loop if we got entropy, ... */
