@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *  DDC/CI bus driver
  *
@@ -82,6 +81,7 @@ struct ddcci_device_id {
  * @bus_drv_data: Driver internal data structure.
  * @dev: Driver model device node for the slave.
  * @cdev: Character device structure
+ * @cdev_sem: RW semaphore for exclusive access on character device.
  * @prot: Device class ("protocol", from capability string)
  * @type: Device subclass ("type", from capability string)
  * @model: Device model (from capability string)
@@ -99,6 +99,7 @@ struct ddcci_device {
 	struct ddcci_bus_drv_data *bus_drv_data;
 	struct device dev;
 	struct cdev cdev;
+	struct rw_semaphore cdev_sem;
 	char prot[9];
 	char type[9];
 	char model[9];

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  DDC/CI monitor backlight driver
  *
@@ -142,12 +141,12 @@ static const struct backlight_ops ddcci_backlight_ops = {
 static const char *ddcci_monitor_vcp_name(unsigned char vcp)
 {
 	switch (vcp) {
-	case DDCCI_MONITOR_BL_WHITE:
-		return "backlight";
-	case DDCCI_MONITOR_LUMINANCE:
-		return "luminance";
-	default:
-		return "???";
+		case DDCCI_MONITOR_BL_WHITE:
+			return "backlight";
+		case DDCCI_MONITOR_LUMINANCE:
+			return "luminance";
+		default:
+			return "???";
 	}
 }
 
@@ -156,20 +155,21 @@ static const char *ddcci_monitor_next_vcp_item(const char *ptr)
 	int depth = 0;
 
 	/* Sanity check */
-	if (ptr == NULL || ptr[0] == '\0')
+	if (unlikely(ptr == NULL || ptr[0] == '\0'))
 		return NULL;
 
 	/* Find next white space outside of parentheses */
 	while ((ptr = strpbrk(ptr, " ()"))) {
-		if (!ptr || depth == INT_MAX)
+		if (!ptr || depth == INT_MAX) {
 			return NULL;
-		else if (*ptr == '(')
+		} else if (*ptr == '(') {
 			depth++;
-		else if (depth > 0) {
+		} else if (depth > 0) {
 			if (*ptr == ')')
 				depth--;
-		} else
+		} else {
 			break;
+		}
 		++ptr;
 	}
 
@@ -177,7 +177,7 @@ static const char *ddcci_monitor_next_vcp_item(const char *ptr)
 	ptr = skip_spaces(ptr);
 
 	/* Check if we're now at the end of the list */
-	if (*ptr == '\0' || *ptr == ')')
+	if (unlikely(*ptr == '\0' || *ptr == ')'))
 		return NULL;
 
 	return ptr;
@@ -189,11 +189,11 @@ static bool ddcci_monitor_find_vcp(unsigned char vcp, const char *s)
 	char vcp_hex[3];
 
 	/* Sanity check */
-	if (s == NULL || s[0] == '\0')
+	if (unlikely(s == NULL || s[0] == '\0'))
 		return false;
 
 	/* Create hex representation of VCP */
-	if (snprintf(vcp_hex, 3, "%02hhX", vcp) != 2) {
+	if (unlikely(snprintf(vcp_hex, 3, "%02hhX", vcp) != 2)) {
 		pr_err("snprintf failed to convert to hex. This should not happen.\n");
 		return false;
 	}
@@ -201,8 +201,9 @@ static bool ddcci_monitor_find_vcp(unsigned char vcp, const char *s)
 	/* Search for it */
 	do {
 		if (strncasecmp(vcp_hex, ptr, 2) == 0) {
-			if (ptr[2] == ' ' || ptr[2] == '(' || ptr[2] == ')')
+			if (ptr[2] == ' ' || ptr[2] == '(' || ptr[2] == ')') {
 				return true;
+			}
 		}
 	} while ((ptr = ddcci_monitor_next_vcp_item(ptr)));
 
@@ -214,7 +215,6 @@ static int ddcci_backlight_create_symlink(struct ddcci_device *ddcci_dev)
 	int i, result;
 	struct device *dev = &ddcci_dev->dev;
 	struct kernfs_node *dirent;
-
 	for (i = 0; i < 3; ++i) {
 		dev = dev->parent;
 		if (!dev) {
@@ -230,10 +230,11 @@ static int ddcci_backlight_create_symlink(struct ddcci_device *ddcci_dev)
 	}
 
 	result = sysfs_create_link(&dev->kobj, &ddcci_dev->dev.kobj, "ddcci_backlight");
-	if (result == 0)
+	if (result == 0) {
 		dev_dbg(&ddcci_dev->dev, "created symlink %s/ddcci_backlight\n", dev_name(dev));
-	else
+	} else {
 		dev_info(&ddcci_dev->dev, "failed to create convenience symlink: %d\n", result);
+	}
 	return result;
 }
 
@@ -242,15 +243,15 @@ static int ddcci_backlight_remove_symlink(struct ddcci_device *ddcci_dev)
 	int i;
 	struct device *dev = &ddcci_dev->dev;
 	struct kernfs_node *dirent;
-
 	for (i = 0; i < 3; ++i) {
 		dev = dev->parent;
 		if (!dev)
 			return -ENOENT;
 	}
 	dirent = sysfs_get_dirent(dev->kobj.sd, "ddcci_backlight");
-	if (!dirent)
+	if (!dirent) {
 		return -ENOENT;
+	}
 
 	if ((dirent->flags & KERNFS_LINK) == 0) {
 		sysfs_put(dirent);
@@ -364,8 +365,9 @@ static int ddcci_monitor_probe(struct ddcci_device *dev,
 		 ddcci_monitor_vcp_name(drv_data->used_vcp),
 		 dev_name(&dev->dev));
 
-	if (convenience_symlink)
+	if (convenience_symlink) {
 		ddcci_backlight_create_symlink(dev);
+	}
 
 	goto end;
 err_free:
@@ -400,10 +402,10 @@ static struct ddcci_driver ddcci_backlight_driver = {
 module_ddcci_driver(ddcci_backlight_driver);
 
 /* Module parameter description */
-module_param(convenience_symlink, bool, 0644);
+module_param(convenience_symlink, bool, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(convenience_symlink, "add convenience symlink \"ddcci_backlight\" to ancestor device in sysfs (default true)");
 
-MODULE_AUTHOR("Christoph Grenz <christophg+lkml@grenz-bonn.de>");
+MODULE_AUTHOR("Christoph Grenz");
 MODULE_DESCRIPTION("DDC/CI generic monitor backlight driver");
 MODULE_VERSION("0.4.2");
 MODULE_LICENSE("GPL");
