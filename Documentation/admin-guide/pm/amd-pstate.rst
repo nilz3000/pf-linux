@@ -308,9 +308,8 @@ non-autonomous (passive) mode and guided autonomous (guided) mode.
 Active/passive/guided mode can be chosen by different kernel parameters.
 
 - In autonomous mode, platform ignores the desired performance level request
-  and takes into account only the values set to the Minimum requested
-  performance, Maximum requested performance and Energy Performance Preference
-  registers.
+  and takes into account only the values set to the minimum, maximum and energy
+  performance preference registers.
 - In non-autonomous mode, platform gets desired performance level
   from OS directly through Desired Performance Register.
 - In guided-autonomous mode, platform sets operating performance level
