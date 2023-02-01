@@ -347,8 +347,8 @@
 			  Use amd_pstate with passive mode as a scaling driver.
 			  In this mode autonomous selection is disabled.
 			  Driver requests a desired performance level and platform
-			  tires to match the same performance level (if it is
-			  satisfied by guaranteed performance level).
+			  tries to match the same performance level if it is
+			  satisfied by guaranteed performance level.
 			active
 			  Use amd_pstate_epp driver instance as the scaling driver,
 			  driver provides a hint to the hardware if software wants
