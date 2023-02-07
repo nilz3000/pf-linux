@@ -961,7 +961,7 @@ static int amd_pstate_update_status(const char *buf, size_t size)
 	if (mode_state_machine[cppc_state][mode_idx])
 		return mode_state_machine[cppc_state][mode_idx](mode_idx);
 
-	return -EBUSY;
+	return 0;
 }
 
 static ssize_t show_status(struct kobject *kobj,

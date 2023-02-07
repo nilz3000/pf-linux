@@ -385,9 +385,6 @@ control its functionality at the system level.  They are located in the
         to the operation mode represented by that string - or to be
         unregistered in the "disable" case.
 
-Note: If someone tries to change the state to same state, which is currently
-active in the driver, then this will return -EBUSY error.
-
 ``cpupower`` tool support for ``amd-pstate``
 ===============================================
 
