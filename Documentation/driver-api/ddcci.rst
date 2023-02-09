@@ -14,40 +14,48 @@ see ddcci-backlight for an example.
 2. sysfs interface
 ==================
 Each detected DDC/CI device gets a directory in /sys/bus/ddcci/devices.
-The main device on a bus is named ddcci[I²C bus number].
-Internal dependent devices are named ddcci[I²C bus number]i[hex address]
-External dependent devices are named ddcci[I²C bus number]e[hex address]
+The main device on a bus is named ddcci[I2C bus number].
+Internal dependent devices are named ddcci[I2C bus number]i[hex address]
+External dependent devices are named ddcci[I2C bus number]e[hex address]
 There the following files export information about the device:
 
-capabilities
+- capabilities
+
 The full ACCESS.bus capabilities string. It contains the protocol,
 type and model of the device, a list of all supported command
 codes, etc. See the ACCESS.bus spec for more information.
 
 - idProt
+
 ACCESS.bus protocol supported by the device. Usually "monitor".
 
 - idType
+
 ACCESS.bus device subtype. Usually "LCD" or "CRT".
 
 - idModel
+
 ACCESS.bus device model identifier. Usually a shortened form of the
 device model name.
 
 - idVendor
+
 ACCESS.bus device vendor identifier. Empty if the Identification command
 is not supported.
 
 - idModule
+
 ACCESS.bus device module identifier. Empty if the Identification command
 is not supported.
 
 - idSerial
+
 32 bit device number. A fixed serial number if it's positive, a temporary
 serial number if negative and zero if the
 Identification command is not supported.
 
 - modalias
+
 A combined identifier for driver selection. It has the form:
 ddcci:<idProt>-<idType>-<idModel>-<idVendor>-<idModule>.
 All non-alphanumeric characters (including whitespace) in the model,
@@ -57,7 +65,7 @@ with software like systemd-udevd.
 3. Character device interface
 =============================
 For each DDC/CI device a character device in
-/dev/bus/ddcci/[I²C bus number]/ is created,
+/dev/bus/ddcci/[I2C bus number]/ is created,
 127 devices are assigned in total.
 
 The main device on the bus is named display.
@@ -100,7 +108,7 @@ There is no direct synchronization if you manually change the luminance
 with the buttons on your monitor, as this can only be realized through polling
 and some monitors close their OSD every time a DDC/CI command is received.
 
-Monitor hotplugging is not detected. You need to detach/reattach the I²C driver
+Monitor hotplugging is not detected. You need to detach/reattach the I2C driver
 or reload the module.
 
 6. Debugging
