@@ -1483,7 +1483,7 @@ EXPORT_SYMBOL_GPL(cppc_get_auto_sel_caps);
 
 /*
  * cppc_set_auto_sel - Write autonomous selection register.
- * @cpunum : CPU to which to write register.
+ * @cpu    : CPU to which to write register.
  * @enable : the desired value of autonomous selection resiter to be updated.
  */
 int cppc_set_auto_sel(int cpu, bool enable)
