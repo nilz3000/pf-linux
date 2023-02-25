@@ -1140,7 +1140,7 @@ static int do_boot_cpu(int apicid, int cpu, struct task_struct *idle,
 		early_gdt_descr.address = (unsigned long)get_cpu_gdt_rw(cpu);
 		initial_stack  = idle->thread.sp;
 	} else if (!do_parallel_bringup) {
-		smpboot_control = STARTUP_SECONDARY | apicid;
+		smpboot_control = cpu;
 	}
 
 	/* Enable the espfix hack for this CPU */
@@ -1580,7 +1580,7 @@ void __init native_smp_prepare_cpus(unsigned int max_cpus)
 		 */
 		if (eax) {
 			pr_debug("Using CPUID 0xb for parallel CPU startup\n");
-			smpboot_control = STARTUP_SECONDARY | STARTUP_APICID_CPUID_0B;
+			smpboot_control = STARTUP_APICID_CPUID_0B;
 		} else {
 			pr_info("Disabling parallel bringup because CPUID 0xb looks untrustworthy\n");
 			do_parallel_bringup = false;
@@ -1588,7 +1588,7 @@ void __init native_smp_prepare_cpus(unsigned int max_cpus)
 	} else if (do_parallel_bringup) {
 		/* Without X2APIC, what's in CPUID 0x01 should suffice. */
 		pr_debug("Using CPUID 0x1 for parallel CPU startup\n");
-		smpboot_control = STARTUP_SECONDARY | STARTUP_APICID_CPUID_01;
+		smpboot_control = STARTUP_APICID_CPUID_01;
 	}
 
 	if (do_parallel_bringup) {

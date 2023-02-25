@@ -62,23 +62,15 @@ SYM_CODE_START_NOALIGN(startup_64)
 	 * tables and then reload them.
 	 */
 
-	/* Set up the stack for verify_cpu(), similar to initial_stack below */
-	leaq	(__end_init_task - FRAME_SIZE)(%rip), %rsp
+	/* Set up the stack for verify_cpu() */
+	leaq	(__end_init_task - PTREGS_SIZE)(%rip), %rsp
 
 	leaq	_text(%rip), %rdi
 
-	/*
-	 * initial_gs points to initial fixed_percpu_data struct with storage for
-	 * the stack protector canary. Global pointer fixups are needed at this
-	 * stage, so apply them as is done in fixup_pointer(), and initialize %gs
-	 * such that the canary can be accessed at %gs:40 for subsequent C calls.
-	 */
+	/* Setup GSBASE to allow stack canary access for C code */
 	movl	$MSR_GS_BASE, %ecx
-	movq	initial_gs(%rip), %rax
-	movq	$_text, %rdx
-	subq	%rdx, %rax
-	addq	%rdi, %rax
-	movq	%rax, %rdx
+	leaq	INIT_PER_CPU_VAR(fixed_percpu_data)(%rip), %rdx
+	movl	%edx, %eax
 	shrq	$32,  %rdx
 	wrmsr
 
@@ -244,28 +236,21 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 
 #ifdef CONFIG_SMP
 	/*
-	 * Is this the boot CPU coming up? If so everything is available
-	 * in initial_gs, initial_stack and early_gdt_descr.
-	 */
-	movl	smpboot_control(%rip), %edx
-	testl	$STARTUP_SECONDARY, %edx
-	jz	.Lsetup_cpu
-
-	/*
-	 * Secondary CPUs find out the offsets via the APIC ID. For parallel
-	 * boot the APIC ID is retrieved from CPUID, otherwise it's encoded
-	 * in smpboot_control:
-	 * Bit 31	STARTUP_SECONDARY flag (checked above)
+	 * For parallel boot, the APIC ID is retrieved from CPUID, and then
+	 * used to look up the CPU number.  For booting a single CPU, the
+	 * CPU number is encoded in smpboot_control.
+	 *
 	 * Bit 30	STARTUP_APICID_CPUID_0B flag (use CPUID 0x0b)
 	 * Bit 29	STARTUP_APICID_CPUID_01 flag (use CPUID 0x01)
-	 * Bit 0-24	APIC ID if STARTUP_APICID_CPUID_xx flags are not set
+	 * Bit 0-24	CPU# if STARTUP_APICID_CPUID_xx flags are not set
 	 */
-	testl	$STARTUP_APICID_CPUID_0B, %edx
+	movl	smpboot_control(%rip), %ecx
+	testl	$STARTUP_APICID_CPUID_0B, %ecx
 	jnz	.Luse_cpuid_0b
-	testl	$STARTUP_APICID_CPUID_01, %edx
+	testl	$STARTUP_APICID_CPUID_01, %ecx
 	jnz	.Luse_cpuid_01
-	andl	$0x0FFFFFFF, %edx
-	jmp	.Lsetup_AP
+	andl	$0x0FFFFFFF, %ecx
+	jmp	.Lsetup_cpu
 
 .Luse_cpuid_01:
 	mov	$0x01, %eax
@@ -286,7 +271,7 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 
 .Lfind_cpunr:
 	cmpl	(%rbx,%rcx,4), %edx
-	jz	.Linit_cpu_data
+	jz	.Lsetup_cpu
 	inc	%ecx
 	cmpl	nr_cpu_ids(%rip), %ecx
 	jb	.Lfind_cpunr
@@ -300,32 +285,34 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	hlt
 	jmp	1b
 
-.Linit_cpu_data:
+.Lsetup_cpu:
 	/* Get the per cpu offset for the given CPU# which is in ECX */
-	leaq	__per_cpu_offset(%rip), %rbx
-	movq	(%rbx,%rcx,8), %rbx
-	/* Save it for GS BASE setup */
-	movq	%rbx, initial_gs(%rip)
-
-	/* Calculate the GDT address */
-	movq	$gdt_page, %rcx
-	addq	%rbx, %rcx
-	movq	%rcx, early_gdt_descr_base(%rip)
-
-	/* Find the idle task stack */
-	movq	idle_threads(%rbx), %rcx
-	movq	TASK_threadsp(%rcx), %rcx
-	movq	%rcx, initial_stack(%rip)
+	movq	__per_cpu_offset(,%rcx,8), %rdx
+#else
+	xorl	%edx, %edx
 #endif /* CONFIG_SMP */
 
-.Lsetup_cpu:
+	/*
+	 * Setup a boot time stack - Any secondary CPU will have lost its stack
+	 * by now because the cr3-switch above unmaps the real-mode stack
+	 *
+	 * RDX contains the per-cpu offset
+	 */
+	movq	pcpu_hot + X86_current_task(%rdx), %rax
+	movq	TASK_threadsp(%rax), %rsp
+
 	/*
 	 * We must switch to a new descriptor in kernel space for the GDT
 	 * because soon the kernel won't have access anymore to the userspace
 	 * addresses where we're currently running on. We have to do that here
 	 * because in 32bit we couldn't load a 64bit linear address.
 	 */
-	lgdt	early_gdt_descr(%rip)
+	subq	$16, %rsp
+	movw	$(GDT_SIZE-1), (%rsp)
+	leaq	gdt_page(%rdx), %rax
+	movq	%rax, 2(%rsp)
+	lgdt	(%rsp)
+	addq	$16, %rsp
 
 	/* set up data segments */
 	xorl %eax,%eax
@@ -349,15 +336,12 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	 * the per cpu areas are set up.
 	 */
 	movl	$MSR_GS_BASE,%ecx
-	movl	initial_gs(%rip),%eax
-	movl	initial_gs+4(%rip),%edx
+#ifndef CONFIG_SMP
+	leaq	INIT_PER_CPU_VAR(fixed_percpu_data)(%rip), %rdx
+#endif
+	movl	%edx, %eax
+	shrq	$32, %rdx
 	wrmsr
-
-	/*
-	 * Setup a boot time stack - Any secondary CPU will have lost its stack
-	 * by now because the cr3-switch above unmaps the real-mode stack
-	 */
-	movq initial_stack(%rip), %rsp
 
 	/* Drop the realmode protection. For the boot CPU the pointer is NULL! */
 	movq	trampoline_lock(%rip), %rax
@@ -458,12 +442,9 @@ SYM_CODE_END(secondary_startup_64)
 SYM_CODE_START(start_cpu0)
 	ANNOTATE_NOENDBR
 	UNWIND_HINT_EMPTY
-	/* Load the per-cpu base for CPU#0 */
-	leaq	__per_cpu_offset(%rip), %rbx
-	movq	(%rbx), %rbx
 
 	/* Find the idle task stack */
-	movq	idle_threads(%rbx), %rcx
+	movq	PER_CPU_VAR(pcpu_hot) + X86_current_task, %rcx
 	movq	TASK_threadsp(%rcx), %rsp
 
 	jmp	.Ljump_to_C_code
@@ -509,7 +490,6 @@ SYM_CODE_END(vc_boot_ghcb)
 	__REFDATA
 	.balign	8
 SYM_DATA(initial_code,	.quad x86_64_start_kernel)
-SYM_DATA(initial_gs,	.quad INIT_PER_CPU_VAR(fixed_percpu_data))
 #ifdef CONFIG_AMD_MEM_ENCRYPT
 SYM_DATA(initial_vc_handler,	.quad handle_vc_boot_ghcb)
 #endif
@@ -518,7 +498,6 @@ SYM_DATA(initial_vc_handler,	.quad handle_vc_boot_ghcb)
  * The FRAME_SIZE gap is a convention which helps the in-kernel unwinder
  * reliably detect the end of the stack.
  */
-SYM_DATA(initial_stack, .quad init_thread_union + THREAD_SIZE - FRAME_SIZE)
 SYM_DATA(trampoline_lock, .quad 0);
 	__FINITDATA
 
@@ -749,11 +728,6 @@ SYM_DATA_END(level1_fixmap_pgt)
 #undef PMDS
 
 	.data
-	.align 16
-
-SYM_DATA(early_gdt_descr,		.word GDT_ENTRIES*8-1)
-SYM_DATA_LOCAL(early_gdt_descr_base,	.quad INIT_PER_CPU_VAR(gdt_page))
-
 	.align 16
 SYM_DATA(smpboot_control,		.long 0)
 
