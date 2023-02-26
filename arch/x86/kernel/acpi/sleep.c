@@ -58,7 +58,6 @@ asmlinkage acpi_status __visible x86_acpi_enter_sleep_state(u8 state)
  */
 int x86_acpi_suspend_lowlevel(void)
 {
-	unsigned int __maybe_unused saved_smpboot_ctrl;
 	struct wakeup_header *header =
 		(struct wakeup_header *) __va(real_mode_header->wakeup_header);
 
@@ -114,11 +113,16 @@ int x86_acpi_suspend_lowlevel(void)
 #else /* CONFIG_64BIT */
 #ifdef CONFIG_SMP
 	current->thread.sp = (unsigned long)temp_stack + sizeof(temp_stack);
-	/* Force the startup into boot mode */
-	saved_smpboot_ctrl = xchg(&smpboot_control, 0);
+	/*
+	 * Ensure the CPU knows which one it is when it comes back, if
+	 * it isn't in parallel mode and expected to work that out for
+	 * itself.
+	 */
+	if (!(smpboot_control & STARTUP_PARALLEL_MASK))
+		smpboot_control = smp_processor_id();
 #endif
 	initial_code = (unsigned long)wakeup_long64;
-       saved_magic = 0x123456789abcdef0L;
+	saved_magic = 0x123456789abcdef0L;
 #endif /* CONFIG_64BIT */
 
 	/*
@@ -128,9 +132,6 @@ int x86_acpi_suspend_lowlevel(void)
 	pause_graph_tracing();
 	do_suspend_lowlevel();
 	unpause_graph_tracing();
-
-	if (IS_ENABLED(CONFIG_64BIT) && IS_ENABLED(CONFIG_SMP))
-		smpboot_control = saved_smpboot_ctrl;
 	return 0;
 }
 

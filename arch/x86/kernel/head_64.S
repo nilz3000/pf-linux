@@ -240,8 +240,8 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	 * used to look up the CPU number.  For booting a single CPU, the
 	 * CPU number is encoded in smpboot_control.
 	 *
-	 * Bit 30	STARTUP_APICID_CPUID_0B flag (use CPUID 0x0b)
-	 * Bit 29	STARTUP_APICID_CPUID_01 flag (use CPUID 0x01)
+	 * Bit 31	STARTUP_APICID_CPUID_0B flag (use CPUID 0x0b)
+	 * Bit 30	STARTUP_APICID_CPUID_01 flag (use CPUID 0x01)
 	 * Bit 0-24	CPU# if STARTUP_APICID_CPUID_xx flags are not set
 	 */
 	movl	smpboot_control(%rip), %ecx
@@ -494,10 +494,6 @@ SYM_DATA(initial_code,	.quad x86_64_start_kernel)
 SYM_DATA(initial_vc_handler,	.quad handle_vc_boot_ghcb)
 #endif
 
-/*
- * The FRAME_SIZE gap is a convention which helps the in-kernel unwinder
- * reliably detect the end of the stack.
- */
 SYM_DATA(trampoline_lock, .quad 0);
 	__FINITDATA
 
