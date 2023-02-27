@@ -273,7 +273,7 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	cmpl	(%rbx,%rcx,4), %edx
 	jz	.Lsetup_cpu
 	inc	%ecx
-#if (NR_CPUS == 1) || defined(CONFIG_FORCE_NR_CPUS)
+#if defined(CONFIG_FORCE_NR_CPUS)
 	cmpl	$NR_CPUS, %ecx
 #else
 	cmpl	nr_cpu_ids(%rip), %ecx
