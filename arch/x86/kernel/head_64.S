@@ -273,7 +273,7 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	cmpl	(%rbx,%rcx,4), %edx
 	jz	.Lsetup_cpu
 	inc	%ecx
-#if defined(CONFIG_FORCE_NR_CPUS)
+#ifdef CONFIG_FORCE_NR_CPUS
 	cmpl	$NR_CPUS, %ecx
 #else
 	cmpl	nr_cpu_ids(%rip), %ecx
@@ -298,7 +298,7 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 
 	/*
 	 * Setup a boot time stack - Any secondary CPU will have lost its stack
-	 * by now because the cr3-switch above unmaps the real-mode stack
+	 * by now because the cr3-switch above unmaps the real-mode stack.
 	 *
 	 * RDX contains the per-cpu offset
 	 */
@@ -729,6 +729,7 @@ SYM_DATA_END(level1_fixmap_pgt)
 
 	.data
 	.align 16
+
 SYM_DATA(smpboot_control,		.long 0)
 
 	.align 16
