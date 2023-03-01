@@ -122,7 +122,10 @@ int x86_acpi_suspend_lowlevel(void)
 	 * Make the resuming CPU use the temporary stack at startup
 	 * by setting current->thread.sp to point to that. The true
 	 * %rsp will be restored with the rest of the CPU context,
-	 * by do_suspend_lowlevel().
+	 * by do_suspend_lowlevel(). And unwinders don't care about
+	 * the abuse of ->thread.sp because it's a dead variable
+	 * while the thread is running on the CPU anyway; the true
+	 * value is in the actual %rsp register.
 	 */
 	current->thread.sp = (unsigned long)temp_stack + sizeof(temp_stack);
 	/*
