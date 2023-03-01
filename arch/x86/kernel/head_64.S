@@ -293,7 +293,7 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	/* Get the per cpu offset for the given CPU# which is in ECX */
 	movq	__per_cpu_offset(,%rcx,8), %rdx
 #else
-	xorl	%edx, %edx
+	xorq	%edx, %edx /* zero-extended to clear all of RDX */
 #endif /* CONFIG_SMP */
 
 	/*
