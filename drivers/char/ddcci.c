@@ -931,7 +931,7 @@ ATTRIBUTE_GROUPS(ddcci_char_device);
 
 /* DDC/CI bus */
 
-static int ddcci_device_uevent(struct device *dev, struct kobj_uevent_env *env)
+static int ddcci_device_uevent(const struct device *dev, struct kobj_uevent_env *env)
 {
 	struct ddcci_device	*device = to_ddcci_device(dev);
 	char model[ARRAY_SIZE(device->model)];
@@ -1011,7 +1011,7 @@ static void ddcci_device_release(struct device *dev)
 	kfree(device);
 }
 
-static char *ddcci_devnode(struct device *dev,
+static char *ddcci_devnode(const struct device *dev,
 			 umode_t *mode, kuid_t *uid, kgid_t *gid)
 {
 	struct ddcci_device *device;
@@ -1021,7 +1021,7 @@ static char *ddcci_devnode(struct device *dev,
 			 device->i2c_client->adapter->nr);
 }
 
-static char *ddcci_dependent_devnode(struct device *dev,
+static char *ddcci_dependent_devnode(const struct device *dev,
 			 umode_t *mode, kuid_t *uid, kgid_t *gid)
 {
 	struct ddcci_device *device;
