@@ -43,6 +43,7 @@ static DEFINE_SEMAPHORE(core_lock);
 
 struct bus_type ddcci_bus_type;
 EXPORT_SYMBOL_GPL(ddcci_bus_type);
+static bool ddcci_bus_registered;
 
 /* Assert neccessary string array sizes  */
 #ifndef sizeof_field
@@ -1100,7 +1101,7 @@ int ddcci_register_driver(struct module *owner, struct ddcci_driver *driver)
 	int ret;
 
 	/* Can't register until after driver model init */
-	if (unlikely(WARN_ON(!ddcci_bus_type.p)))
+	if (unlikely(WARN_ON(!ddcci_bus_registered)))
 		return -EAGAIN;
 
 	pr_debug("registering driver [%s]\n", driver->driver.name);
@@ -1849,6 +1850,7 @@ static int __init ddcci_module_init(void)
 		pr_err("failed to register bus 'ddcci'\n");
 		goto err_busreg;
 	}
+	ddcci_bus_registered = true;
 
 	/* Register I2C driver */
 	ret = i2c_add_driver(&ddcci_driver);
