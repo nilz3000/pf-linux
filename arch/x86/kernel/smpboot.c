@@ -1519,8 +1519,7 @@ void __init smp_prepare_cpus_common(void)
  */
 static bool prepare_parallel_bringup(void)
 {
-	bool has_sev_es = IS_ENABLED(CONFIG_AMD_MEM_ENCRYPT) &&
-		static_branch_unlikely(&sev_es_enable_key);
+	bool has_sev_es = sev_es_active();
 
 	if (IS_ENABLED(CONFIG_X86_32))
 		return false;

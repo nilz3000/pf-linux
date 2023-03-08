@@ -251,8 +251,10 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	jnz	.Luse_cpuid_0b
 	testl	$STARTUP_APICID_CPUID_01, %ecx
 	jnz	.Luse_cpuid_01
+#ifdef CONFIG_AMD_MEM_ENCRYPT
 	testl	$STARTUP_APICID_SEV_ES, %ecx
 	jnz	.Luse_sev_cpuid_0b
+#endif
 	andl	$0x0FFFFFFF, %ecx
 	jmp	.Lsetup_cpu
 
@@ -263,6 +265,7 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	shr	$24, %edx
 	jmp	.Lsetup_AP
 
+#ifdef CONFIG_AMD_MEM_ENCRYPT
 .Luse_sev_cpuid_0b:
 	/* Set the GHCB MSR to request CPUID 0xB_EDX */
 	movl	$MSR_AMD64_SEV_ES_GHCB, %ecx
@@ -284,6 +287,7 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	cmpl	$GHCB_MSR_CPUID_RESP, %eax
 	jne	1f
 	jmp	.Lsetup_AP
+#endif
 
 .Luse_cpuid_0b:
 	mov	$0x0B, %eax
