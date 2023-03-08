@@ -1510,6 +1510,71 @@ void __init smp_prepare_cpus_common(void)
 	set_cpu_sibling_map(0);
 }
 
+
+/*
+ * We can do 64-bit AP bringup in parallel if the CPU reports its APIC
+ * ID in CPUID (either leaf 0x0B if we need the full APIC ID in X2APIC
+ * mode, or leaf 0x01 if 8 bits are sufficient). Otherwise it's too
+ * hard. And not for SEV-ES guests because they can't use CPUID that
+ * early.
+ */
+static bool __init prepare_parallel_bringup(void)
+{
+	if (IS_ENABLED(CONFIG_X86_32) || boot_cpu_data.cpuid_level < 1)
+		return false;
+
+	if (x2apic_mode) {
+		unsigned int eax, ebx, ecx, edx;
+
+		if (boot_cpu_data.cpuid_level < 0xb)
+			return false;
+
+		/*
+		 * To support parallel bringup in x2apic mode, the AP will need
+		 * to obtain its APIC ID from CPUID 0x0B, since CPUID 0x01 has
+		 * only 8 bits. Check that it is present and seems correct.
+		 */
+		cpuid_count(0xb, 0, &eax, &ebx, &ecx, &edx);
+
+		/*
+		 * AMD says that if executed with an umimplemented level in
+		 * ECX, then it will return all zeroes in EAX. Intel says it
+		 * will return zeroes in both EAX and EBX. Checking only EAX
+		 * should be sufficient.
+		 */
+		if (!eax) {
+			pr_info("Disabling parallel bringup because CPUID 0xb looks untrustworthy\n");
+			return false;
+		}
+
+		if (IS_ENABLED(AMD_MEM_ENCRYPT) && static_branch_unlikely(&sev_es_enable_key)) {
+			pr_debug("Using SEV-ES CPUID 0xb for parallel CPU startup\n");
+			smpboot_control = STARTUP_APICID_SEV_ES;
+		} else if (cc_platform_has(CC_ATTR_GUEST_STATE_ENCRYPT)) {
+			/*
+			 * Other forms of memory encryption need to implement a way of
+			 * finding the APs' APIC IDs that early.
+			 */
+			return false;
+		} else {
+			pr_debug("Using CPUID 0xb for parallel CPU startup\n");
+			smpboot_control = STARTUP_APICID_CPUID_0B;
+		}
+	} else {
+		if (cc_platform_has(CC_ATTR_GUEST_STATE_ENCRYPT))
+			return false;
+
+		/* Without X2APIC, what's in CPUID 0x01 should suffice. */
+		pr_debug("Using CPUID 0x1 for parallel CPU startup\n");
+		smpboot_control = STARTUP_APICID_CPUID_01;
+	}
+
+	cpuhp_setup_state_nocalls(CPUHP_BP_PARALLEL_DYN, "x86/cpu:kick",
+				  native_cpu_kick, NULL);
+
+	return true;
+}
+
 /*
  * Prepare for SMP bootup.
  * @max_cpus: configured maximum number of CPUs, It is a legacy parameter
@@ -1550,51 +1615,8 @@ void __init native_smp_prepare_cpus(unsigned int max_cpus)
 
 	speculative_store_bypass_ht_init();
 
-	/*
-	 * We can do 64-bit AP bringup in parallel if the CPU reports
-	 * its APIC ID in CPUID (either leaf 0x0B if we need the full
-	 * APIC ID in X2APIC mode, or leaf 0x01 if 8 bits are
-	 * sufficient). Otherwise it's too hard. And not for SEV-ES
-	 * guests because they can't use CPUID that early.
-	 */
-	if (IS_ENABLED(CONFIG_X86_32) || boot_cpu_data.cpuid_level < 1 ||
-	    (x2apic_mode && boot_cpu_data.cpuid_level < 0xb) ||
-	    cc_platform_has(CC_ATTR_GUEST_STATE_ENCRYPT))
-		do_parallel_bringup = false;
-
-	if (do_parallel_bringup && x2apic_mode) {
-		unsigned int eax, ebx, ecx, edx;
-
-		/*
-		 * To support parallel bringup in x2apic mode, the AP will need
-		 * to obtain its APIC ID from CPUID 0x0B, since CPUID 0x01 has
-		 * only 8 bits. Check that it is present and seems correct.
-		 */
-		cpuid_count(0xb, 0, &eax, &ebx, &ecx, &edx);
-
-		/*
-		 * AMD says that if executed with an umimplemented level in
-		 * ECX, then it will return all zeroes in EAX. Intel says it
-		 * will return zeroes in both EAX and EBX. Checking only EAX
-		 * should be sufficient.
-		 */
-		if (eax) {
-			pr_debug("Using CPUID 0xb for parallel CPU startup\n");
-			smpboot_control = STARTUP_APICID_CPUID_0B;
-		} else {
-			pr_info("Disabling parallel bringup because CPUID 0xb looks untrustworthy\n");
-			do_parallel_bringup = false;
-		}
-	} else if (do_parallel_bringup) {
-		/* Without X2APIC, what's in CPUID 0x01 should suffice. */
-		pr_debug("Using CPUID 0x1 for parallel CPU startup\n");
-		smpboot_control = STARTUP_APICID_CPUID_01;
-	}
-
-	if (do_parallel_bringup) {
-		cpuhp_setup_state_nocalls(CPUHP_BP_PARALLEL_DYN, "x86/cpu:kick",
-					  native_cpu_kick, NULL);
-	}
+	if (do_parallel_bringup)
+		do_parallel_bringup = prepare_parallel_bringup();
 
 	snp_set_wakeup_secondary_cpu();
 }
