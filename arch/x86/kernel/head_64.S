@@ -271,7 +271,7 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	wrmsr
 
 	/* Perform GHCB MSR protocol */
-	vmgexit
+	rep; vmmcall		/* vmgexit */
 
 	/*
 	 * Get the result. After the RDMSR:
