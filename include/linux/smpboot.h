@@ -7,9 +7,12 @@
 struct task_struct;
 
 #ifdef CONFIG_GENERIC_SMP_IDLE_THREAD
-struct task_struct *idle_thread_get(unsigned int cpu);
+struct task_struct *idle_thread_get(unsigned int cpu, bool unpoison);
 #else
-static inline struct task_struct *idle_thread_get(unsigned int cpu) { return NULL; }
+static inline struct task_struct *idle_thread_get(unsigned int cpu, bool unpoison)
+{
+	return NULL;
+}
 #endif
 
 /* Cookie handed to the thread_fn*/

@@ -31,7 +31,6 @@
 #include <linux/smpboot.h>
 #include <linux/relay.h>
 #include <linux/slab.h>
-#include <linux/scs.h>
 #include <linux/percpu-rwsem.h>
 #include <linux/cpuset.h>
 #include <linux/random.h>
@@ -588,14 +587,8 @@ static int bringup_wait_for_ap(unsigned int cpu)
 
 static int bringup_cpu(unsigned int cpu)
 {
-	struct task_struct *idle = idle_thread_get(cpu);
+	struct task_struct *idle = idle_thread_get(cpu, true);
 	int ret;
-
-	/*
-	 * Reset stale stack state from the last time this CPU was online.
-	 */
-	scs_task_reset(idle);
-	kasan_unpoison_task_stack(idle);
 
 	/*
 	 * Some architectures have to walk the irq descriptors to
@@ -614,7 +607,7 @@ static int bringup_cpu(unsigned int cpu)
 
 static int finish_cpu(unsigned int cpu)
 {
-	struct task_struct *idle = idle_thread_get(cpu);
+	struct task_struct *idle = idle_thread_get(cpu, false);
 	struct mm_struct *mm = idle->active_mm;
 
 	/*
@@ -1378,7 +1371,7 @@ static int _cpu_up(unsigned int cpu, int tasks_frozen, enum cpuhp_state target)
 
 	if (st->state == CPUHP_OFFLINE) {
 		/* Let it fail before we try to bring the cpu up */
-		idle = idle_thread_get(cpu);
+		idle = idle_thread_get(cpu, false);
 		if (IS_ERR(idle)) {
 			ret = PTR_ERR(idle);
 			goto out;

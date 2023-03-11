@@ -9,6 +9,7 @@
 #include <asm/apic.h>
 #include <asm/memtype.h>
 #include <asm/processor.h>
+#include <asm/cpu.h>
 
 #include "cpu.h"
 
