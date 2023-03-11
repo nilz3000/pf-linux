@@ -85,6 +85,7 @@
 #include <asm/hw_irq.h>
 #include <asm/stackprotector.h>
 #include <asm/sev.h>
+#include <asm/coco.h>
 
 /* representing HT siblings of each logical CPU */
 DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_sibling_map);
@@ -1346,25 +1347,23 @@ int native_cpu_up(unsigned int cpu, struct task_struct *tidle)
 	if (!do_parallel_bringup) {
 		ret = do_cpu_up(cpu, tidle);
 		if (ret)
-			return ret;
+			goto out;
 	}
 
 	ret = do_wait_cpu_initialized(cpu);
 	if (ret)
-		return ret;
+		goto out;
 
 	ret = do_wait_cpu_callin(cpu);
 	if (ret)
-		return ret;
+		goto out;
 
 	ret = do_wait_cpu_online(cpu);
 
-	if (x86_platform.legacy.warm_reset) {
-		/*
-		 * Cleanup possible dangling ends...
-		 */
+ out:
+	/* Cleanup possible dangling ends... */
+	if (x86_platform.legacy.warm_reset)
 		smpboot_restore_warm_reset_vector();
-	}
 
 	return ret;
 }
@@ -1372,7 +1371,7 @@ int native_cpu_up(unsigned int cpu, struct task_struct *tidle)
 /* Bringup step one: Send INIT/SIPI to the target AP */
 static int native_cpu_kick(unsigned int cpu)
 {
-	return do_cpu_up(cpu, idle_thread_get(cpu));
+	return do_cpu_up(cpu, idle_thread_get(cpu, true));
 }
 
 /**
@@ -1519,7 +1518,7 @@ void __init smp_prepare_cpus_common(void)
  */
 static bool prepare_parallel_bringup(void)
 {
-	bool has_sev_es = sev_es_active();
+	bool has_sev_es = false;
 
 	if (IS_ENABLED(CONFIG_X86_32))
 		return false;
@@ -1532,9 +1531,16 @@ static bool prepare_parallel_bringup(void)
 	 * startup doesn't have to be in the first round of enabling patches
 	 * for any such technology.
 	 */
-	if (cc_platform_has(CC_ATTR_GUEST_STATE_ENCRYPT) && !has_sev_es) {
-		pr_info("Disabling parallel bringup due to guest memory encryption\n");
-		return false;
+	if (cc_platform_has(CC_ATTR_GUEST_STATE_ENCRYPT)) {
+		switch (cc_get_vendor()) {
+		case CC_VENDOR_AMD:
+			has_sev_es = true;
+			break;
+
+		default:
+			pr_info("Disabling parallel bringup due to guest state encryption\n");
+			return false;
+		}
 	}
 
 	if (x2apic_mode || has_sev_es) {
