@@ -1673,8 +1673,9 @@ static int ddcci_detect(struct i2c_client *client, struct i2c_board_info *info)
 }
 
 /* I2C probe function */
-static int ddcci_probe(struct i2c_client *client, const struct i2c_device_id *id)
+static int ddcci_probe(struct i2c_client *client)
 {
+	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	int i, ret = -ENODEV, tmp;
 	unsigned char main_addr, addr;
 	struct ddcci_bus_drv_data *drv_data;
