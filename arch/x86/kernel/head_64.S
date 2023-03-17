@@ -348,6 +348,14 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	lgdt	(%rsp)
 	addq	$16, %rsp
 
+	/* Drop the realmode protection. For the boot CPU the pointer is NULL! */
+	movq	trampoline_lock(%rip), %rax
+	testq	%rax, %rax
+	jz	.Lsetup_data_segments
+	lock
+	btrl	$0, (%rax)
+
+.Lsetup_data_segments:
 	/* set up data segments */
 	xorl %eax,%eax
 	movl %eax,%ds
@@ -376,13 +384,6 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	movl	%edx, %eax
 	shrq	$32, %rdx
 	wrmsr
-
-	/* Drop the realmode protection. For the boot CPU the pointer is NULL! */
-	movq	trampoline_lock(%rip), %rax
-	testq	%rax, %rax
-	jz	.Lsetup_idt
-	lock
-	btrl	$0, (%rax)
 
 .Lsetup_idt:
 	/* Setup and Load IDT */
