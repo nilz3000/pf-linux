@@ -1371,7 +1371,7 @@ int native_cpu_up(unsigned int cpu, struct task_struct *tidle)
 /* Bringup step one: Send INIT/SIPI to the target AP */
 static int native_cpu_kick(unsigned int cpu)
 {
-	return do_cpu_up(cpu, idle_thread_get(cpu, true));
+	return do_cpu_up(cpu, idle_thread_get(cpu));
 }
 
 /**
