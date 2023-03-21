@@ -31,6 +31,7 @@
 #include <linux/smpboot.h>
 #include <linux/relay.h>
 #include <linux/slab.h>
+#include <linux/scs.h>
 #include <linux/percpu-rwsem.h>
 #include <linux/cpuset.h>
 #include <linux/random.h>
@@ -587,7 +588,7 @@ static int bringup_wait_for_ap(unsigned int cpu)
 
 static int bringup_cpu(unsigned int cpu)
 {
-	struct task_struct *idle = idle_thread_get(cpu, true);
+	struct task_struct *idle = idle_thread_get(cpu);
 	int ret;
 
 	/*
@@ -607,7 +608,7 @@ static int bringup_cpu(unsigned int cpu)
 
 static int finish_cpu(unsigned int cpu)
 {
-	struct task_struct *idle = idle_thread_get(cpu, false);
+	struct task_struct *idle = idle_thread_get(cpu);
 	struct mm_struct *mm = idle->active_mm;
 
 	/*
@@ -1371,11 +1372,17 @@ static int _cpu_up(unsigned int cpu, int tasks_frozen, enum cpuhp_state target)
 
 	if (st->state == CPUHP_OFFLINE) {
 		/* Let it fail before we try to bring the cpu up */
-		idle = idle_thread_get(cpu, false);
+		idle = idle_thread_get(cpu);
 		if (IS_ERR(idle)) {
 			ret = PTR_ERR(idle);
 			goto out;
 		}
+
+		/*
+		 * Reset stale stack state from the last time this CPU was online.
+		 */
+		scs_task_reset(idle);
+		kasan_unpoison_task_stack(idle);
 	}
 
 	cpuhp_tasks_frozen = tasks_frozen;
@@ -1524,8 +1531,22 @@ void bringup_nonboot_cpus(unsigned int setup_max_cpus)
 	for_each_present_cpu(cpu) {
 		if (num_online_cpus() >= setup_max_cpus)
 			break;
-		if (!cpu_online(cpu))
-			cpu_up(cpu, CPUHP_ONLINE);
+		if (!cpu_online(cpu)) {
+			int ret = cpu_up(cpu, CPUHP_ONLINE);
+
+			/*
+			 * For the parallel bringup case, roll all the way back
+			 * to CPUHP_OFFLINE on failure; don't leave them in the
+			 * parallel stages. This happens in the nosmt case for
+			 * non-primary threads.
+			 */
+			if (ret && cpuhp_hp_states[CPUHP_BP_PARALLEL_DYN].name) {
+				struct cpuhp_cpu_state *st = per_cpu_ptr(&cpuhp_state, cpu);
+				if (can_rollback_cpu(st))
+					WARN_ON(cpuhp_invoke_callback_range(false, cpu, st,
+									    CPUHP_OFFLINE));
+			}
+		}
 	}
 }
 

@@ -336,6 +336,17 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	movq	TASK_threadsp(%rax), %rsp
 
 	/*
+	 * Now that this CPU is running on its own stack, drop the realmode
+	 * protection. For the boot CPU the pointer is NULL!
+	 */
+	movq	trampoline_lock(%rip), %rax
+	testq	%rax, %rax
+	jz	.Lsetup_gdt
+	lock
+	btrl	$0, (%rax)
+
+.Lsetup_gdt:
+	/*
 	 * We must switch to a new descriptor in kernel space for the GDT
 	 * because soon the kernel won't have access anymore to the userspace
 	 * addresses where we're currently running on. We have to do that here
@@ -348,14 +359,6 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	lgdt	(%rsp)
 	addq	$16, %rsp
 
-	/* Drop the realmode protection. For the boot CPU the pointer is NULL! */
-	movq	trampoline_lock(%rip), %rax
-	testq	%rax, %rax
-	jz	.Lsetup_data_segments
-	lock
-	btrl	$0, (%rax)
-
-.Lsetup_data_segments:
 	/* set up data segments */
 	xorl %eax,%eax
 	movl %eax,%ds
@@ -385,7 +388,6 @@ SYM_INNER_LABEL(secondary_startup_64_no_verify, SYM_L_GLOBAL)
 	shrq	$32, %rdx
 	wrmsr
 
-.Lsetup_idt:
 	/* Setup and Load IDT */
 	pushq	%rsi
 	call	early_setup_idt
