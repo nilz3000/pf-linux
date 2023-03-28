@@ -798,6 +798,16 @@ static int __init cpu_init_udelay(char *str)
 }
 early_param("cpu_init_udelay", cpu_init_udelay);
 
+static bool do_parallel_bringup __ro_after_init = true;
+
+static int __init no_parallel_bringup(char *str)
+{
+	do_parallel_bringup = false;
+
+	return 0;
+}
+early_param("no_parallel_bringup", no_parallel_bringup);
+
 static void __init smp_quirk_init_udelay(void)
 {
 	/* if cmdline changed it from default, leave it alone */
@@ -1114,7 +1124,7 @@ static int do_boot_cpu(int apicid, int cpu, struct task_struct *idle,
 	if (IS_ENABLED(CONFIG_X86_32)) {
 		early_gdt_descr.address = (unsigned long)get_cpu_gdt_rw(cpu);
 		initial_stack  = idle->thread.sp;
-	} else {
+	} else if (!do_parallel_bringup) {
 		smpboot_control = cpu;
 	}
 
@@ -1475,6 +1485,41 @@ void __init smp_prepare_cpus_common(void)
 }
 
 /*
+ * We can do 64-bit AP bringup in parallel if the CPU reports its APIC
+ * ID in CPUID (either leaf 0x0B if we need the full APIC ID in X2APIC
+ * mode, or leaf 0x01 if 8 bits are sufficient). Otherwise it's too
+ * hard. And not for SEV-ES guests because they can't use CPUID that
+ * early.
+ */
+static bool prepare_parallel_bringup(void)
+{
+	if (IS_ENABLED(CONFIG_X86_32) || cc_platform_has(CC_ATTR_GUEST_STATE_ENCRYPT))
+		return false;
+
+	if (x2apic_mode) {
+		if (boot_cpu_data.cpuid_level < 0x0b)
+			return false;
+
+		if (check_extended_topology_leaf(0x0b) != 0) {
+			pr_info("Disabling parallel bringup because CPUID 0xb looks untrustworthy\n");
+			return false;
+		}
+
+		pr_debug("Using CPUID 0xb for parallel CPU startup\n");
+		smpboot_control = STARTUP_APICID_CPUID_0B;
+	} else {
+		/* Without X2APIC, what's in CPUID 0x01 should suffice. */
+		if (boot_cpu_data.cpuid_level < 0x01)
+			return false;
+
+		pr_debug("Using CPUID 0x1 for parallel CPU startup\n");
+		smpboot_control = STARTUP_APICID_CPUID_01;
+	}
+
+	return true;
+}
+
+/*
  * Prepare for SMP bootup.
  * @max_cpus: configured maximum number of CPUs, It is a legacy parameter
  *            for common interface support.
@@ -1513,6 +1558,9 @@ void __init native_smp_prepare_cpus(unsigned int max_cpus)
 	smp_quirk_init_udelay();
 
 	speculative_store_bypass_ht_init();
+
+	if (do_parallel_bringup)
+		do_parallel_bringup = prepare_parallel_bringup();
 
 	snp_set_wakeup_secondary_cpu();
 }
