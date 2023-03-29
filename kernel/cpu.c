@@ -1504,48 +1504,44 @@ int bringup_hibernate_cpu(unsigned int sleep_cpu)
 
 void bringup_nonboot_cpus(unsigned int setup_max_cpus)
 {
-	unsigned int n = setup_max_cpus - num_online_cpus();
-	unsigned int cpu;
+	unsigned int cpu, n = num_online_cpus();
 
 	/*
-	 * An architecture may have registered parallel pre-bringup states to
-	 * which each CPU may be brought in parallel. For each such state,
-	 * bring N CPUs to it in turn before the final round of bringing them
-	 * online.
+	 * On architectures which have setup the CPUHP_BP_PARALLEL_STARTUP
+	 * state, this invokes all BP prepare states and the parallel
+	 * startup state sends the startup IPI to each of the to be onlined
+	 * APs. This avoids waiting for each AP to respond to the startup
+	 * IPI in CPUHP_BRINGUP_CPU. The APs proceed through the low level
+	 * bringup code and then wait for the control CPU to release them
+	 * one by one for the final onlining procedure in the loop below.
+	 *
+	 * For architectures which do not support parallel bringup all
+	 * states are fully serialized in the loop below.
 	 */
-	if (n > 0) {
-		enum cpuhp_state st = CPUHP_BP_PARALLEL_DYN;
-
-		while (st <= CPUHP_BP_PARALLEL_DYN_END && cpuhp_hp_states[st].name) {
-			int i = n;
-
-			for_each_present_cpu(cpu) {
-				cpu_up(cpu, st);
-				if (!--i)
-					break;
-			}
-			st++;
+	if (!cpuhp_step_empty(true, CPUHP_BP_PARALLEL_STARTUP)) {
+		for_each_present_cpu(cpu) {
+			if (n++ >= setup_max_cpus)
+				break;
+			cpu_up(cpu, CPUHP_BP_PARALLEL_STARTUP);
 		}
 	}
 
+	/* Do the per CPU serialized bringup to ONLINE state */
 	for_each_present_cpu(cpu) {
 		if (num_online_cpus() >= setup_max_cpus)
 			break;
+
 		if (!cpu_online(cpu)) {
+			struct cpuhp_cpu_state *st = per_cpu_ptr(&cpuhp_state, cpu);
 			int ret = cpu_up(cpu, CPUHP_ONLINE);
 
 			/*
-			 * For the parallel bringup case, roll all the way back
-			 * to CPUHP_OFFLINE on failure; don't leave them in the
-			 * parallel stages. This happens in the nosmt case for
-			 * non-primary threads.
+			 * Due to the above preparation loop a failed online attempt
+			 * might have only rolled back to CPUHP_BP_PARALLEL_STARTUP. Do the
+			 * remaining cleanups. NOOP for the non parallel case.
 			 */
-			if (ret && cpuhp_hp_states[CPUHP_BP_PARALLEL_DYN].name) {
-				struct cpuhp_cpu_state *st = per_cpu_ptr(&cpuhp_state, cpu);
-				if (can_rollback_cpu(st))
-					WARN_ON(cpuhp_invoke_callback_range(false, cpu, st,
-									    CPUHP_OFFLINE));
-			}
+			if (ret && can_rollback_cpu(st))
+				WARN_ON(cpuhp_invoke_callback_range(false, cpu, st, CPUHP_OFFLINE));
 		}
 	}
 }
@@ -1918,10 +1914,6 @@ static int cpuhp_reserve_state(enum cpuhp_state state)
 		step = cpuhp_hp_states + CPUHP_BP_PREPARE_DYN;
 		end = CPUHP_BP_PREPARE_DYN_END;
 		break;
-	case CPUHP_BP_PARALLEL_DYN:
-		step = cpuhp_hp_states + CPUHP_BP_PARALLEL_DYN;
-		end = CPUHP_BP_PARALLEL_DYN_END;
-		break;
 	default:
 		return -EINVAL;
 	}
@@ -1946,15 +1938,14 @@ static int cpuhp_store_callbacks(enum cpuhp_state state, const char *name,
 	/*
 	 * If name is NULL, then the state gets removed.
 	 *
-	 * CPUHP_AP_ONLINE_DYN and CPUHP_BP_P*_DYN are handed out on
+	 * CPUHP_AP_ONLINE_DYN and CPUHP_BP_PREPARE_DYN are handed out on
 	 * the first allocation from these dynamic ranges, so the removal
 	 * would trigger a new allocation and clear the wrong (already
 	 * empty) state, leaving the callbacks of the to be cleared state
 	 * dangling, which causes wreckage on the next hotplug operation.
 	 */
 	if (name && (state == CPUHP_AP_ONLINE_DYN ||
-		     state == CPUHP_BP_PREPARE_DYN ||
-		     state == CPUHP_BP_PARALLEL_DYN)) {
+		     state == CPUHP_BP_PREPARE_DYN)) {
 		ret = cpuhp_reserve_state(state);
 		if (ret < 0)
 			return ret;

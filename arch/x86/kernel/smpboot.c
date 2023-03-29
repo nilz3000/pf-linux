@@ -252,7 +252,8 @@ static void notrace start_secondary(void *unused)
 	/*
 	 * Sync point with do_wait_cpu_callin(). The AP doesn't wait here
 	 * but just sets the bit to let the controlling CPU (BSP) know that
-	 * it's got this far.
+	 * it's got this far. The notify_cpu_starting() function is called
+	 * from smp_callin(), which advances the AP state to CPUHP_AP_ONLINE.
 	 */
 	smp_callin();
 
@@ -1568,7 +1569,7 @@ static bool prepare_parallel_bringup(void)
 		smpboot_control = STARTUP_APICID_CPUID_01;
 	}
 
-	cpuhp_setup_state_nocalls(CPUHP_BP_PARALLEL_DYN, "x86/cpu:kick",
+	cpuhp_setup_state_nocalls(CPUHP_BP_PARALLEL_STARTUP, "x86/cpu:kick",
 				  native_cpu_kick, NULL);
 	return true;
 }
