@@ -1518,7 +1518,7 @@ void bringup_nonboot_cpus(unsigned int setup_max_cpus)
 	 * For architectures which do not support parallel bringup all
 	 * states are fully serialized in the loop below.
 	 */
-	if (!cpuhp_step_empty(true, CPUHP_BP_PARALLEL_STARTUP)) {
+	if (!cpuhp_step_empty(true, cpuhp_get_step(CPUHP_BP_PARALLEL_STARTUP))) {
 		for_each_present_cpu(cpu) {
 			if (n++ >= setup_max_cpus)
 				break;
