@@ -107,7 +107,7 @@ static inline void v4l2l_get_timestamp(struct v4l2_buffer *b)
 	b->timestamp.tv_usec = (ts.tv_nsec / NSEC_PER_USEC);
 }
 
-#if !defined(__poll_t)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 16, 0)
 typedef unsigned __poll_t;
 #endif
 
@@ -352,7 +352,7 @@ struct v4l2_loopback_device {
 	char card_label[32];
 
 	wait_queue_head_t read_event;
-	spinlock_t lock;
+	spinlock_t lock, list_lock;
 };
 
 /* types of opener shows what opener wants to do with loopback */
@@ -1300,6 +1300,7 @@ static int vidioc_s_output(struct file *file, void *fh, unsigned int i)
 static int vidioc_enum_input(struct file *file, void *fh,
 			     struct v4l2_input *inp)
 {
+	struct v4l2_loopback_device *dev;
 	__u32 index = inp->index;
 	MARK();
 
@@ -1322,6 +1323,11 @@ static int vidioc_enum_input(struct file *file, void *fh,
 	inp->capabilities |= V4L2_IN_CAP_STD;
 #endif
 #endif /* V4L2LOOPBACK_WITH_STD */
+
+	dev = v4l2loopback_getdevice(file);
+	if (!dev->ready_for_capture) {
+		inp->status |= V4L2_IN_ST_NO_SIGNAL;
+	}
 
 	return 0;
 }
@@ -1632,9 +1638,11 @@ static int vidioc_dqbuf(struct file *file, void *fh, struct v4l2_buffer *buf)
 		*buf = dev->buffers[index].buffer;
 		return 0;
 	case V4L2_BUF_TYPE_VIDEO_OUTPUT:
+		spin_lock_bh(&dev->list_lock);
 		b = list_entry(dev->outbufs_list.prev, struct v4l2l_buffer,
 			       list_head);
 		list_move_tail(&b->list_head, &dev->outbufs_list);
+		spin_unlock_bh(&dev->list_lock);
 		dprintkrw("output DQBUF index: %d\n", b->buffer.index);
 		unset_flags(b);
 		*buf = b->buffer;
@@ -2474,6 +2482,7 @@ static int v4l2_loopback_add(struct v4l2_loopback_config *conf, int *ret_nr)
 
 	MARK();
 	spin_lock_init(&dev->lock);
+	spin_lock_init(&dev->list_lock);
 	INIT_LIST_HEAD(&dev->outbufs_list);
 	if (list_empty(&dev->outbufs_list)) {
 		int i;
