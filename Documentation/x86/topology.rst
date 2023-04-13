@@ -33,6 +33,7 @@ historical nature and should be cleaned up.
 The topology of a system is described in the units of:
 
     - packages
+    - cluster
     - cores
     - threads
 
@@ -90,6 +91,27 @@ Package-related topology information in the kernel:
         Cache. In general, it is a number identifying an LLC uniquely on the
         system.
 
+
+Clusters
+========
+A cluster consists of 1 or more threads. It does not matter whether the threads
+are SMT- or CMT-type threads. All the threads of a cluster share the same L2
+cache.
+
+Cluster-related topology information in the kernel:
+
+  - cluster_id:
+
+    A per-CPU variable containing:
+
+      - On Intel, the common upper bits of APIC ID of the list of CPUs sharing
+        the L2 Cache with lower bits set to 0.
+
+      - On AMD, with Topology Extension, the common upper bits of the Extended
+        APIC ID of the list of CPUs sharing the L2 Cache, left shifted to
+        remove trailing 0s.
+
+
 Cores
 =====
 A core consists of 1 or more threads. It does not matter whether the threads
@@ -125,6 +147,11 @@ Thread-related topology information in the kernel:
 
     The number of online threads is also printed in /proc/cpuinfo "siblings."
 
+  - topology_cluster_cpumask():
+
+    The cpumask contains all online threads in the cluster to which a thread
+    belongs.
+
   - topology_sibling_cpumask():
 
     The cpumask contains all online threads in the core to which a thread
@@ -137,6 +164,10 @@ Thread-related topology information in the kernel:
   - topology_physical_package_id():
 
     The physical package ID to which a thread belongs.
+
+  - topology_cluster_id();
+
+    The ID of the cluster to which a thread belongs.
 
   - topology_core_id();
 
