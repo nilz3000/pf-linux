@@ -659,7 +659,7 @@ static int find_num_cache_leaves(struct cpuinfo_x86 *c)
 	return i;
 }
 
-void cacheinfo_amd_init_l2c_id(struct cpuinfo_x86 *c, int cpu)
+void cacheinfo_topoext_init_l2c_id(struct cpuinfo_x86 *c, int cpu)
 {
 	u32 eax, ebx, ecx, edx, num_sharing_cache;
 	int i = 0, bits;
