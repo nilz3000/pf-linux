@@ -101,12 +101,11 @@ Cluster-related topology information in the kernel:
 
     A per-CPU variable containing:
 
-      - On Intel, the common upper bits of APIC ID of the list of CPUs sharing
-        the L2 Cache with lower bits set to 0.
+      - Upper bits extracted from the APIC ID.  CPUs which have the same value
+        in these bits share an L2 and have the same cluster_id.
 
-      - On AMD and Hygon, with Topology Extension, the common upper bits of the
-        Extended APIC ID of the list of CPUs sharing the L2 Cache, left shifted
-        to remove trailing 0s.
+        CPUs for which cluster information is unavailable will show 65535
+        (BAD_APICID) as the cluster_id.
 
 Cores
 =====
