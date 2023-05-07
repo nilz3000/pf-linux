@@ -268,7 +268,7 @@ static const struct v4l2_ctrl_config v4l2loopback_ctrl_timeoutimageio = {
 	.ops	= &v4l2loopback_ctrl_ops,
 	.id	= CID_TIMEOUT_IMAGE_IO,
 	.name	= "timeout_image_io",
-	.type	= V4L2_CTRL_TYPE_BOOLEAN,
+	.type	= V4L2_CTRL_TYPE_BUTTON,
 	.min	= 0,
 	.max	= 1,
 	.step	= 1,
@@ -409,8 +409,9 @@ struct v4l2l_format {
    - have writers (ready_for_capture>0)
    - and/or have readers (active_readers>0)
 */
-#define V4L2LOOPBACK_IS_FIXED_FMT(device) \
-	(device->ready_for_capture > 0 || device->active_readers > 0)
+#define V4L2LOOPBACK_IS_FIXED_FMT(device)                               \
+	(device->ready_for_capture > 0 || device->active_readers > 0 || \
+	 device->keep_format)
 
 static const unsigned int FORMATS = ARRAY_SIZE(formats);
 
@@ -635,7 +636,7 @@ static ssize_t attr_show_format(struct device *cd,
 	const struct v4l2_fract *tpf;
 	char buf4cc[5], buf_fps[32];
 
-	if (!dev || !dev->ready_for_capture)
+	if (!dev || !V4L2LOOPBACK_IS_FIXED_FMT(dev))
 		return 0;
 	tpf = &dev->capture_param.timeperframe;
 
@@ -729,6 +730,24 @@ static ssize_t attr_store_maxopeners(struct device *cd,
 static DEVICE_ATTR(max_openers, S_IRUGO | S_IWUSR, attr_show_maxopeners,
 		   attr_store_maxopeners);
 
+static ssize_t attr_show_type(struct device *cd, struct device_attribute *attr,
+			      char *buf)
+{
+	struct v4l2_loopback_device *dev = v4l2loopback_cd2dev(cd);
+
+	if (!dev)
+		return -ENODEV;
+
+	if (dev->ready_for_capture)
+		return sprintf(buf, "capture\n");
+	if (dev->ready_for_output)
+		return sprintf(buf, "output\n");
+
+	return -EAGAIN;
+}
+
+static DEVICE_ATTR(type, S_IRUGO, attr_show_type, NULL);
+
 static void v4l2loopback_remove_sysfs(struct video_device *vdev)
 {
 #define V4L2_SYSFS_DESTROY(x) device_remove_file(&vdev->dev, &dev_attr_##x)
@@ -737,6 +756,7 @@ static void v4l2loopback_remove_sysfs(struct video_device *vdev)
 		V4L2_SYSFS_DESTROY(format);
 		V4L2_SYSFS_DESTROY(buffers);
 		V4L2_SYSFS_DESTROY(max_openers);
+		V4L2_SYSFS_DESTROY(type);
 		/* ... */
 	}
 }
@@ -755,6 +775,7 @@ static void v4l2loopback_create_sysfs(struct video_device *vdev)
 		V4L2_SYSFS_CREATE(format);
 		V4L2_SYSFS_CREATE(buffers);
 		V4L2_SYSFS_CREATE(max_openers);
+		V4L2_SYSFS_CREATE(type);
 		/* ... */
 	} while (0);
 
@@ -1363,9 +1384,7 @@ static int v4l2loopback_set_ctrl(struct v4l2_loopback_device *dev, u32 id,
 		allocate_timeout_image(dev);
 		break;
 	case CID_TIMEOUT_IMAGE_IO:
-		if (val < 0 || val > 1)
-			return -EINVAL;
-		dev->timeout_image_io = val;
+		dev->timeout_image_io = 1;
 		break;
 	default:
 		return -EINVAL;
@@ -1526,10 +1545,12 @@ static int vidioc_reqbufs(struct file *file, void *fh,
 
 	dprintk("reqbufs: %d\t%d=%d\n", b->memory, b->count,
 		dev->buffers_number);
+
 	if (opener->timeout_image_io) {
+		dev->timeout_image_io = 0;
 		if (b->memory != V4L2_MEMORY_MMAP)
 			return -EINVAL;
-		b->count = 1;
+		b->count = 2;
 		return 0;
 	}
 
@@ -1863,6 +1884,8 @@ static int vidioc_streamon(struct file *file, void *fh, enum v4l2_buf_type type)
 	case V4L2_BUF_TYPE_VIDEO_CAPTURE:
 		if (!dev->ready_for_capture)
 			return -EIO;
+		if (dev->active_readers > 0)
+			return -EBUSY;
 		opener->type = READER;
 		dev->active_readers++;
 		client_usage_queue_event(dev->vdev);
@@ -2160,8 +2183,6 @@ static int v4l2_loopback_open(struct file *file)
 			return r;
 		}
 	}
-
-	dev->timeout_image_io = 0;
 
 	v4l2_fh_init(&opener->fh, video_devdata(file));
 	file->private_data = &opener->fh;
@@ -2856,14 +2877,14 @@ static long v4l2loopback_control_ioctl(struct file *file, unsigned int cmd,
                  * make sure that both refer to the same device (or bail out)
                  */
 		if ((device_nr != conf.capture_nr) && (conf.capture_nr >= 0) &&
-		    (ret != v4l2loopback_lookup(conf.capture_nr, 0)))
+		    ((ret = v4l2loopback_lookup(conf.capture_nr, 0)) < 0))
 			break;
 		MARK();
 		/* if otoh, we got the device from capture_nr and there is a valid output_nr,
                  * make sure that both refer to the same device (or bail out)
                  */
 		if ((device_nr != conf.output_nr) && (conf.output_nr >= 0) &&
-		    (ret != v4l2loopback_lookup(conf.output_nr, 0)))
+		    ((ret = v4l2loopback_lookup(conf.output_nr, 0)) < 0))
 			break;
 		MARK();
 
