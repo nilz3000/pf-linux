@@ -171,8 +171,8 @@ void __noreturn arch_cpu_idle_dead(void)
 
 	local_irq_disable();
 
-	/* Tell the core that this CPU is now safe to dispose of. */
-	cpuhp_ap_report_dead();
+	/* Tell __cpu_die() that this CPU is now safe to dispose of. */
+	(void)cpu_report_death();
 
 	/* Ensure that the cache lines are written out. */
 	flush_cache_all_local();

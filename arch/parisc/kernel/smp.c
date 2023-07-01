@@ -500,10 +500,11 @@ int __cpu_disable(void)
 void __cpu_die(unsigned int cpu)
 {
 	pdc_cpu_rendezvous_lock();
-}
 
-void arch_cpuhp_cleanup_dead_cpu(unsigned int cpu)
-{
+	if (!cpu_wait_death(cpu, 5)) {
+		pr_crit("CPU%u: cpu didn't die\n", cpu);
+		return;
+	}
 	pr_info("CPU%u: is shutting down\n", cpu);
 
 	/* set task's state to interruptible sleep */
