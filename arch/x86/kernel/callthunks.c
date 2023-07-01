@@ -133,8 +133,8 @@ static bool skip_addr(void *dest)
 	/* Accounts directly */
 	if (dest == ret_from_fork)
 		return true;
-#if defined(CONFIG_HOTPLUG_CPU) && defined(CONFIG_AMD_MEM_ENCRYPT)
-	if (dest == soft_restart_cpu)
+#ifdef CONFIG_HOTPLUG_CPU
+	if (dest == start_cpu0)
 		return true;
 #endif
 #ifdef CONFIG_FUNCTION_TRACER

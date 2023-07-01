@@ -57,8 +57,6 @@
 #include <linux/pgtable.h>
 #include <linux/overflow.h>
 #include <linux/stackprotector.h>
-#include <linux/cpuhotplug.h>
-#include <linux/mc146818rtc.h>
 
 #include <asm/acpi.h>
 #include <asm/cacheinfo.h>
@@ -76,7 +74,7 @@
 #include <asm/fpu/api.h>
 #include <asm/setup.h>
 #include <asm/uv/uv.h>
-#include <asm/microcode.h>
+#include <linux/mc146818rtc.h>
 #include <asm/i8259.h>
 #include <asm/misc.h>
 #include <asm/qspinlock.h>
@@ -103,12 +101,6 @@ EXPORT_PER_CPU_SYMBOL(cpu_die_map);
 DEFINE_PER_CPU_READ_MOSTLY(struct cpuinfo_x86, cpu_info);
 EXPORT_PER_CPU_SYMBOL(cpu_info);
 
-/* CPUs which are the primary SMT threads */
-struct cpumask __cpu_primary_thread_mask __read_mostly;
-
-/* Representing CPUs for which sibling maps can be computed */
-static cpumask_var_t cpu_sibling_setup_mask;
-
 /* Logical package management. We might want to allocate that dynamically */
 unsigned int __max_logical_packages __read_mostly;
 EXPORT_SYMBOL(__max_logical_packages);
@@ -128,6 +120,7 @@ int arch_update_cpu_topology(void)
 	x86_topology_update = false;
 	return retval;
 }
+
 
 static unsigned int smpboot_warm_reset_vector_count;
 
@@ -161,59 +154,66 @@ static inline void smpboot_restore_warm_reset_vector(void)
 
 }
 
-/* Run the next set of setup steps for the upcoming CPU */
-static void ap_starting(void)
+/*
+ * Report back to the Boot Processor during boot time or to the caller processor
+ * during CPU online.
+ */
+static void smp_callin(void)
 {
-	int cpuid = smp_processor_id();
+	int cpuid;
 
 	/*
-	 * If woken up by an INIT in an 82489DX configuration the alive
-	 * synchronization guarantees that the CPU does not reach this
-	 * point before an INIT_deassert IPI reaches the local APIC, so it
-	 * is now safe to touch the local APIC.
-	 *
-	 * Set up this CPU, first the APIC, which is probably redundant on
-	 * most boards.
+	 * If waken up by an INIT in an 82489DX configuration
+	 * cpu_callout_mask guarantees we don't get here before
+	 * an INIT_deassert IPI reaches our local APIC, so it is
+	 * now safe to touch our local APIC.
+	 */
+	cpuid = smp_processor_id();
+
+	/*
+	 * the boot CPU has finished the init stage and is spinning
+	 * on callin_map until we finish. We are free to set up this
+	 * CPU, first the APIC. (this is probably redundant on most
+	 * boards)
 	 */
 	apic_ap_setup();
 
-	/* Save the processor parameters. */
+	/*
+	 * Save our processor parameters. Note: this information
+	 * is needed for clock calibration.
+	 */
 	smp_store_cpu_info(cpuid);
 
 	/*
 	 * The topology information must be up to date before
-	 * notify_cpu_starting().
+	 * calibrate_delay() and notify_cpu_starting().
 	 */
-	set_cpu_sibling_map(cpuid);
+	set_cpu_sibling_map(raw_smp_processor_id());
 
 	ap_init_aperfmperf();
 
+	/*
+	 * Get our bogomips.
+	 * Update loops_per_jiffy in cpu_data. Previous call to
+	 * smp_store_cpu_info() stored a value that is close but not as
+	 * accurate as the value just calculated.
+	 */
+	calibrate_delay();
+	cpu_data(cpuid).loops_per_jiffy = loops_per_jiffy;
 	pr_debug("Stack at about %p\n", &cpuid);
 
 	wmb();
 
-	/*
-	 * This runs the AP through all the cpuhp states to its target
-	 * state CPUHP_ONLINE.
-	 */
 	notify_cpu_starting(cpuid);
-}
 
-static void ap_calibrate_delay(void)
-{
 	/*
-	 * Calibrate the delay loop and update loops_per_jiffy in cpu_data.
-	 * smp_store_cpu_info() stored a value that is close but not as
-	 * accurate as the value just calculated.
-	 *
-	 * As this is invoked after the TSC synchronization check,
-	 * calibrate_delay_is_known() will skip the calibration routine
-	 * when TSC is synchronized across sockets.
+	 * Allow the master to continue.
 	 */
-	calibrate_delay();
-	cpu_data(smp_processor_id()).loops_per_jiffy = loops_per_jiffy;
+	cpumask_set_cpu(cpuid, cpu_callin_mask);
 }
 
+static int cpu0_logical_apicid;
+static int enable_start_cpu0;
 /*
  * Activate a secondary processor.
  */
@@ -226,62 +226,24 @@ static void notrace start_secondary(void *unused)
 	 */
 	cr4_init();
 
-	/*
-	 * 32-bit specific. 64-bit reaches this code with the correct page
-	 * table established. Yet another historical divergence.
-	 */
-	if (IS_ENABLED(CONFIG_X86_32)) {
-		/* switch away from the initial page table */
-		load_cr3(swapper_pg_dir);
-		__flush_tlb_all();
-	}
-
-	cpu_init_exception_handling();
-
-	/*
-	 * 32-bit systems load the microcode from the ASM startup code for
-	 * historical reasons.
-	 *
-	 * On 64-bit systems load it before reaching the AP alive
-	 * synchronization point below so it is not part of the full per
-	 * CPU serialized bringup part when "parallel" bringup is enabled.
-	 *
-	 * That's even safe when hyperthreading is enabled in the CPU as
-	 * the core code starts the primary threads first and leaves the
-	 * secondary threads waiting for SIPI. Loading microcode on
-	 * physical cores concurrently is a safe operation.
-	 *
-	 * This covers both the Intel specific issue that concurrent
-	 * microcode loading on SMT siblings must be prohibited and the
-	 * vendor independent issue`that microcode loading which changes
-	 * CPUID, MSRs etc. must be strictly serialized to maintain
-	 * software state correctness.
-	 */
-	if (IS_ENABLED(CONFIG_X86_64))
-		load_ucode_ap();
-
-	/*
-	 * Synchronization point with the hotplug core. Sets this CPUs
-	 * synchronization state to ALIVE and spin-waits for the control CPU to
-	 * release this CPU for further bringup.
-	 */
-	cpuhp_ap_sync_alive();
-
-	cpu_init();
+#ifdef CONFIG_X86_32
+	/* switch away from the initial page table */
+	load_cr3(swapper_pg_dir);
+	__flush_tlb_all();
+#endif
+	cpu_init_secondary();
 	rcu_cpu_starting(raw_smp_processor_id());
 	x86_cpuinit.early_percpu_clock_init();
+	smp_callin();
 
-	ap_starting();
+	enable_start_cpu0 = 0;
 
-	/* Check TSC synchronization with the control CPU. */
-	check_tsc_sync_target();
-
+	/* otherwise gcc will move up smp_processor_id before the cpu_init */
+	barrier();
 	/*
-	 * Calibrate the delay loop after the TSC synchronization check.
-	 * This allows to skip the calibration when TSC is synchronized
-	 * across sockets.
+	 * Check TSC synchronization with the boot CPU:
 	 */
-	ap_calibrate_delay();
+	check_tsc_sync_target();
 
 	speculative_store_bypass_ht_init();
 
@@ -295,6 +257,7 @@ static void notrace start_secondary(void *unused)
 	set_cpu_online(smp_processor_id(), true);
 	lapic_online();
 	unlock_vector_lock();
+	cpu_set_state_online(smp_processor_id());
 	x86_platform.nmi_init();
 
 	/* enable local interrupts */
@@ -307,6 +270,15 @@ static void notrace start_secondary(void *unused)
 }
 
 /**
+ * topology_is_primary_thread - Check whether CPU is the primary SMT thread
+ * @cpu:	CPU to check
+ */
+bool topology_is_primary_thread(unsigned int cpu)
+{
+	return apic_id_is_primary_thread(per_cpu(x86_cpu_to_apicid, cpu));
+}
+
+/**
  * topology_smt_supported - Check whether SMT is supported by the CPUs
  */
 bool topology_smt_supported(void)
@@ -316,7 +288,6 @@ bool topology_smt_supported(void)
 
 /**
  * topology_phys_to_logical_pkg - Map a physical package id to a logical
- * @phys_pkg:	The physical package id to map
  *
  * Returns logical package id or -1 if not found
  */
@@ -333,17 +304,15 @@ int topology_phys_to_logical_pkg(unsigned int phys_pkg)
 	return -1;
 }
 EXPORT_SYMBOL(topology_phys_to_logical_pkg);
-
 /**
  * topology_phys_to_logical_die - Map a physical die id to logical
- * @die_id:	The physical die id to map
- * @cur_cpu:	The CPU for which the mapping is done
  *
  * Returns logical die id or -1 if not found
  */
-static int topology_phys_to_logical_die(unsigned int die_id, unsigned int cur_cpu)
+int topology_phys_to_logical_die(unsigned int die_id, unsigned int cur_cpu)
 {
-	int cpu, proc_id = cpu_data(cur_cpu).phys_proc_id;
+	int cpu;
+	int proc_id = cpu_data(cur_cpu).phys_proc_id;
 
 	for_each_possible_cpu(cpu) {
 		struct cpuinfo_x86 *c = &cpu_data(cpu);
@@ -354,6 +323,7 @@ static int topology_phys_to_logical_die(unsigned int die_id, unsigned int cur_cp
 	}
 	return -1;
 }
+EXPORT_SYMBOL(topology_phys_to_logical_die);
 
 /**
  * topology_update_package_map - Update the physical to logical package map
@@ -428,7 +398,7 @@ void smp_store_cpu_info(int id)
 	c->cpu_index = id;
 	/*
 	 * During boot time, CPU0 has this setup already. Save the info when
-	 * bringing up an AP.
+	 * bringing up AP or offlined CPU0.
 	 */
 	identify_secondary_cpu(c);
 	c->initialized = true;
@@ -736,9 +706,9 @@ static void impress_friends(void)
 	 * Allow the user to impress friends.
 	 */
 	pr_debug("Before bogomips\n");
-	for_each_online_cpu(cpu)
-		bogosum += cpu_data(cpu).loops_per_jiffy;
-
+	for_each_possible_cpu(cpu)
+		if (cpumask_test_cpu(cpu, cpu_callout_mask))
+			bogosum += cpu_data(cpu).loops_per_jiffy;
 	pr_info("Total of %d processors activated (%lu.%02lu BogoMIPS)\n",
 		num_online_cpus(),
 		bogosum/(500000/HZ),
@@ -825,14 +795,51 @@ static void __init smp_quirk_init_udelay(void)
 }
 
 /*
- * Wake up AP by INIT, INIT, STARTUP sequence.
+ * Poke the other CPU in the eye via NMI to wake it up. Remember that the normal
+ * INIT, INIT, STARTUP sequence will reset the chip hard for us, and this
+ * won't ... remember to clear down the APIC, etc later.
  */
-static int wakeup_secondary_cpu_via_init(int phys_apicid, unsigned long start_eip)
+int
+wakeup_secondary_cpu_via_nmi(int apicid, unsigned long start_eip)
+{
+	u32 dm = apic->dest_mode_logical ? APIC_DEST_LOGICAL : APIC_DEST_PHYSICAL;
+	unsigned long send_status, accept_status = 0;
+	int maxlvt;
+
+	/* Target chip */
+	/* Boot on the stack */
+	/* Kick the second */
+	apic_icr_write(APIC_DM_NMI | dm, apicid);
+
+	pr_debug("Waiting for send to finish...\n");
+	send_status = safe_apic_wait_icr_idle();
+
+	/*
+	 * Give the other CPU some time to accept the IPI.
+	 */
+	udelay(200);
+	if (APIC_INTEGRATED(boot_cpu_apic_version)) {
+		maxlvt = lapic_get_maxlvt();
+		if (maxlvt > 3)			/* Due to the Pentium erratum 3AP.  */
+			apic_write(APIC_ESR, 0);
+		accept_status = (apic_read(APIC_ESR) & 0xEF);
+	}
+	pr_debug("NMI sent\n");
+
+	if (send_status)
+		pr_err("APIC never delivered???\n");
+	if (accept_status)
+		pr_err("APIC delivery error (%lx)\n", accept_status);
+
+	return (send_status | accept_status);
+}
+
+static int
+wakeup_secondary_cpu_via_init(int phys_apicid, unsigned long start_eip)
 {
 	unsigned long send_status = 0, accept_status = 0;
 	int maxlvt, num_starts, j;
 
-	preempt_disable();
 	maxlvt = lapic_get_maxlvt();
 
 	/*
@@ -938,16 +945,15 @@ static int wakeup_secondary_cpu_via_init(int phys_apicid, unsigned long start_ei
 	if (accept_status)
 		pr_err("APIC delivery error (%lx)\n", accept_status);
 
-	preempt_enable();
 	return (send_status | accept_status);
 }
 
 /* reduce the number of lines printed when booting a large cpu count system */
 static void announce_cpu(int cpu, int apicid)
 {
-	static int width, node_width, first = 1;
 	static int current_node = NUMA_NO_NODE;
 	int node = early_cpu_to_node(cpu);
+	static int width, node_width;
 
 	if (!width)
 		width = num_digits(num_possible_cpus()) + 1; /* + '#' sign */
@@ -955,10 +961,10 @@ static void announce_cpu(int cpu, int apicid)
 	if (!node_width)
 		node_width = num_digits(num_possible_nodes()) + 1; /* + '#' */
 
-	if (system_state < SYSTEM_RUNNING) {
-		if (first)
-			pr_info("x86: Booting SMP configuration:\n");
+	if (cpu == 1)
+		printk(KERN_INFO "x86: Booting SMP configuration:\n");
 
+	if (system_state < SYSTEM_RUNNING) {
 		if (node != current_node) {
 			if (current_node > (-1))
 				pr_cont("\n");
@@ -969,14 +975,75 @@ static void announce_cpu(int cpu, int apicid)
 		}
 
 		/* Add padding for the BSP */
-		if (first)
+		if (cpu == 1)
 			pr_cont("%*s", width + 1, " ");
-		first = 0;
 
 		pr_cont("%*s#%d", width - num_digits(cpu), " ", cpu);
+
 	} else
 		pr_info("Booting Node %d Processor %d APIC 0x%x\n",
 			node, cpu, apicid);
+}
+
+static int wakeup_cpu0_nmi(unsigned int cmd, struct pt_regs *regs)
+{
+	int cpu;
+
+	cpu = smp_processor_id();
+	if (cpu == 0 && !cpu_online(cpu) && enable_start_cpu0)
+		return NMI_HANDLED;
+
+	return NMI_DONE;
+}
+
+/*
+ * Wake up AP by INIT, INIT, STARTUP sequence.
+ *
+ * Instead of waiting for STARTUP after INITs, BSP will execute the BIOS
+ * boot-strap code which is not a desired behavior for waking up BSP. To
+ * void the boot-strap code, wake up CPU0 by NMI instead.
+ *
+ * This works to wake up soft offlined CPU0 only. If CPU0 is hard offlined
+ * (i.e. physically hot removed and then hot added), NMI won't wake it up.
+ * We'll change this code in the future to wake up hard offlined CPU0 if
+ * real platform and request are available.
+ */
+static int
+wakeup_cpu_via_init_nmi(int cpu, unsigned long start_ip, int apicid,
+	       int *cpu0_nmi_registered)
+{
+	int id;
+	int boot_error;
+
+	preempt_disable();
+
+	/*
+	 * Wake up AP by INIT, INIT, STARTUP sequence.
+	 */
+	if (cpu) {
+		boot_error = wakeup_secondary_cpu_via_init(apicid, start_ip);
+		goto out;
+	}
+
+	/*
+	 * Wake up BSP by nmi.
+	 *
+	 * Register a NMI handler to help wake up CPU0.
+	 */
+	boot_error = register_nmi_handler(NMI_LOCAL,
+					  wakeup_cpu0_nmi, 0, "wake_cpu0");
+
+	if (!boot_error) {
+		enable_start_cpu0 = 1;
+		*cpu0_nmi_registered = 1;
+		id = apic->dest_mode_logical ? cpu0_logical_apicid : apicid;
+		boot_error = wakeup_secondary_cpu_via_nmi(id, start_ip);
+	}
+
+out:
+	preempt_enable();
+
+	return boot_error;
 }
 
 int common_cpu_up(unsigned int cpu, struct task_struct *idle)
@@ -1004,13 +1071,17 @@ int common_cpu_up(unsigned int cpu, struct task_struct *idle)
 /*
  * NOTE - on most systems this is a PHYSICAL apic ID, but on multiquad
  * (ie clustered apic addressing mode), this is a LOGICAL apic ID.
- * Returns zero if startup was successfully sent, else error code from
+ * Returns zero if CPU booted OK, else error code from
  * ->wakeup_secondary_cpu.
  */
-static int do_boot_cpu(int apicid, int cpu, struct task_struct *idle)
+static int do_boot_cpu(int apicid, int cpu, struct task_struct *idle,
+		       int *cpu0_nmi_registered)
 {
+	/* start_ip had better be page-aligned! */
 	unsigned long start_ip = real_mode_header->trampoline_start;
-	int ret;
+
+	unsigned long boot_error = 0;
+	unsigned long timeout;
 
 #ifdef CONFIG_X86_64
 	/* If 64-bit wakeup method exists, use the 64-bit mode trampoline IP */
@@ -1023,7 +1094,7 @@ static int do_boot_cpu(int apicid, int cpu, struct task_struct *idle)
 	if (IS_ENABLED(CONFIG_X86_32)) {
 		early_gdt_descr.address = (unsigned long)get_cpu_gdt_rw(cpu);
 		initial_stack  = idle->thread.sp;
-	} else if (!(smpboot_control & STARTUP_PARALLEL_MASK)) {
+	} else {
 		smpboot_control = cpu;
 	}
 
@@ -1037,6 +1108,7 @@ static int do_boot_cpu(int apicid, int cpu, struct task_struct *idle)
 	 * This grunge runs the startup process for
 	 * the targeted processor.
 	 */
+
 	if (x86_platform.legacy.warm_reset) {
 
 		pr_debug("Setting warm reset code and vector.\n");
@@ -1051,6 +1123,13 @@ static int do_boot_cpu(int apicid, int cpu, struct task_struct *idle)
 		}
 	}
 
+	/*
+	 * AP might wait on cpu_callout_mask in cpu_init() with
+	 * cpu_initialized_mask set if previous attempt to online
+	 * it timed-out. Clear cpu_initialized_mask so that after
+	 * INIT/SIPI it could start with a clean state.
+	 */
+	cpumask_clear_cpu(cpu, cpu_initialized_mask);
 	smp_mb();
 
 	/*
@@ -1058,25 +1137,66 @@ static int do_boot_cpu(int apicid, int cpu, struct task_struct *idle)
 	 * - Use a method from the APIC driver if one defined, with wakeup
 	 *   straight to 64-bit mode preferred over wakeup to RM.
 	 * Otherwise,
-	 * - Use an INIT boot APIC message
+	 * - Use an INIT boot APIC message for APs or NMI for BSP.
 	 */
 	if (apic->wakeup_secondary_cpu_64)
-		ret = apic->wakeup_secondary_cpu_64(apicid, start_ip);
+		boot_error = apic->wakeup_secondary_cpu_64(apicid, start_ip);
 	else if (apic->wakeup_secondary_cpu)
-		ret = apic->wakeup_secondary_cpu(apicid, start_ip);
+		boot_error = apic->wakeup_secondary_cpu(apicid, start_ip);
 	else
-		ret = wakeup_secondary_cpu_via_init(apicid, start_ip);
+		boot_error = wakeup_cpu_via_init_nmi(cpu, start_ip, apicid,
+						     cpu0_nmi_registered);
 
-	/* If the wakeup mechanism failed, cleanup the warm reset vector */
-	if (ret)
-		arch_cpuhp_cleanup_kick_cpu(cpu);
-	return ret;
+	if (!boot_error) {
+		/*
+		 * Wait 10s total for first sign of life from AP
+		 */
+		boot_error = -1;
+		timeout = jiffies + 10*HZ;
+		while (time_before(jiffies, timeout)) {
+			if (cpumask_test_cpu(cpu, cpu_initialized_mask)) {
+				/*
+				 * Tell AP to proceed with initialization
+				 */
+				cpumask_set_cpu(cpu, cpu_callout_mask);
+				boot_error = 0;
+				break;
+			}
+			schedule();
+		}
+	}
+
+	if (!boot_error) {
+		/*
+		 * Wait till AP completes initial initialization
+		 */
+		while (!cpumask_test_cpu(cpu, cpu_callin_mask)) {
+			/*
+			 * Allow other tasks to run while we wait for the
+			 * AP to come online. This also gives a chance
+			 * for the MTRR work(triggered by the AP coming online)
+			 * to be completed in the stop machine context.
+			 */
+			schedule();
+		}
+	}
+
+	if (x86_platform.legacy.warm_reset) {
+		/*
+		 * Cleanup possible dangling ends...
+		 */
+		smpboot_restore_warm_reset_vector();
+	}
+
+	return boot_error;
 }
 
-int native_kick_ap(unsigned int cpu, struct task_struct *tidle)
+int native_cpu_up(unsigned int cpu, struct task_struct *tidle)
 {
 	int apicid = apic->cpu_present_to_apicid(cpu);
-	int err;
+	int cpu0_nmi_registered = 0;
+	unsigned long flags;
+	int err, ret = 0;
 
 	lockdep_assert_irqs_enabled();
 
@@ -1090,10 +1210,23 @@ int native_kick_ap(unsigned int cpu, struct task_struct *tidle)
 	}
 
 	/*
+	 * Already booted CPU?
+	 */
+	if (cpumask_test_cpu(cpu, cpu_callin_mask)) {
+		pr_debug("do_boot_cpu %d Already started\n", cpu);
+		return -ENOSYS;
+	}
+
+	/*
 	 * Save current MTRR state in case it was changed since early boot
 	 * (e.g. by the ACPI SMI) to initialize new CPUs with MTRRs in sync:
 	 */
 	mtrr_save_state();
+
+	/* x86 CPUs take themselves offline, so delayed offline is OK. */
+	err = cpu_check_up_prepare(cpu);
+	if (err && err != -EBUSY)
+		return err;
 
 	/* the FPU context is blank, nobody can own it */
 	per_cpu(fpu_fpregs_owner_ctx, cpu) = NULL;
@@ -1102,44 +1235,41 @@ int native_kick_ap(unsigned int cpu, struct task_struct *tidle)
 	if (err)
 		return err;
 
-	err = do_boot_cpu(apicid, cpu, tidle);
-	if (err)
+	err = do_boot_cpu(apicid, cpu, tidle, &cpu0_nmi_registered);
+	if (err) {
 		pr_err("do_boot_cpu failed(%d) to wakeup CPU#%u\n", err, cpu);
+		ret = -EIO;
+		goto unreg_nmi;
+	}
 
-	return err;
-}
+	/*
+	 * Check TSC synchronization with the AP (keep irqs disabled
+	 * while doing so):
+	 */
+	local_irq_save(flags);
+	check_tsc_sync_source(cpu);
+	local_irq_restore(flags);
 
-int arch_cpuhp_kick_ap_alive(unsigned int cpu, struct task_struct *tidle)
-{
-	return smp_ops.kick_ap_alive(cpu, tidle);
-}
+	while (!cpu_online(cpu)) {
+		cpu_relax();
+		touch_nmi_watchdog();
+	}
 
-void arch_cpuhp_cleanup_kick_cpu(unsigned int cpu)
-{
-	/* Cleanup possible dangling ends... */
-	if (smp_ops.kick_ap_alive == native_kick_ap && x86_platform.legacy.warm_reset)
-		smpboot_restore_warm_reset_vector();
-}
+unreg_nmi:
+	/*
+	 * Clean up the nmi handler. Do this after the callin and callout sync
+	 * to avoid impact of possible long unregister time.
+	 */
+	if (cpu0_nmi_registered)
+		unregister_nmi_handler(NMI_LOCAL, "wake_cpu0");
 
-void arch_cpuhp_cleanup_dead_cpu(unsigned int cpu)
-{
-	if (smp_ops.cleanup_dead_cpu)
-		smp_ops.cleanup_dead_cpu(cpu);
-
-	if (system_state == SYSTEM_RUNNING)
-		pr_info("CPU %u is now offline\n", cpu);
-}
-
-void arch_cpuhp_sync_state_poll(void)
-{
-	if (smp_ops.poll_sync_state)
-		smp_ops.poll_sync_state();
+	return ret;
 }
 
 /**
- * arch_disable_smp_support() - Disables SMP support for x86 at boottime
+ * arch_disable_smp_support() - disables SMP support for x86 at runtime
  */
-void __init arch_disable_smp_support(void)
+void arch_disable_smp_support(void)
 {
 	disable_ioapic_support();
 }
@@ -1231,6 +1361,14 @@ static void __init smp_cpu_index_default(void)
 	}
 }
 
+static void __init smp_get_logical_apicid(void)
+{
+	if (x2apic_mode)
+		cpu0_logical_apicid = apic_read(APIC_LDR);
+	else
+		cpu0_logical_apicid = GET_APIC_LOGICAL_ID(apic_read(APIC_LDR));
+}
+
 void __init smp_prepare_cpus_common(void)
 {
 	unsigned int i;
@@ -1241,6 +1379,7 @@ void __init smp_prepare_cpus_common(void)
 	 * Setup boot CPU information
 	 */
 	smp_store_boot_cpu_info(); /* Final full version of the data */
+	cpumask_copy(cpu_callin_mask, cpumask_of(0));
 	mb();
 
 	for_each_possible_cpu(i) {
@@ -1262,21 +1401,6 @@ void __init smp_prepare_cpus_common(void)
 
 	set_cpu_sibling_map(0);
 }
-
-#ifdef CONFIG_X86_64
-/* Establish whether parallel bringup can be supported. */
-bool __init arch_cpuhp_init_parallel_bringup(void)
-{
-	if (!x86_cpuinit.parallel_bringup) {
-		pr_info("Parallel CPU startup disabled by the platform\n");
-		return false;
-	}
-
-	smpboot_control = STARTUP_READ_APICID;
-	pr_debug("Parallel CPU startup enabled: 0x%08x\n", smpboot_control);
-	return true;
-}
-#endif
 
 /*
  * Prepare for SMP bootup.
@@ -1306,6 +1430,8 @@ void __init native_smp_prepare_cpus(unsigned int max_cpus)
 
 	/* Setup local timer */
 	x86_init.timers.setup_percpu_clockev();
+
+	smp_get_logical_apicid();
 
 	pr_info("CPU0: ");
 	print_cpu_info(&cpu_data(0));
@@ -1340,6 +1466,9 @@ void __init native_smp_prepare_boot_cpu(void)
 	if (!IS_ENABLED(CONFIG_SMP))
 		switch_gdt_and_percpu_base(me);
 
+	/* already set me in cpu_online_mask in boot_cpu_init() */
+	cpumask_set_cpu(me, cpu_callout_mask);
+	cpu_set_state_online(me);
 	native_pv_lock_init();
 }
 
@@ -1463,12 +1592,6 @@ __init void prefill_possible_map(void)
 		set_cpu_possible(i, true);
 }
 
-/* correctly size the local cpu masks */
-void __init setup_cpu_local_masks(void)
-{
-	alloc_bootmem_cpumask_var(&cpu_sibling_setup_mask);
-}
-
 #ifdef CONFIG_HOTPLUG_CPU
 
 /* Recompute SMT state for all CPUs on offline */
@@ -1527,6 +1650,10 @@ static void remove_siblinginfo(int cpu)
 static void remove_cpu_from_maps(int cpu)
 {
 	set_cpu_online(cpu, false);
+	cpumask_clear_cpu(cpu, cpu_callout_mask);
+	cpumask_clear_cpu(cpu, cpu_callin_mask);
+	/* was set by cpu_init() */
+	cpumask_clear_cpu(cpu, cpu_initialized_mask);
 	numa_remove_cpu(cpu);
 }
 
@@ -1577,16 +1704,53 @@ int native_cpu_disable(void)
 	return 0;
 }
 
+int common_cpu_die(unsigned int cpu)
+{
+	int ret = 0;
+
+	/* We don't do anything here: idle task is faking death itself. */
+
+	/* They ack this in play_dead() by setting CPU_DEAD */
+	if (cpu_wait_death(cpu, 5)) {
+		if (system_state == SYSTEM_RUNNING)
+			pr_info("CPU %u is now offline\n", cpu);
+	} else {
+		pr_err("CPU %u didn't die...\n", cpu);
+		ret = -1;
+	}
+
+	return ret;
+}
+
+void native_cpu_die(unsigned int cpu)
+{
+	common_cpu_die(cpu);
+}
+
 void play_dead_common(void)
 {
 	idle_task_exit();
 
-	cpuhp_ap_report_dead();
+	/* Ack it */
+	(void)cpu_report_death();
+
 	/*
 	 * With physical CPU hotplug, we should halt the cpu
 	 */
 	local_irq_disable();
 }
+
+/**
+ * cond_wakeup_cpu0 - Wake up CPU0 if needed.
+ *
+ * If NMI wants to wake up CPU0, start CPU0.
+ */
+void cond_wakeup_cpu0(void)
+{
+	if (smp_processor_id() == 0 && enable_start_cpu0)
+		start_cpu0();
+}
+EXPORT_SYMBOL_GPL(cond_wakeup_cpu0);
 
 /*
  * We need to flush the caches before going to sleep, lest we have
@@ -1655,6 +1819,8 @@ static inline void mwait_play_dead(void)
 		__monitor(mwait_ptr, 0, 0);
 		mb();
 		__mwait(eax, 0);
+
+		cond_wakeup_cpu0();
 	}
 }
 
@@ -1663,8 +1829,11 @@ void __noreturn hlt_play_dead(void)
 	if (__this_cpu_read(cpu_info.x86) >= 4)
 		wbinvd();
 
-	while (1)
+	while (1) {
 		native_halt();
+
+		cond_wakeup_cpu0();
+	}
 }
 
 void native_play_dead(void)
@@ -1681,6 +1850,12 @@ void native_play_dead(void)
 int native_cpu_disable(void)
 {
 	return -ENOSYS;
+}
+
+void native_cpu_die(unsigned int cpu)
+{
+	/* We said "no" in __cpu_disable */
+	BUG();
 }
 
 void native_play_dead(void)
