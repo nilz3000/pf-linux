@@ -969,7 +969,7 @@ static ssize_t show_amd_pstate_hw_prefcore(struct cpufreq_policy *policy,
 
 	hw_prefcore = READ_ONCE(cpudata->hw_prefcore);
 
-	return sysfs_emit(buf, "%s\n", hw_prefcore ? "supported" : "unsupported");
+	return sysfs_emit(buf, "%s\n", str_enabled_disabled(hw_prefcore));
 }
 
 static ssize_t show_energy_performance_available_preferences(
@@ -1167,7 +1167,7 @@ static ssize_t status_store(struct device *a, struct device_attribute *b,
 static ssize_t prefcore_show(struct device *dev,
 			     struct device_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "%s\n", amd_pstate_prefcore ? "enabled" : "disabled");
+	return sysfs_emit(buf, "%s\n", str_enabled_disabled(amd_pstate_prefcore));
 }
 
 cpufreq_freq_attr_ro(amd_pstate_max_freq);
