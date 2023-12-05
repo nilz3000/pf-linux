@@ -293,6 +293,7 @@ static inline int amd_pstate_enable(bool enable)
 static int pstate_init_perf(struct amd_cpudata *cpudata)
 {
 	u64 cap1;
+	u32 highest_perf;
 
 	int ret = rdmsrl_safe_on_cpu(cpudata->cpu, MSR_AMD_CPPC_CAP1,
 				     &cap1);
@@ -305,9 +306,11 @@ static int pstate_init_perf(struct amd_cpudata *cpudata)
 	 * the default max perf.
 	 */
 	if (cpudata->hw_prefcore)
-		WRITE_ONCE(cpudata->highest_perf, AMD_PSTATE_PREFCORE_THRESHOLD);
+		highest_perf = AMD_PSTATE_PREFCORE_THRESHOLD;
 	else
-		WRITE_ONCE(cpudata->highest_perf, AMD_CPPC_HIGHEST_PERF(cap1));
+		highest_perf = AMD_CPPC_HIGHEST_PERF(cap1);
+
+	WRITE_ONCE(cpudata->highest_perf, highest_perf);
 
 	WRITE_ONCE(cpudata->nominal_perf, AMD_CPPC_NOMINAL_PERF(cap1));
 	WRITE_ONCE(cpudata->lowest_nonlinear_perf, AMD_CPPC_LOWNONLIN_PERF(cap1));
@@ -320,15 +323,18 @@ static int pstate_init_perf(struct amd_cpudata *cpudata)
 static int cppc_init_perf(struct amd_cpudata *cpudata)
 {
 	struct cppc_perf_caps cppc_perf;
+	u32 highest_perf;
 
 	int ret = cppc_get_perf_caps(cpudata->cpu, &cppc_perf);
 	if (ret)
 		return ret;
 
 	if (cpudata->hw_prefcore)
-		WRITE_ONCE(cpudata->highest_perf, AMD_PSTATE_PREFCORE_THRESHOLD);
+		highest_perf = AMD_PSTATE_PREFCORE_THRESHOLD;
 	else
-		WRITE_ONCE(cpudata->highest_perf, cppc_perf.highest_perf);
+		highest_perf = cppc_perf.highest_perf;
+
+	WRITE_ONCE(cpudata->highest_perf, highest_perf);
 
 	WRITE_ONCE(cpudata->nominal_perf, cppc_perf.nominal_perf);
 	WRITE_ONCE(cpudata->lowest_nonlinear_perf,
@@ -753,22 +759,19 @@ static void amd_pstate_init_prefcore(struct amd_cpudata *cpudata)
 
 static void amd_pstate_update_highest_perf(unsigned int cpu)
 {
-	struct cpufreq_policy *policy;
-	struct amd_cpudata *cpudata;
+	struct cpufreq_policy *policy = cpufreq_cpu_get(cpu);
+	struct amd_cpudata *cpudata = policy->driver_data;
 	u32 prev_high = 0, cur_high = 0;
 	int ret;
 
 	if ((!amd_pstate_prefcore) || (!cpudata->hw_prefcore))
-		return;
+		goto free_cpufreq_put;
 
 	ret = amd_pstate_get_highest_perf(cpu, &cur_high);
 	if (ret)
-		return;
+		goto free_cpufreq_put;
 
-	policy = cpufreq_cpu_get(cpu);
-	cpudata = policy->driver_data;
 	prev_high = READ_ONCE(cpudata->prefcore_ranking);
-
 	if (prev_high != cur_high) {
 		WRITE_ONCE(cpudata->prefcore_ranking, cur_high);
 
@@ -776,6 +779,7 @@ static void amd_pstate_update_highest_perf(unsigned int cpu)
 			sched_set_itmt_core_prio((int)cur_high, cpu);
 	}
 
+free_cpufreq_put:
 	cpufreq_cpu_put(policy);
 }
 
