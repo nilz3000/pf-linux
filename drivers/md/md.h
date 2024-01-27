@@ -570,7 +570,7 @@ enum md_ro_state {
 	MD_MAX_STATE
 };
 
-static bool md_is_rdwr(struct mddev *mddev)
+static inline bool md_is_rdwr(struct mddev *mddev)
 {
 	return (mddev->ro == MD_RDWR);
 }
