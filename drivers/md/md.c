@@ -437,6 +437,10 @@ int mddev_suspend(struct mddev *mddev, bool interruptible)
 {
 	int err = 0;
 
+	/* Array is supended from dm_suspend() for dm-raid. */
+	if (!mddev->gendisk)
+		return 0;
+
 	/*
 	 * hold reconfig_mutex to wait for normal io will deadlock, because
 	 * other context can't update super_block, and normal io can rely on
@@ -488,6 +492,13 @@ EXPORT_SYMBOL_GPL(mddev_suspend);
 
 static void __mddev_resume(struct mddev *mddev, bool recovery_needed)
 {
+	/*
+	 * Array is supended from dm_suspend() and resumed from dm_resume() for
+	 * dm-raid.
+	 */
+	if (!mddev->gendisk)
+		return;
+
 	lockdep_assert_not_held(&mddev->reconfig_mutex);
 
 	mutex_lock(&mddev->suspend_mutex);
@@ -9382,12 +9393,17 @@ static void md_start_sync(struct work_struct *ws)
 	bool suspend = false;
 	char *name;
 
-	if (md_spares_need_change(mddev))
+	/*
+	 * If reshape is still in progress, spares won't be added or removed
+	 * from conf until reshape is done.
+	 */
+	if (mddev->reshape_position == MaxSector &&
+	    md_spares_need_change(mddev)) {
 		suspend = true;
+		mddev_suspend(mddev, false);
+	}
 
-	suspend ? mddev_suspend_and_lock_nointr(mddev) :
-		  mddev_lock_nointr(mddev);
-
+	mddev_lock_nointr(mddev);
 	if (!md_is_rdwr(mddev)) {
 		/*
 		 * On a read-only array we can:
