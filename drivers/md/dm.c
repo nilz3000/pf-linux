@@ -58,7 +58,6 @@ static DEFINE_IDR(_minor_idr);
 static DEFINE_SPINLOCK(_minor_lock);
 
 static void do_deferred_remove(struct work_struct *w);
-static int dm_wait_for_completion(struct mapped_device *md, unsigned int task_state);
 
 static DECLARE_WORK(deferred_remove_work, do_deferred_remove);
 
@@ -2496,8 +2495,6 @@ static void __dm_destroy(struct mapped_device *md, bool wait)
 	if (!dm_suspended_md(md)) {
 		dm_table_presuspend_targets(map);
 		set_bit(DMF_SUSPENDED, &md->flags);
-		if (wait)
-			dm_wait_for_completion(md, TASK_UNINTERRUPTIBLE);
 		set_bit(DMF_POST_SUSPENDING, &md->flags);
 		dm_table_postsuspend_targets(map);
 	}
