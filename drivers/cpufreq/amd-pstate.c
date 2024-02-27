@@ -473,6 +473,8 @@ static inline bool amd_pstate_sample(struct amd_cpudata *cpudata)
 static void amd_pstate_update(struct amd_cpudata *cpudata, u32 min_perf,
 			      u32 des_perf, u32 max_perf, bool fast_switch, int gov_flags)
 {
+	unsigned long max_freq;
+	struct cpufreq_policy *policy = cpufreq_cpu_get(cpudata->cpu);
 	u64 prev = READ_ONCE(cpudata->cppc_req_cached);
 	u32 nominal_perf = READ_ONCE(cpudata->nominal_perf);
 	u64 value = prev;
@@ -482,6 +484,9 @@ static void amd_pstate_update(struct amd_cpudata *cpudata, u32 min_perf,
 	max_perf = clamp_t(unsigned long, max_perf, cpudata->min_limit_perf,
 			cpudata->max_limit_perf);
 	des_perf = clamp_t(unsigned long, des_perf, min_perf, max_perf);
+
+	max_freq = READ_ONCE(cpudata->max_limit_freq);
+	policy->cur = div_u64(des_perf * max_freq, max_perf);
 
 	if ((cppc_state == AMD_PSTATE_GUIDED) && (gov_flags & CPUFREQ_GOV_DYNAMIC_SWITCHING)) {
 		min_perf = des_perf;
@@ -525,11 +530,18 @@ static int amd_pstate_verify(struct cpufreq_policy_data *policy)
 
 static int amd_pstate_update_min_max_limit(struct cpufreq_policy *policy)
 {
-	u32 max_limit_perf, min_limit_perf;
+	u32 max_limit_perf, min_limit_perf, lowest_perf;
 	struct amd_cpudata *cpudata = policy->driver_data;
 
 	max_limit_perf = div_u64(policy->max * cpudata->highest_perf, cpudata->max_freq);
 	min_limit_perf = div_u64(policy->min * cpudata->highest_perf, cpudata->max_freq);
+
+	lowest_perf = READ_ONCE(cpudata->lowest_perf);
+	if (min_limit_perf < lowest_perf)
+		min_limit_perf = lowest_perf;
+
+	if (max_limit_perf < min_limit_perf)
+		max_limit_perf = min_limit_perf;
 
 	WRITE_ONCE(cpudata->max_limit_perf, max_limit_perf);
 	WRITE_ONCE(cpudata->min_limit_perf, min_limit_perf);
@@ -601,10 +613,9 @@ static void amd_pstate_adjust_perf(unsigned int cpu,
 				   unsigned long capacity)
 {
 	unsigned long max_perf, min_perf, des_perf,
-		      cap_perf, lowest_nonlinear_perf, max_freq;
+		      cap_perf, lowest_nonlinear_perf;
 	struct cpufreq_policy *policy = cpufreq_cpu_get(cpu);
 	struct amd_cpudata *cpudata = policy->driver_data;
-	unsigned int target_freq;
 
 	if (policy->min != cpudata->min_limit_freq || policy->max != cpudata->max_limit_freq)
 		amd_pstate_update_min_max_limit(policy);
@@ -612,7 +623,6 @@ static void amd_pstate_adjust_perf(unsigned int cpu,
 
 	cap_perf = READ_ONCE(cpudata->highest_perf);
 	lowest_nonlinear_perf = READ_ONCE(cpudata->lowest_nonlinear_perf);
-	max_freq = READ_ONCE(cpudata->max_freq);
 
 	des_perf = cap_perf;
 	if (target_perf < capacity)
@@ -630,8 +640,6 @@ static void amd_pstate_adjust_perf(unsigned int cpu,
 		max_perf = min_perf;
 
 	des_perf = clamp_t(unsigned long, des_perf, min_perf, max_perf);
-	target_freq = div_u64(des_perf * max_freq, max_perf);
-	policy->cur = target_freq;
 
 	amd_pstate_update(cpudata, min_perf, des_perf, max_perf, true,
 			policy->governor->flags);
@@ -1552,6 +1560,12 @@ static void amd_pstate_epp_update_limit(struct cpufreq_policy *policy)
 	max_limit_perf = div_u64(policy->max * cpudata->highest_perf, cpudata->max_freq);
 	min_limit_perf = div_u64(policy->min * cpudata->highest_perf, cpudata->max_freq);
 
+	if (min_limit_perf < min_perf)
+		min_limit_perf = min_perf;
+
+	if (max_limit_perf < min_limit_perf)
+		max_limit_perf = min_limit_perf;
+
 	WRITE_ONCE(cpudata->max_limit_perf, max_limit_perf);
 	WRITE_ONCE(cpudata->min_limit_perf, min_limit_perf);
 
@@ -1613,6 +1627,12 @@ static int amd_pstate_epp_set_policy(struct cpufreq_policy *policy)
 	cpudata->policy = policy->policy;
 
 	amd_pstate_epp_update_limit(policy);
+
+	/*
+	 * policy->cur is never updated with the amd_pstate_epp driver, but it
+	 * is used as a stale frequency value. So, keep it within limits.
+	 */
+	policy->cur = policy->min;
 
 	return 0;
 }
