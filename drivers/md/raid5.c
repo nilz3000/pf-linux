@@ -763,6 +763,7 @@ enum stripe_result {
 	STRIPE_RETRY,
 	STRIPE_SCHEDULE_AND_RETRY,
 	STRIPE_FAIL,
+	STRIPE_WAIT_RESHAPE,
 };
 
 struct stripe_request_ctx {
@@ -5960,13 +5961,6 @@ out:
 	return ret;
 }
 
-static bool reshape_disabled(struct mddev *mddev)
-{
-	return !md_is_rdwr(mddev) ||
-	       test_bit(MD_RECOVERY_WAIT, &mddev->recovery) ||
-	       test_bit(MD_RECOVERY_FROZEN, &mddev->recovery);
-}
-
 static enum stripe_result make_stripe_request(struct mddev *mddev,
 		struct r5conf *conf, struct stripe_request_ctx *ctx,
 		sector_t logical_sector, struct bio *bi)
@@ -6079,11 +6073,10 @@ static enum stripe_result make_stripe_request(struct mddev *mddev,
 out_release:
 	raid5_release_stripe(sh);
 out:
-	if (ret == STRIPE_SCHEDULE_AND_RETRY && !mddev->gendisk &&
-	    reshape_disabled(mddev)) {
-		bi->bi_status = BLK_STS_IOERR;
-		ret = STRIPE_FAIL;
-		pr_err("dm-raid456: io failed across reshape position while reshape can't make progress");
+	if (ret == STRIPE_SCHEDULE_AND_RETRY && reshape_interrupted(mddev)) {
+		bi->bi_status = BLK_STS_RESOURCE;
+		ret = STRIPE_WAIT_RESHAPE;
+		pr_err_ratelimited("dm-raid456: io across reshape position while reshape can't make progress");
 	}
 	return ret;
 }
@@ -6206,7 +6199,7 @@ static bool raid5_make_request(struct mddev *mddev, struct bio * bi)
 	while (1) {
 		res = make_stripe_request(mddev, conf, &ctx, logical_sector,
 					  bi);
-		if (res == STRIPE_FAIL)
+		if (res == STRIPE_FAIL || res == STRIPE_WAIT_RESHAPE)
 			break;
 
 		if (res == STRIPE_RETRY)
@@ -6244,6 +6237,11 @@ static bool raid5_make_request(struct mddev *mddev, struct bio * bi)
 
 	if (rw == WRITE)
 		md_write_end(mddev);
+	if (res == STRIPE_WAIT_RESHAPE) {
+		md_free_cloned_bio(bi);
+		return false;
+	}
+
 	bio_endio(bi);
 	return true;
 }
