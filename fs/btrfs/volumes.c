@@ -1321,7 +1321,7 @@ static bool btrfs_skip_registration(struct btrfs_super_block *disk_super,
 	 * Do not skip device registration for mounted devices with matching
 	 * maj:min but different paths. Booting without initrd relies on
 	 * /dev/root initially, later replaced with the actual root device.
-	 * A successful scan ensures grub2-probe selects the correct device.
+	 * A successful scan ensures update-grub selects the correct device.
 	 */
 	list_for_each_entry(fs_devices, &fs_uuids, fs_list) {
 		struct btrfs_device *device;
@@ -1334,11 +1334,11 @@ static bool btrfs_skip_registration(struct btrfs_super_block *disk_super,
 		}
 
 		list_for_each_entry(device, &fs_devices->devices, dev_list) {
-			if (device->bdev && (device->bdev->bd_dev == devt) &&
-			    strcmp(device->name->str, path) != 0) {
+			if ((device->devt == devt) &&
+			    strcmp(device->name->str, path)) {
 				mutex_unlock(&fs_devices->device_list_mutex);
 
-				/* Do not skip registration. */
+				/* Do not skip registration */
 				return false;
 			}
 		}
