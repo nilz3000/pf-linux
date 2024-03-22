@@ -1362,7 +1362,7 @@ static noinline int btrfs_ioctl_snap_create_v2(struct file *file,
 	if (vol_args->flags & BTRFS_SUBVOL_RDONLY)
 		readonly = true;
 	if (vol_args->flags & BTRFS_SUBVOL_QGROUP_INHERIT) {
-		struct btrfs_fs_info *fs_info = inode_to_fs_info(file_inode(file));
+		struct btrfs_fs_info *fs_info = btrfs_sb(file_inode(file)->i_sb);
 
 		if (vol_args->size < sizeof(*inherit) ||
 		    vol_args->size > PAGE_SIZE) {
