@@ -1245,19 +1245,18 @@ int amdgpu_bo_get_metadata(struct amdgpu_bo *bo, void *buffer,
  * amdgpu_bo_move_notify - notification about a memory move
  * @bo: pointer to a buffer object
  * @evict: if this move is evicting the buffer from the graphics address space
- * @new_mem: new resource for backing the BO
  *
  * Marks the corresponding &amdgpu_bo buffer object as invalid, also performs
  * bookkeeping.
  * TTM driver callback which is called when ttm moves a buffer.
  */
-void amdgpu_bo_move_notify(struct ttm_buffer_object *bo,
-			   bool evict,
-			   struct ttm_resource *new_mem)
+void amdgpu_bo_move_notify(struct ttm_buffer_object *bo, bool evict)
 {
 	struct amdgpu_device *adev = amdgpu_ttm_adev(bo->bdev);
-	struct ttm_resource *old_mem = bo->resource;
 	struct amdgpu_bo *abo;
+
+	if (!amdgpu_bo_is_amdgpu_bo(bo))
+		return;
 
 	abo = ttm_to_amdgpu_bo(bo);
 	amdgpu_vm_bo_invalidate(adev, abo, evict);
@@ -1268,9 +1267,9 @@ void amdgpu_bo_move_notify(struct ttm_buffer_object *bo,
 	    bo->resource->mem_type != TTM_PL_SYSTEM)
 		dma_buf_move_notify(abo->tbo.base.dma_buf);
 
-	/* move_notify is called before move happens */
-	trace_amdgpu_bo_move(abo, new_mem ? new_mem->mem_type : -1,
-			     old_mem ? old_mem->mem_type : -1);
+	/* remember the eviction */
+	if (evict)
+		atomic64_inc(&adev->num_evictions);
 }
 
 void amdgpu_bo_get_memory(struct amdgpu_bo *bo,
